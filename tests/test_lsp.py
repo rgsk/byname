@@ -239,3 +239,101 @@ def test_semantic_tokens_cover_only_source_text(lsp):
     assert "_ds" not in seen and not any(w.startswith("_rec_") for w in seen)
     assert "variable" in seen["years"]  # the renamed local gets variable colouring
     assert "function" in seen["make"]
+
+
+def lines_of(res) -> list[tuple[str, int]]:
+    locs = res if isinstance(res, list) else [res]
+    out = []
+    for l in locs:
+        uri = l.get("targetUri") or l["uri"]
+        rng = l.get("targetSelectionRange") or l["range"]
+        out.append((Path(uri_path(uri)).name, rng["start"]["line"]))
+    return out
+
+
+def uri_path(uri: str) -> str:
+    from byname.lsp import uri_to_path
+    return str(uri_to_path(uri))
+
+
+def test_ctrl_click_shorthand_goes_to_local(lsp):
+    # `name` in `make(name=, age=)` stands for the local `name`; definition jumps there
+    c, root, uri = lsp
+    res = c.request("textDocument/definition", {"textDocument": {"uri": uri}, "position": pos(MAIN, "name=,")})
+    assert lines_of(res) == [("main.pyn", MAIN.splitlines().index('name, age = "Rahul", 26'))]
+
+
+def test_go_to_declaration_shorthand_goes_to_parameter(lsp):
+    # the same click via Go to Declaration reaches make's parameter in people.pyn
+    c, root, uri = lsp
+    assert c.init["capabilities"]["declarationProvider"] is True
+    res = c.request("textDocument/declaration", {"textDocument": {"uri": uri}, "position": pos(MAIN, "name=,")})
+    assert lines_of(res) == [("people.pyn", 0)]
+
+
+def test_completion_inside_pattern_offers_fields(lsp):
+    # typing `gr` as a pattern item suggests the record's matching field; `greeting` replaces exactly `gr`
+    c, root, uri = lsp
+    text = MAIN + "(name=, gr) = res\n"
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 10}, "contentChanges": [{"text": text}]}})
+    p = pos(text, "gr) = res", delta=2)
+    res = c.request("textDocument/completion", {"textDocument": {"uri": uri}, "position": p})
+    items = res["items"] if isinstance(res, dict) else res
+    labels = {i["label"] for i in items}
+    assert labels == {"greeting"}  # filtered by the typed prefix; no keywords like `and`/`assert`
+    greeting = next(i for i in items if i["label"] == "greeting")
+    if "textEdit" in greeting:
+        rng = greeting["textEdit"].get("range") or greeting["textEdit"]["replace"]
+        assert snippet(text, rng) == "gr"
+    c.diags.pop(uri, None)
+    diags = c.wait_diags(uri)
+    on_line = [d for d in diags if d["range"]["start"]["line"] == p["line"]]
+    assert [d["message"] for d in on_line] == ["pattern item 'gr' needs '='"]  # ours only, no checker echo
+
+
+def complete(c, uri, text, marker="|"):
+    at = text.index(marker)
+    text = text.replace(marker, "")
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 100 + at}, "contentChanges": [{"text": text}]}})
+    p = {"line": text.count("\n", 0, at), "character": at - (text.rfind("\n", 0, at) + 1)}
+    res = c.request("textDocument/completion", {"textDocument": {"uri": uri}, "position": p})
+    return text, (res["items"] if isinstance(res, dict) else res)
+
+
+def test_completion_in_empty_pattern_slot(lsp):
+    # like TS `const { | } = fn()`: every field, nothing else; already-listed fields left out
+    c, root, uri = lsp
+    text, items = complete(c, uri, MAIN + "(name=, |) = res\n")
+    assert {i["label"] for i in items} == {"age", "greeting"}
+
+
+def test_completion_on_first_pattern_item(lsp):
+    # `(gree|) = res` is still plain Python, but it's where a pattern starts
+    c, root, uri = lsp
+    text, items = complete(c, uri, MAIN + "(gree|) = res\n")
+    assert [i["label"] for i in items] == ["greeting"]
+    assert snippet(text, items[0]["textEdit"]["range"]) == "gree"
+
+
+def test_comma_trigger_only_inside_patterns(lsp):
+    # `,` pops completion in a pattern; in an ordinary call it returns nothing instead of noise
+    c, root, uri = lsp
+    assert "," in c.init["capabilities"]["completionProvider"]["triggerCharacters"]
+    text = MAIN + "print(1,)\n"
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 500}, "contentChanges": [{"text": text}]}})
+    p = pos(text, "print(1,", delta=8)
+    ctx = {"triggerKind": 2, "triggerCharacter": ","}
+    res = c.request("textDocument/completion", {"textDocument": {"uri": uri}, "position": p, "context": ctx})
+    assert res["items"] == []
+
+
+def test_temporary_completion_text_leaves_no_diagnostics(lsp):
+    # the placeholder text is never shown to the user as errors
+    c, root, uri = lsp
+    complete(c, uri, MAIN + "(name=, |) = res\n")
+    c.diags.pop(uri, None)
+    time.sleep(1.5)
+    while not c.q.empty():
+        c.handle(c.q.get())
+    for d in c.diags.get(uri, []):
+        assert "__byname" not in d["message"]

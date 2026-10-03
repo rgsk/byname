@@ -24,9 +24,10 @@ class SourceMap:
         # marks that cover real source text (zero-width ones only map body -> source)
         self.marks = [(m, i) for i, e in enumerate(edits) for m in e.marks if m.oe > m.os]
 
-    def to_body(self, o: int, end: bool = False) -> int:
+    def to_body(self, o: int, end: bool = False, touch: bool = False) -> int:
+        """touch: a cursor right after a marked word still counts as on it (completion at `na|`)."""
         for m, i in self.marks:
-            if m.os <= o < m.oe or (end and m.os < o <= m.oe):
+            if m.os <= o < m.oe or ((end or touch) and m.os < o <= m.oe):
                 return self.gstart[i] + m.ts + min(o - m.os, m.te - m.ts)
         delta = 0
         for e, gs in zip(self.edits, self.gstart):
@@ -105,8 +106,9 @@ class Translation:
     def __init__(self, source: str):
         self.source = source
         self.error: Exception | None = None
+        self.problems: list[dict] = []  # byname diagnostics from tolerant translation
         try:
-            r = transform(source)
+            r = transform(source, tolerant=True)
             body, prelude, edits = r.body, r.prelude, r.edits
         except Exception as e:  # mid-edit code: send it raw; the checker reports the syntax error
             self.error = e
@@ -117,9 +119,13 @@ class Translation:
         self.hidden = body[: self.at] + prelude + body[self.at :]
         self.src_lines = LineIndex(source)
         self.hid_lines = LineIndex(self.hidden)
+        if self.error is None:
+            for s, e, msg in r.problems:
+                rng = {"start": self.src_lines.position(s), "end": self.src_lines.position(e)}
+                self.problems.append({"range": rng, "severity": 1, "source": "byname", "message": msg})
 
-    def _to_hidden(self, off: int, end: bool) -> int:
-        g = self.map.to_body(off, end)
+    def _to_hidden(self, off: int, end: bool, touch: bool = False) -> int:
+        g = self.map.to_body(off, end, touch)
         return g + self.plen if g >= self.at and self.plen else g
 
     def _from_hidden(self, h: int, end: bool) -> tuple[int, Hit] | None:
@@ -130,7 +136,7 @@ class Translation:
 
     def position_to_hidden(self, pos: dict) -> dict:
         off = self.src_lines.offset(pos["line"], pos["character"])
-        return self.hid_lines.position(self._to_hidden(off, False))
+        return self.hid_lines.position(self._to_hidden(off, False, touch=True))
 
     def range_to_hidden(self, r: dict) -> dict:
         s = self.src_lines.offset(r["start"]["line"], r["start"]["character"])
@@ -139,6 +145,16 @@ class Translation:
             "start": self.hid_lines.position(self._to_hidden(s, False)),
             "end": self.hid_lines.position(self._to_hidden(e, e > s)),
         }
+
+    def value_position(self, pos: dict) -> dict | None:
+        """On the `x` of a shorthand `x=`: the hidden position of its implicit value `x`, else None.
+        Go-to-definition uses it to jump to the local variable instead of the parameter/field."""
+        off = self.src_lines.offset(pos["line"], pos["character"])
+        for e, gs in zip(self.map.edits, self.map.gstart):
+            if e.kind == "shorthand" and e.display[0] <= off <= e.display[1]:
+                g = gs + min(off - e.display[0], len(e.text))
+                return self.hid_lines.position(g + self.plen if g >= self.at and self.plen else g)
+        return None
 
     def position_from_hidden(self, pos: dict) -> dict | None:
         hit = self._from_hidden(self.hid_lines.offset(pos["line"], pos["character"]), False)

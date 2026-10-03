@@ -38,10 +38,9 @@ print(who)
 
 def test_hidden_has_prelude_and_translation():
     t = Translation(SRC)
-    assert t.hidden.splitlines()[:2] == [
-        "from typing import NamedTuple as _NT",
-        "class _rec_name__age[T0, T1](_NT): name: T0; age: T1",
-    ]
+    lines = t.hidden.splitlines()
+    assert lines[0] == "from typing import NamedTuple as _NT"
+    assert lines[2].startswith("class _rec_name__age[T0, T1](_NT): name: T0; age: T1")
     assert "_ds = make(name=\"R\", age=1); who = _ds.name; age = _ds.age" in t.hidden
 
 
@@ -49,10 +48,10 @@ def test_hidden_has_prelude_and_translation():
 
 
 def test_plain_code_maps_past_prelude():
-    # `print` is untouched source; it moves down by the 2 prelude lines
+    # `print` is untouched source; it moves down by the 3 prelude lines
     t = Translation(SRC)
     h = t.position_to_hidden(at(SRC, "print"))
-    assert h["line"] == at(SRC, "print")["line"] + 2
+    assert h["line"] == at(SRC, "print")["line"] + 3
     assert t.hidden.splitlines()[h["line"]][h["character"] :].startswith("print")
 
 
@@ -143,3 +142,24 @@ def test_utf16_columns():
     p16 = {"line": 0, "character": p["character"] + 1}
     h = t.position_to_hidden(p16)
     assert h == p16
+
+
+def test_value_position_points_at_expanded_shorthand():
+    # `x` in `fn(x=)` -> the generated value `x` in `fn(x=x)`, so go-to-definition finds the local
+    src = "fn(x=, y=1)\n"
+    t = Translation(src)
+    vp = t.value_position(at(src, "x"))
+    assert t.hidden.splitlines()[vp["line"]][vp["character"] - 2 : vp["character"] + 1] == "x=x"
+    assert t.value_position(at(src, "y")) is None  # explicit value: nothing implicit to jump to
+    assert t.value_position(at(src, "fn")) is None
+
+
+def test_cursor_after_half_typed_item_maps_after_attribute():
+    # completion at `ag|` must land right after `_ds.ag`, not at the start of the replaced pattern
+    src = "(name=, ag) = r\n"
+    t = Translation(src)
+    p = at(src, "ag")
+    p = {"line": 0, "character": p["character"] + 2}
+    h = t.position_to_hidden(p)
+    assert t.hidden.splitlines()[0][: h["character"]].endswith("_ds.ag")
+    assert t.problems[0]["message"] == "pattern item 'ag' needs '='"

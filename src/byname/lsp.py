@@ -19,12 +19,15 @@ from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-from .srcmap import Translation
-from .transform import DS
+from .srcmap import LineIndex, Translation
+from .transform import DS, REPR, pattern_slot
 
 DEFAULT_CHECKER = ["basedpyright-langserver", "--stdio"]
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache"}
 DROP = object()  # a result element whose position fell inside generated-only code
+PLACEHOLDER = "__byname_slot"  # stands in for an empty pattern item while completing
+EXTRA_TRIGGERS = ["(", ","]  # pop completion in pattern slots, like TS does after `{` / `,`
+SKIP_KINDS = {2, 3}  # CompletionItemKind Method, Function: not fields
 
 
 # --- JSON-RPC framing ---------------------------------------------------------
@@ -100,7 +103,7 @@ def pretty(text: str) -> str:
 
 
 def is_generated_name(name) -> bool:
-    return isinstance(name, str) and (name in (DS, "_NT") or name.startswith("_rec_"))
+    return isinstance(name, str) and (name in (DS, REPR, "_NT") or name.startswith("_rec_"))
 
 
 def is_range(v) -> bool:
@@ -125,7 +128,8 @@ def resolve_checker(cmd: list[str]) -> list[str]:
 class Doc:
     def __init__(self, uri: str, text: str, version: int | None):
         self.uri = uri
-        self.version = version
+        self.version = version  # the editor's version
+        self.sent: int | None = None  # version we sent to the checker (we number them ourselves)
         self.tr = Translation(text)
 
 
@@ -143,6 +147,9 @@ class Proxy:
         self.pending: dict = {}  # editor request id -> (method, Doc)
         self.server_requests: dict = {}  # checker request id -> configuration items
         self.last_completion: Doc | None = None
+        self.counter = 0  # checker-side document versions
+        self.temp_versions: set[int] = set()  # versions holding a completion-only temporary text
+        self.own_triggers: set[str] = set()
 
     # paths --------------------------------------------------------------
 
@@ -176,7 +183,7 @@ class Proxy:
             return None
         if versions := self.docs.get(pyn):
             for d in reversed(versions):
-                if version is None or d.version == version:
+                if version is None or d.sent == version:
                     return d
             return versions[-1]
         try:
@@ -331,16 +338,18 @@ class Proxy:
 
         if method == "textDocument/didOpen":
             doc = Doc(uri, td["text"], td.get("version"))
+            doc.sent = self.next_version()
             self.docs[path] = [doc]
             self.write_shadow(path, td["text"])
-            self.server.send({**msg, "params": {"textDocument": {**td, "uri": shadow, "languageId": "python", "text": doc.tr.hidden}}})
+            sent = {"uri": shadow, "languageId": "python", "version": doc.sent, "text": doc.tr.hidden}
+            self.server.send({**msg, "params": {"textDocument": sent}})
             return
         if method == "textDocument/didChange":
             text = params["contentChanges"][-1]["text"]  # we advertise full sync
             doc = Doc(uri, text, td.get("version"))
             self.docs.setdefault(path, []).append(doc)
             del self.docs[path][:-5]
-            self.server.send({**msg, "params": {"textDocument": {**td, "uri": shadow}, "contentChanges": [{"text": doc.tr.hidden}]}})
+            self.send_text(path, doc.tr.hidden, doc)
             return
         if method == "textDocument/didSave":
             versions = self.docs.get(path)
@@ -357,7 +366,78 @@ class Proxy:
         doc = versions[-1] if versions else Doc(uri, path.read_text(encoding="utf-8"), None)
         if mid is not None:
             self.pending[mid] = (method, doc)
-        self.server.send({**msg, "params": self.to_checker(params, doc)})
+        if method == "textDocument/completion" and self.complete_slot(msg, path, doc):
+            return
+        mapped = self.to_checker(params, doc)
+        # on shorthand `x=`: definition -> the local x (value half); declaration -> the parameter/field
+        if method == "textDocument/definition" and (vp := doc.tr.value_position(params["position"])):
+            mapped["position"] = vp
+        elif method == "textDocument/declaration":
+            msg = {**msg, "method": "textDocument/definition"}
+        self.server.send({**msg, "params": mapped})
+
+    def next_version(self) -> int:
+        self.counter += 1
+        return self.counter
+
+    def send_text(self, path: Path, hidden: str, doc: Doc | None) -> None:
+        """didChange to the checker; doc=None marks a temporary completion-only text."""
+        v = self.next_version()
+        if doc is None:
+            self.temp_versions.add(v)
+        else:
+            doc.sent = v
+        td = {"uri": self.shadow_path(path).as_uri(), "version": v}
+        self.server.send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {"textDocument": td, "contentChanges": [{"text": hidden}]}})
+
+    def complete_slot(self, msg: dict, path: Path, doc: Doc) -> bool:
+        """Completion at a field position of `(...) = expr`. The checker is shown a temporary text
+        where the slot reads `_ds.<typed>` and asked there; the real text is restored on response."""
+        params, mid = msg["params"], msg["id"]
+        tr = doc.tr
+        cursor = tr.src_lines.offset(params["position"]["line"], params["position"]["character"])
+        slot = pattern_slot(tr.source, cursor)
+        ctx = params.get("context") or {}
+        if slot is None:
+            if ctx.get("triggerKind") == 2 and ctx.get("triggerCharacter") in self.own_triggers:
+                self.client.send({"jsonrpc": "2.0", "id": mid, "result": {"isIncomplete": False, "items": []}})
+                return True  # our extra trigger outside a pattern: nothing to offer
+            return False
+        ws, we, close, listed = slot
+        src = tr.source
+        word = src[ws:cursor] or PLACEHOLDER
+        temp = src[:ws] + word + src[we:]
+        close += len(word) - (we - ws)
+        temp = temp[:close] + ", __byname_kw=" + temp[close:]  # makes `(x) = y` a pattern too
+        ttr = Translation(temp)
+        if ttr.error is not None:
+            return False
+        h = ttr._to_hidden(ws + len(word), False, touch=True)
+        hidden = ttr.hidden
+        if word == PLACEHOLDER:  # leave `_ds.` with nothing after it: complete every field
+            hidden, h = hidden[: h - len(word)] + hidden[h:], h - len(word)
+        self.send_text(path, hidden, None)
+        hpos = LineIndex(hidden).position(h)
+        rng = {"start": tr.src_lines.position(ws), "end": tr.src_lines.position(we)}
+        self.pending[mid] = ("slot", (path, doc, rng, set(listed)))
+        sent = {"textDocument": {"uri": self.shadow_path(path).as_uri()}, "position": hpos}
+        self.server.send({**msg, "params": sent})
+        return True
+
+    def finish_slot(self, result, path: Path, doc: Doc, rng: dict, listed: set[str]) -> dict:
+        latest = self.docs.get(path, [doc])[-1]
+        self.send_text(path, latest.tr.hidden, latest)  # restore the real text
+        items = result.get("items", []) if isinstance(result, dict) else (result or [])
+        out = []
+        for it in items:
+            label = it.get("label", "")
+            if label.startswith("_") or label in listed or it.get("kind") in SKIP_KINDS:
+                continue
+            it = {k: v for k, v in it.items() if k not in ("textEdit", "additionalTextEdits", "data")}
+            it["textEdit"] = {"range": rng, "newText": it.get("insertText") or label}
+            it.pop("insertText", None)
+            out.append(it)
+        return {"isIncomplete": False, "items": out}
 
     def watched(self, change: dict) -> dict:
         uri = change.get("uri")
@@ -402,14 +482,23 @@ class Proxy:
 
         if method is None:  # response to an editor request
             method_doc = self.pending.pop(mid, None)
+            if method_doc and method_doc[0] == "slot":
+                path, doc, rng, listed = method_doc[1]
+                self.client.send({**msg, "result": self.finish_slot(msg.get("result"), path, doc, rng, listed)})
+                return
             if method_doc and "result" in msg and msg["result"] is not None:
                 req, doc = method_doc
                 if req == "initialize":
                     caps = msg["result"].setdefault("capabilities", {})
                     caps["textDocumentSync"] = {"openClose": True, "change": 1, "save": {"includeText": False}}
+                    caps["declarationProvider"] = True  # served as definition on the keyword half of `x=`
                     if stp := caps.get("semanticTokensProvider"):
                         stp["full"] = True  # we remap whole token lists; no delta support
                     caps.pop("notebookDocumentSync", None)
+                    cp = caps.setdefault("completionProvider", {})
+                    have = cp.setdefault("triggerCharacters", [])
+                    self.own_triggers = {c for c in EXTRA_TRIGGERS if c not in have}
+                    have.extend(sorted(self.own_triggers))
                 elif req.startswith("textDocument/semanticTokens"):
                     msg = {**msg, "result": {"data": remap_tokens(msg["result"].get("data", []), doc)}}
                 else:
@@ -430,23 +519,33 @@ class Proxy:
 
     def diagnostics(self, msg: dict) -> dict | None:
         params = msg["params"]
+        if params.get("version") in self.temp_versions:
+            return None  # computed on a completion-only temporary text
         doc = self.doc_for_shadow(params["uri"], params.get("version"))
         if doc is None:
             return msg
         if uri_to_path(doc.uri) not in self.docs:
             return None  # closed .pyn: its shadow's diagnostics have nowhere to go
-        out = []
+        out = list(doc.tr.problems)
+        flagged = {(p["range"]["start"]["line"], p["range"]["start"]["character"]) for p in out}
         for d in params.get("diagnostics", []):
             r = doc.tr.range_from_hidden(d["range"], display=True)
             if r is None:
                 continue
+            if (r["start"]["line"], r["start"]["character"]) in flagged:
+                continue  # half-typed pattern item: our message says it; drop the checker's echo
             d = {**d, "range": r, "message": pretty(d.get("message", ""))}
             if "relatedInformation" in d:
                 d["relatedInformation"] = self.to_editor(d["relatedInformation"], None)
             out.append(d)
         if doc.tr.error is not None:
             out.append(error_diagnostic(doc.tr.error))
-        return {**msg, "params": {**params, "uri": doc.uri, "diagnostics": out}}
+        params = {**params, "uri": doc.uri, "diagnostics": out}
+        if doc.version is not None:
+            params["version"] = doc.version
+        else:
+            params.pop("version", None)
+        return {**msg, "params": params}
 
     # run ----------------------------------------------------------------
 

@@ -160,7 +160,7 @@ assert (a, p_) == (12.0, 14.0)
 # ============================================================================
 # NOT SUPPORTED (yet) - each of these is a SyntaxError
 # ============================================================================
-# (user=(name=,)) = nested            nested destructuring patterns
+# (user=(name=)) = nested            nested destructuring patterns
 # for (name=, age=) in rows: ...       destructuring in for-loop targets; destructure in the body instead
 # (name=) = {"name": "x"}             dicts: destructuring reads attributes, not keys
 # (_private=1)                        record fields can't start with "_" (NamedTuple rule)

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from byname import to_code, to_python, transform
+from byname.transform import pattern_slot
 
 
 def compile_pyn(src):
@@ -36,14 +37,21 @@ def test_record_literal_becomes_generic_namedtuple():
     # a bare paren group of keywords is a record; the class goes in the prelude
     r = transform("def f():\n    return (name=, age=)\n")
     assert r.body == "def f():\n    return _rec_name__age(name=name, age=age)\n"
-    assert r.prelude == (
-        "from typing import NamedTuple as _NT\n"
-        "class _rec_name__age[T0, T1](_NT): name: T0; age: T1\n"
-    )
+    assert r.prelude.splitlines()[-1] == "class _rec_name__age[T0, T1](_NT): name: T0; age: T1; __repr__ = _byname_repr"
 
 
 def test_record_with_explicit_values():
     assert transform("x = (a=1, b=y)\n").body == "x = _rec_a__b(a=1, b=y)\n"
+
+
+def test_record_prints_like_its_literal():
+    # repr mirrors the syntax that built it, nesting included
+    ns = {}
+    src = "name, age = 'Rahul', 26\nr = (name=, age=)\nn = (user=(name=), ok=True)\n"
+    exec(compile_pyn(src), ns)
+    assert repr(ns["r"]) == "(name='Rahul', age=26)"
+    assert repr(ns["n"]) == "(user=(name='Rahul'), ok=True)"
+    assert repr(ns["r"]._replace(age=27)) == "(name='Rahul', age=27)"  # still a record after _replace
 
 
 def test_records_with_same_fields_share_one_class():
@@ -58,7 +66,7 @@ def test_destructure_binds_fields_by_name():
 
 
 def test_destructure_keeps_trailing_comment_and_indent():
-    src = "def g():\n    (a=,) = f()  # note\n"
+    src = "def g():\n    (a=) = f()  # note\n"
     assert transform(src).body == "def g():\n    _ds = f(); a = _ds.a  # note\n"
 
 
@@ -92,7 +100,7 @@ def test_destructure_rhs_can_itself_use_shorthand():
 
 
 def test_destructure_rhs_spanning_lines():
-    src = "(a=,) = fn(\n    x=,\n)\nz = 1\n"
+    src = "(a=) = fn(\n    x=,\n)\nz = 1\n"
     assert transform(src).body == "_ds = fn(\n    x=x,\n); a = _ds.a\nz = 1\n"
 
 
@@ -131,7 +139,7 @@ def test_stdlib_is_untouched():
 
 def test_body_keeps_line_count():
     # tracebacks and editor positions rely on line N of .pyn being line N of the body
-    src = "x = 1\n(a=, b=) = (a=1, b=2)\ndef f():\n    return (q=,)\n"
+    src = "x = 1\n(a=, b=) = (a=1, b=2)\ndef f():\n    return (q=)\n"
     r = transform(src)
     assert r.body.count("\n") == src.count("\n")
 
@@ -141,9 +149,58 @@ def test_body_keeps_line_count():
 
 def test_destructure_target_must_be_assignable():
     # `1` and `f()` can't be assigned to; nested patterns aren't supported yet
-    for src in ["(a=1) = f()\n", "(a=g()) = f()\n", "(a=(b=,)) = f()\n"]:
+    for src in ["(a=1) = f()\n", "(a=g()) = f()\n", "(a=(b=)) = f()\n"]:
         with pytest.raises(SyntaxError, match="cannot bind field 'a'"):
             transform(src)
+
+
+def test_bare_name_in_pattern_is_an_error_when_running():
+    # `(name=, age) = r` is a half-written pattern; running it says what's missing
+    with pytest.raises(SyntaxError, match="'age' needs '='"):
+        transform("(name=, age) = r\n")
+
+
+def test_bare_names_without_any_field_stay_tuple_unpacking():
+    # `(a, b) = r` is ordinary Python; only patterns with at least one `x=` are byname's
+    assert transform("(a, b) = r\n").body == "(a, b) = r\n"
+
+
+def test_tolerant_mode_turns_half_typed_item_into_attribute_access():
+    # editor-only: `ag` becomes `_ds.ag`, so the checker completes field names there
+    r = transform("(name=, ag) = r\n", tolerant=True)
+    assert r.body == "_ds = r; name = _ds.name; _ds.ag\n"
+    assert r.problems == [(8, 10, "pattern item 'ag' needs '='")]
+
+
+@pytest.mark.parametrize(
+    "src, expected",
+    [
+        ("(greeting=greet, |) = r\n", ("", ["greeting"])),          # empty slot after a comma
+        ("(gree|) = r\n", ("gree", [])),                           # first item: plain Python so far
+        ("(age=, gr|) = r\n", ("gr", ["age"])),                     # bare name being typed
+        ("(gre|eting=g) = r\n", ("greeting", [])),                  # renaming the field of an item
+    ],
+)
+def test_pattern_slot_finds_field_positions(src, expected):
+    at = src.index("|")
+    src = src.replace("|", "")
+    ws, we, close, listed = pattern_slot(src, at)
+    assert (src[ws:we], listed) == expected
+    assert src[close] == ")"
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "(a=, b=x|) = r\n",  # on the target side of `=`
+        "fn(a=, |)\n",       # a call, not a pattern
+        "(a=, |)\n",         # a record literal, not a pattern
+        "x = (a=, |) = r\n", # not at statement start
+    ],
+)
+def test_pattern_slot_ignores_non_field_positions(src):
+    at = src.index("|")
+    assert pattern_slot(src.replace("|", ""), at) is None
 
 
 def test_underscore_field_rejected():

@@ -21,6 +21,11 @@ import tokenize
 from dataclasses import dataclass, field
 
 DS = "_ds"
+REPR = "_byname_repr"
+PRELUDE = (
+    "from typing import NamedTuple as _NT\n"
+    f"def {REPR}(self) -> str: return '(' + ', '.join(f'{{k}}={{v!r}}' for k, v in zip(self._fields, self)) + ')'\n"
+)
 STMT_START = {tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT}
 
 
@@ -42,6 +47,7 @@ class Edit:
     text: str
     display: tuple[int, int]  # source span to show diagnostics on generated text
     marks: list[Mark] = field(default_factory=list)
+    kind: str = ""  # "shorthand": the value half of `x=`; display is the `x` the user wrote
 
 
 @dataclass
@@ -49,6 +55,7 @@ class Result:
     prelude: str
     body: str
     edits: list[Edit] = field(default_factory=list)
+    problems: list[tuple[int, int, str]] = field(default_factory=list)  # (start, end, message), tolerant mode
 
 
 def record_class(fields: tuple[str, ...]) -> str:
@@ -58,10 +65,12 @@ def record_class(fields: tuple[str, ...]) -> str:
 def record_def(fields: tuple[str, ...]) -> str:
     params = ", ".join(f"T{i}" for i in range(len(fields)))
     body = "; ".join(f"{f}: T{i}" for i, f in enumerate(fields))
-    return f"class {record_class(fields)}[{params}](_NT): {body}\n"
+    return f"class {record_class(fields)}[{params}](_NT): {body}; __repr__ = {REPR}\n"
 
 
-def transform(src: str, path: str = "<pyn>") -> Result:
+def transform(src: str, path: str = "<pyn>", tolerant: bool = False) -> Result:
+    """tolerant (editor only): a half-typed pattern item like `na` in `(name=, na) = r` becomes
+    `_ds.na` instead of an error, so the checker can complete field names there."""
     toks = [
         t
         for t in tokenize.generate_tokens(io.StringIO(src).readline)
@@ -115,6 +124,7 @@ def transform(src: str, path: str = "<pyn>") -> Result:
 
     edits: list[Edit] = []
     records: dict[tuple[str, ...], None] = {}  # ordered set
+    problems: list[tuple[int, int, str]] = []
 
     def span(a: int, b: int | None = None) -> tuple[int, int]:
         return off(toks[a].start), off(toks[a if b is None else b].end)
@@ -123,7 +133,7 @@ def transform(src: str, path: str = "<pyn>") -> Result:
         for it in its:
             if is_short(it):
                 at = off(toks[it[1]].end)
-                edits.append(Edit(at, at, toks[it[0]].string, span(it[0])))
+                edits.append(Edit(at, at, toks[it[0]].string, span(it[0]), kind="shorthand"))
 
     for i, t in enumerate(toks):
         if not (t.type == tokenize.OP and t.string == "("):
@@ -141,17 +151,30 @@ def transform(src: str, path: str = "<pyn>") -> Result:
             expand_shorthand(its)
             continue
 
-        if not its or not all(is_kw(it) for it in its):
-            continue  # ordinary parenthesised expression / tuple / genexp
-
-        fields = tuple(toks[it[0]].string for it in its)
+        if not its:
+            continue
         close = pair[i]
         at_stmt_start = prev is None or prev.type in STMT_START or prev.string == ";"
-        nxt = toks[close + 1]
-        if at_stmt_start and nxt.string == "=":
-            # (field=) binds local `field`; (field=target) binds `target`
+        is_pattern = at_stmt_start and toks[close + 1].string == "="
+        kw = [is_kw(it) for it in its]
+        bare = [len(it) == 1 and is_name(toks[it[0]]) for it in its]
+        if not all(kw):
+            # a pattern with some `field=` items and some bare names: half-typed, or a mistake
+            if not (is_pattern and any(kw) and all(k or b for k, b in zip(kw, bare))):
+                continue  # ordinary parenthesised expression / tuple / genexp
+            name = toks[its[bare.index(True)][0]]
+            if not tolerant:
+                raise err(f"pattern item {name.string!r} needs '=': write {name.string}= or {name.string}=target", name)
+
+        fields = tuple(toks[it[0]].string for it in its)
+        if is_pattern:
+            # (field=) binds local `field`; (field=target) binds `target`; bare `field` (tolerant) binds nothing
             targets = []
-            for it in its:
+            for it, b in zip(its, bare):
+                if b:
+                    problems.append((*span(it[0]), f"pattern item {toks[it[0]].string!r} needs '='"))
+                    targets.append(None)
+                    continue
                 if is_short(it):
                     targets.append(toks[it[0]].string)
                     continue
@@ -167,6 +190,11 @@ def transform(src: str, path: str = "<pyn>") -> Result:
             binds, marks = "", []
             for it, f, tg in zip(its, fields, targets):
                 binds += "; "
+                if tg is None:  # half-typed item: just the attribute access, for completion
+                    binds += f"{DS}."
+                    marks.append(Mark(len(binds), len(binds) + len(f), *span(it[0])))
+                    binds += f
+                    continue
                 ts = len(binds)
                 binds += tg
                 if is_short(it):  # target is implicit: insertion point right after `field=`
@@ -201,8 +229,75 @@ def transform(src: str, path: str = "<pyn>") -> Result:
 
     prelude = ""
     if records:
-        prelude = "from typing import NamedTuple as _NT\n" + "".join(record_def(f) for f in records)
-    return Result(prelude, body, edits)
+        prelude = PRELUDE + "".join(record_def(f) for f in records)
+    return Result(prelude, body, edits, problems)
+
+
+def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:
+    """If offset `at` is a field position in a destructuring pattern `(...) = expr` (an empty item,
+    or the field name being typed): (word_start, word_end, close_paren, fields_already_listed).
+    Used for completion; also matches `(x|) = y`, which is plain Python but a pattern in the making."""
+    try:
+        toks = [
+            t
+            for t in tokenize.generate_tokens(io.StringIO(src).readline)
+            if t.type not in (tokenize.COMMENT, tokenize.NL)
+        ]
+    except (tokenize.TokenError, SyntaxError):
+        return None
+    starts = [0]
+    for line in src.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+
+    def off(rc: tuple[int, int]) -> int:
+        return starts[rc[0] - 1] + rc[1]
+
+    pair: dict[int, int] = {}
+    stack: list[int] = []
+    for i, t in enumerate(toks):
+        if t.type == tokenize.OP and t.string in "([{":
+            stack.append(i)
+        elif t.type == tokenize.OP and t.string in ")]}" and stack:
+            pair[stack.pop()] = i
+
+    for i, t in enumerate(toks):
+        if t.string != "(" or i not in pair:
+            continue
+        prev = toks[i - 1] if i else None
+        close = pair[i]
+        if not (prev is None or prev.type in STMT_START or prev.string == ";"):
+            continue
+        if close + 1 >= len(toks) or toks[close + 1].string != "=":
+            continue
+        lo, hi = off(t.end), off(toks[close].start)
+        if not lo <= at <= hi:
+            continue
+        items, start, cur, j = [], lo, [], i + 1  # (start, end, token indices) per top-level item
+        while j < close:
+            if toks[j].string == ",":
+                items.append((start, off(toks[j].start), cur))
+                start, cur = off(toks[j].end), []
+            else:
+                cur.append(j)
+                if j in pair:
+                    if off(toks[j].start) < at <= off(toks[pair[j]].start):
+                        return None  # inside a nested bracket
+                    cur.extend(range(j + 1, pair[j] + 1))
+                    j = pair[j]
+            j += 1
+        items.append((start, hi, cur))
+        listed = [toks[it[0]].string for _, _, it in items if len(it) >= 2 and toks[it[1]].string == "="]
+        for s, e, it in items:
+            if not s <= at <= e:
+                continue
+            if not it:
+                return at, at, hi, listed
+            name = toks[it[0]]
+            on_name = name.type == tokenize.NAME and off(name.start) <= at <= off(name.end)
+            if on_name and (len(it) == 1 or toks[it[1]].string == "="):
+                return off(name.start), off(name.end), hi, [f for f in listed if f != name.string]
+            return None
+    return None
 
 
 def is_target(text: str) -> bool:
