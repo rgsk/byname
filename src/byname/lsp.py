@@ -29,6 +29,7 @@ DROP = object()  # a result element whose position fell inside generated-only co
 WRITE_OUTPUT = "byname.server.writeOutput"  # executeCommand: write <file>.pyn.py now (Alt+C)
 PLACEHOLDER = "__byname_slot"  # stands in for an empty pattern item while completing
 EXTRA_TRIGGERS = ["(", ","]  # pop completion in pattern slots, like TS does after `{` / `,`
+FIX_ALL_KIND, ORGANIZE_KIND = "source.fixAll", "source.organizeImports"  # ruff code actions, served by us
 SKIP_KINDS = {2, 3}  # CompletionItemKind Method, Function: not fields
 
 
@@ -65,6 +66,16 @@ class Writer:
 
 
 # --- helpers -----------------------------------------------------------------
+
+
+def source_kind(params: dict) -> str | None:
+    """FIX_ALL_KIND / ORGANIZE_KIND if this codeAction request asks only for one of them (as
+    codeActionsOnSave does), else None: the checker's quick fixes go through as before."""
+    only = params.get("context", {}).get("only") or []
+    for kind in (FIX_ALL_KIND, ORGANIZE_KIND):
+        if only and all(k == kind or k.startswith(kind + ".") for k in only):
+            return kind
+    return None
 
 
 def uri_to_path(uri: str) -> Path:
@@ -384,6 +395,9 @@ class Proxy:
         if method == "textDocument/formatting":
             self.client.send(self.format(mid, path, doc))
             return
+        if method == "textDocument/codeAction" and (kind := source_kind(params)):
+            self.client.send(self.fix(mid, path, doc, kind))
+            return
         mapped = self.to_checker(params, doc)
         # on shorthand `x=`: definition -> the local x (value half); declaration -> the parameter/field
         if method == "textDocument/definition" and (vp := doc.tr.value_position(params["position"])):
@@ -469,6 +483,22 @@ class Proxy:
         whole = {"start": {"line": 0, "character": 0}, "end": doc.tr.src_lines.position(len(src))}
         return {"jsonrpc": "2.0", "id": mid, "result": [{"range": whole, "newText": out}]}
 
+    def fix(self, mid, path: Path, doc: Doc, kind: str) -> dict:
+        """source.fixAll / source.organizeImports (e.g. codeActionsOnSave): Ruff's safe fixes, see fix.py."""
+        from .fix import ORGANIZE, FixError, fix_pyn
+
+        src = doc.tr.source
+        try:
+            out = fix_pyn(src, str(path), cwd=self.root, select=ORGANIZE if kind == ORGANIZE_KIND else None)
+        except (FixError, ValueError):
+            out = src  # mid-edit code: offer nothing rather than fail the save
+        if out == src:
+            return {"jsonrpc": "2.0", "id": mid, "result": []}
+        whole = {"start": {"line": 0, "character": 0}, "end": doc.tr.src_lines.position(len(src))}
+        title = "byname: organize imports (ruff)" if kind == ORGANIZE_KIND else "byname: fix all (ruff)"
+        edit = {"changes": {doc.uri: [{"range": whole, "newText": out}]}}
+        return {"jsonrpc": "2.0", "id": mid, "result": [{"title": title, "kind": kind + ".byname", "edit": edit}]}
+
     def write_output(self, path: Path, doc: Doc) -> str | None:
         """Write <file>.pyn.py next to the .pyn. Returns an error message, or None on success.
         A .pyn that doesn't translate leaves the previous output alone."""
@@ -546,6 +576,12 @@ class Proxy:
                     caps["textDocumentSync"] = {"openClose": True, "change": 1, "save": {"includeText": False}}
                     caps["declarationProvider"] = True  # served as definition on the keyword half of `x=`
                     caps["documentFormattingProvider"] = True  # ruff via stand-ins, served by us
+                    cap = caps.get("codeActionProvider")  # add ruff's source actions, served by us
+                    kinds = cap.get("codeActionKinds", []) if isinstance(cap, dict) else (["quickfix"] if cap else [])
+                    caps["codeActionProvider"] = {
+                        **(cap if isinstance(cap, dict) else {}),
+                        "codeActionKinds": [*kinds, *(k for k in (FIX_ALL_KIND, ORGANIZE_KIND) if k not in kinds)],
+                    }
                     ecp = caps.setdefault("executeCommandProvider", {"commands": []})
                     ecp["commands"] = [*ecp.get("commands", []), WRITE_OUTPUT]
                     if stp := caps.get("semanticTokensProvider"):

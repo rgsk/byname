@@ -67,6 +67,8 @@ paste `<name>.pyn.py` into the judge.
 - **Every output file gets the marker line and the `# ---- <name>.pyn ----` divider,** even with no generated header, so every output file has the same shape.
 - **Output-on-save lives in the server's didSave handler,** not the extension, so it works in any editor. It's off by default: projects that run `.pyn` through byname (like llm would) don't need output files. A `byname build --out-dir` (like `tsc --outDir`) is only for publishing to places without byname, and isn't built.
 - **`outputStripMain` is off by default** and on in `cp` only.
+- **Lint fixes run on the translation, not the formatter's stand-ins.** Stand-ins turn `f(os=)` into `f(os=__p)`, so `import os` would look unused and F401 would delete it. On the translation every use is real. A fix is applied only if each of its edits maps back to source text that matches the hidden text exactly; anything touching generated code or the prelude is dropped whole. It loops until nothing changes, because fixes unlock others (`List[int]` → `list[int]` leaves `from typing import List` unused). Only `safe` fixes, like Ruff's own on-save.
+- **The server answers `textDocument/codeAction` itself only when `only` is all `source.fixAll*` or all `source.organizeImports*`** (what `codeActionsOnSave` sends); other code-action requests still go to the checker. Organize imports is `--select I001`, as in the Ruff extension.
 - **Output files use portable record classes** (`class R(_NT):` with `object` fields, Python 3.6+), because judges' PyPy is 3.10 and rejects `class R[T0](...)`. The checker's translation keeps the 3.12 generic classes, since that's where field types come from. Both are 3 lines per record, so line numbers match.
 
 ## Parked designs (agreed, not built)
@@ -119,6 +121,7 @@ fn(age= ?? 18)                # in a call
 | `src/byname/lsp.py` | the proxy: rewrites URIs and positions, shadow files, config injection, semantic tokens, slot completion, formatting, output writing, the `byname.server.writeOutput` command |
 | `src/byname/tools.py` | `byname tool`: project mirror plus output remapping |
 | `src/byname/fmt.py` | Ruff formatting through stand-ins (`__p`, `__P`) |
+| `src/byname/fix.py` | Ruff's safe lint fixes (`source.fixAll`, `source.organizeImports`, `byname fix`) via the translation |
 | `src/byname/output.py` | `<name>.pyn.py` rendering: marker, divider, `drop_main` |
 | `src/byname/hook.py` | import hook for `.pyn` |
 | `src/byname/cli.py` | `run`, `show`, `format`, `tool`, `lsp` |

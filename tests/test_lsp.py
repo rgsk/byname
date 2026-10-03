@@ -350,6 +350,21 @@ def test_format_document(lsp):
     assert "res = make(name=, age=)\n" in edits[0]["newText"]
 
 
+
+def test_fix_all_on_save(lsp):
+    # codeActionsOnSave: source.fixAll is answered by byname with ruff's safe fixes, as for a .py
+    c, root, uri = lsp
+    assert "source.fixAll" in c.init["capabilities"]["codeActionProvider"]["codeActionKinds"]
+    text = "from typing import List\n\n\ndef f(xs: List[int]):\n    n = len(xs)\n    return (n=, xs=)\n"
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 901}, "contentChanges": [{"text": text}]}})
+    rng = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}
+    actions = c.request("textDocument/codeAction", {"textDocument": {"uri": uri}, "range": rng, "context": {"diagnostics": [], "only": ["source.fixAll"]}})
+    assert [a["kind"] for a in actions] == ["source.fixAll.byname"]
+    new = actions[0]["edit"]["changes"][uri][0]["newText"]
+    assert new == "\n\ndef f(xs: list[int]):\n    n = len(xs)\n    return (n=, xs=)\n"
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 902}, "contentChanges": [{"text": MAIN}]}})
+
+
 SOLUTION = """\
 def solve(*, x: int):
     return (x=, double=x * 2)

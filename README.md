@@ -76,6 +76,7 @@ uv add --dev basedpyright ruff mypy        # editor checker, formatter, linters 
 | `byname run file.pyn [args]` | run a `.pyn` script. Tracebacks point at `.pyn` lines |
 | `byname show [--no-main] file.pyn` | print the plain-Python translation (`--no-main` drops the `if __name__ == "__main__":` block) |
 | `byname format [--check] files…` | format `.pyn` files with Ruff |
+| `byname fix [--check] files…` | apply Ruff's safe lint fixes to `.pyn` files (what `source.fixAll` does on save) |
 | `byname tool <cmd> [args] file.pyn` | run Ruff, mypy or basedpyright on `.pyn` files, with positions mapped back |
 | `byname lsp [-- checker cmd]` | language server (see below) |
 
@@ -95,6 +96,7 @@ position back. Hidden translations live in `~/.cache/byname/`, never in your pro
 - **Navigation and editing:** hover, completion, go to definition, rename, outline, and colours from semantic highlighting.
 - **Errors** shown where you wrote the code.
 - **Formatting:** Format Document and format-on-save.
+- **Ruff fixes on save:** `source.fixAll` and `source.organizeImports` in `editor.codeActionsOnSave` work as in `.py` files, e.g. `List[int]` becomes `list[int]` and the unused `typing` import goes.
 - **Readable record types:** hover and error messages show `(name: str, age: int)`, not the generated class name.
 - **Field suggestions inside a pattern,** like TS's `const { | } = fn()`. `(name=, |) = make(...)` offers the remaining fields, and typing `,` inside a pattern opens the list.
 - **Ctrl+click on a shorthand name** (`name` in `fn(name=)`) goes to the **local variable**. *Go to Declaration* goes to the parameter.
@@ -142,6 +144,9 @@ then swaps them back:
 - **Width:** the stand-ins add a few characters per shorthand, so a line right at your length limit can wrap one step early.
 - **Reserved names:** files that use the names `__p` or `__P` are refused.
 - **Keeping a line as written:** `# fmt: skip` works the same as in `.py` files.
+
+`byname fix` runs `ruff check` on the translation, so `f(os=)` counts as a use of `os`, and applies
+the safe fixes whose edits fall on code you wrote. Fixes that would touch generated code are skipped.
 
 ## Output files
 

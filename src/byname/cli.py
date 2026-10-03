@@ -3,7 +3,8 @@ byname show [--no-main] FILE     print the plain-Python translation (--no-main: 
                                  `if __name__ == "__main__":` block, e.g. for LeetCode)
 byname lsp [-- checker cmd...]   language server (default checker: basedpyright-langserver --stdio)
 byname tool <cmd> [args...]      run ruff / mypy / basedpyright on .pyn files (positions mapped back)
-byname format [--check] FILE...  ruff format .pyn files in place"""
+byname format [--check] FILE...  ruff format .pyn files in place
+byname fix [--check] FILE...     apply ruff's safe lint fixes to .pyn files in place (as source.fixAll on save)"""
 
 import sys
 import types
@@ -46,10 +47,33 @@ def format_files(args: list[str]) -> int:
     return 1 if check and changed else 0
 
 
+def fix_files(args: list[str]) -> int:
+    from .fix import FixError, fix_pyn
+
+    check = "--check" in args
+    changed = 0
+    for name in (a for a in args if a != "--check"):
+        path = Path(name)
+        src = path.read_text()
+        try:
+            out = fix_pyn(src, str(path))
+        except FixError as e:
+            print(f"{name}: {e}", file=sys.stderr)
+            return 2
+        if out != src:
+            changed += 1
+            print(f"{'would fix' if check else 'fixed'} {name}")
+            if not check:
+                path.write_text(out)
+    return 1 if check and changed else 0
+
+
 def main() -> None:
     args = sys.argv[1:]
     if args[:1] == ["format"]:
         sys.exit(format_files(args[1:]))
+    if args[:1] == ["fix"]:
+        sys.exit(fix_files(args[1:]))
     if args[:1] == ["tool"]:
         from .tools import main as tool_main
 
