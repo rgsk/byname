@@ -40,7 +40,7 @@ def test_hidden_has_prelude_and_translation():
     t = Translation(SRC)
     lines = t.hidden.splitlines()
     assert lines[0] == "from typing import NamedTuple as _NT"
-    assert lines[2].startswith("class _rec_name__age[T0, T1](_NT): name: T0; age: T1")
+    assert lines[2] == "class _rec_name__age[T0, T1](_NT):"
     assert "_ds = make(name=\"R\", age=1); who = _ds.name; age = _ds.age" in t.hidden
 
 
@@ -48,10 +48,10 @@ def test_hidden_has_prelude_and_translation():
 
 
 def test_plain_code_maps_past_prelude():
-    # `print` is untouched source; it moves down by the 3 prelude lines
+    # `print` is untouched source; it moves down by however many lines the prelude has
     t = Translation(SRC)
     h = t.position_to_hidden(at(SRC, "print"))
-    assert h["line"] == at(SRC, "print")["line"] + 3
+    assert h["line"] == at(SRC, "print")["line"] + t.hidden[: t.at + t.plen].count("\n")
     assert t.hidden.splitlines()[h["line"]][h["character"] :].startswith("print")
 
 

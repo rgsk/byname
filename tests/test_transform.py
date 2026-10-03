@@ -37,7 +37,11 @@ def test_record_literal_becomes_generic_namedtuple():
     # a bare paren group of keywords is a record; the class goes in the prelude
     r = transform("def f():\n    return (name=, age=)\n")
     assert r.body == "def f():\n    return _rec_name__age(name=name, age=age)\n"
-    assert r.prelude.splitlines()[-1] == "class _rec_name__age[T0, T1](_NT): name: T0; age: T1; __repr__ = _byname_repr"
+    assert r.prelude.splitlines()[-3:] == [
+        "class _rec_name__age[T0, T1](_NT):",
+        "    name: T0; age: T1",
+        "    def __repr__(self) -> str: return _byname_repr(self)",
+    ]
 
 
 def test_record_with_explicit_values():

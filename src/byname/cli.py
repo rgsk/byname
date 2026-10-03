@@ -1,6 +1,7 @@
 """byname run file.pyn [args...]   run a .pyn script
 byname show file.pyn             print the plain-Python translation
-byname lsp [-- checker cmd...]   language server (default checker: basedpyright-langserver --stdio)"""
+byname lsp [-- checker cmd...]   language server (default checker: basedpyright-langserver --stdio)
+byname tool <cmd> [args...]      run ruff / mypy / basedpyright on .pyn files (positions mapped back)"""
 
 import sys
 import types
@@ -23,6 +24,10 @@ def run(path: Path, argv: list[str]) -> None:
 
 def main() -> None:
     args = sys.argv[1:]
+    if args[:1] == ["tool"]:
+        from .tools import main as tool_main
+
+        sys.exit(tool_main(args[1:]))
     if args[:1] == ["lsp"]:
         from .lsp import main as lsp_main
 

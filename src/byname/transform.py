@@ -65,7 +65,12 @@ def record_class(fields: tuple[str, ...]) -> str:
 def record_def(fields: tuple[str, ...]) -> str:
     params = ", ".join(f"T{i}" for i in range(len(fields)))
     body = "; ".join(f"{f}: T{i}" for i, f in enumerate(fields))
-    return f"class {record_class(fields)}[{params}](_NT): {body}; __repr__ = {REPR}\n"
+    # a real method, not `__repr__ = helper`: mypy rejects assignments in a NamedTuple body
+    return (
+        f"class {record_class(fields)}[{params}](_NT):\n"
+        f"    {body}\n"
+        f"    def __repr__(self) -> str: return {REPR}(self)\n"
+    )
 
 
 def transform(src: str, path: str = "<pyn>", tolerant: bool = False) -> Result:
