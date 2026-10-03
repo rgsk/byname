@@ -163,6 +163,7 @@ class Proxy:
         self.counter = 0  # checker-side document versions
         self.temp_versions: set[int] = set()  # versions holding a completion-only temporary text
         self.own_triggers: set[str] = set()
+        self.field_type: int | None = None  # semantic token type for record field names ("property")
         self.output_on_save = False  # byname.outputOnSave: write <file>.pyn.py on every save
         self.strip_main = False  # byname.outputStripMain: drop `if __name__ == "__main__":` from it
 
@@ -586,13 +587,15 @@ class Proxy:
                     ecp["commands"] = [*ecp.get("commands", []), WRITE_OUTPUT]
                     if stp := caps.get("semanticTokensProvider"):
                         stp["full"] = True  # we remap whole token lists; no delta support
+                        types = stp.get("legend", {}).get("tokenTypes", [])
+                        self.field_type = types.index("property") if "property" in types else None
                     caps.pop("notebookDocumentSync", None)
                     cp = caps.setdefault("completionProvider", {})
                     have = cp.setdefault("triggerCharacters", [])
                     self.own_triggers = {c for c in EXTRA_TRIGGERS if c not in have}
                     have.extend(sorted(self.own_triggers))
                 elif req.startswith("textDocument/semanticTokens"):
-                    msg = {**msg, "result": {"data": remap_tokens(msg["result"].get("data", []), doc)}}
+                    msg = {**msg, "result": {"data": remap_tokens(msg["result"].get("data", []), doc, self.field_type)}}
                 else:
                     result = self.to_editor(msg["result"], doc)
                     msg = {**msg, "result": None if result is DROP else result}
@@ -654,9 +657,10 @@ class Proxy:
         self.proc.terminate()
 
 
-def remap_tokens(data: list[int], doc: Doc | None) -> list[int]:
+def remap_tokens(data: list[int], doc: Doc | None, field_type: int | None = None) -> list[int]:
     """Semantic tokens come as 5-int groups, positions relative to the previous token.
-    Decode, map each token to the source, drop those on generated text, re-encode."""
+    Decode, map each token to the source, drop those on generated text, re-encode.
+    field_type: the legend index to give record field names (the checker gives them none)."""
     if doc is None:
         return data
     tokens, line, col = [], 0, 0
@@ -670,6 +674,10 @@ def remap_tokens(data: list[int], doc: Doc | None) -> list[int]:
             continue
         s, e = r["start"], r["end"]
         tokens.append((s["line"], s["character"], e["character"] - s["character"], typ, mods))
+    if field_type is not None:
+        for fs, fe in doc.tr.fields:
+            p = doc.tr.src_lines.position(fs)
+            tokens.append((p["line"], p["character"], fe - fs, field_type, 0))
     out, pl, pc, last_end = [], 0, 0, (-1, -1)
     for ln, c, length, typ, mods in sorted(tokens):
         if (ln, c) < last_end:

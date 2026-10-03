@@ -58,6 +58,7 @@ class Result:
     edits: list[Edit] = field(default_factory=list)
     problems: list[tuple[int, int, str]] = field(default_factory=list)  # (start, end, message), tolerant mode
     standins: list[tuple[int, int, str]] = field(default_factory=list)  # (start, end, text): plain-Python stand-ins, for formatting
+    fields: list[tuple[int, int]] = field(default_factory=list)  # source spans of record field names, for highlighting
 
 
 def record_class(fields: tuple[str, ...]) -> str:
@@ -138,6 +139,7 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
     records: dict[tuple[str, ...], None] = {}  # ordered set
     problems: list[tuple[int, int, str]] = []
     standins: list[tuple[int, int, str]] = []
+    field_spans: list[tuple[int, int]] = []  # every record field name: in records, patterns and record types
 
     def span(a: int, b: int | None = None) -> tuple[int, int]:
         return off(toks[a].start), off(toks[a if b is None else b].end)
@@ -187,6 +189,7 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
             standins.append((group[1] - 1, group[1], "]"))
             for it in its:
                 edits.append(Edit(off(toks[it[0]].start), off(toks[it[2]].start), "", span(it[0])))
+                field_spans.append(span(it[0]))
             continue
         at_stmt_start = prev is None or prev.type in STMT_START or prev.string == ";"
         is_pattern = at_stmt_start and toks[close + 1].string == "="
@@ -248,6 +251,7 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
                     standins.append((*span(it[1]), ":" + (SHORT if is_short(it) else "")))
             edits.append(Edit(*group, DS, group))
             edits.append(Edit(stmt_end, stmt_end, binds, group, marks))
+            field_spans.extend(span(it[0]) for it, b in zip(its, bare) if not b)
             continue
 
         for it in its:
@@ -257,6 +261,7 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
         if len(set(fields)) != len(fields):
             raise err(f"duplicate record field in {fields}", t)
         records[fields] = None
+        field_spans.extend(span(it[0]) for it in its)
         at = off(t.start)
         edits.append(Edit(at, at, record_class(fields), (at, at + 1)))
         standins.append((at, at, PAT))
@@ -272,7 +277,7 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
     if records:
         prelude = PRELUDE + "".join(record_def(f, portable) for f in records)
     standins.sort()
-    return Result(prelude, body, edits, problems, standins)
+    return Result(prelude, body, edits, problems, standins, sorted(field_spans))
 
 
 def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:

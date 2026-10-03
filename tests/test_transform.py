@@ -324,3 +324,11 @@ def test_record_type_errors():
     assert to_python("f = (lambda x: x)\n") == "f = (lambda x: x)\n"
     assert to_python("def g(a: int, b: str): ...\n") == "def g(a: int, b: str): ...\n"
     assert to_python("if (n := 3): ...\n") == "if (n := 3): ...\n"
+
+
+def test_field_spans_cover_every_field_name():
+    # the editor colours these as properties, in all three forms; shorthand call arguments aren't fields
+    src = "def f(*, n: int) -> (h: int, d: int):\n    return (h=n, d=n)\n\n\n(h=, d=x) = f(n=)\n"
+    r = transform(src)
+    assert [src[s:e] for s, e in r.fields] == ["h", "d", "h", "d", "h", "d"]
+    assert all(src[s - 1] == "(" or src[s - 2] == "," for s, _ in r.fields)

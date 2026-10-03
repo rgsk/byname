@@ -239,6 +239,7 @@ def test_semantic_tokens_cover_only_source_text(lsp):
     assert "_ds" not in seen and not any(w.startswith("_rec_") for w in seen)
     assert "variable" in seen["years"]  # the renamed local gets variable colouring
     assert "function" in seen["make"]
+    assert "property" in seen["greeting"]  # record field names, which the checker leaves uncoloured
 
 
 def lines_of(res) -> list[tuple[str, int]]:
