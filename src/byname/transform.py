@@ -64,18 +64,21 @@ def record_class(fields: tuple[str, ...]) -> str:
     return "_rec_" + "__".join(fields)
 
 
-def record_def(fields: tuple[str, ...]) -> str:
+def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
+    """portable: plain `class R(_NT):` with `object` fields, which runs on Python 3.6+ (judges run PyPy 3.10).
+    Otherwise a 3.12 generic class, so checkers infer each field's type."""
     params = ", ".join(f"T{i}" for i in range(len(fields)))
-    body = "; ".join(f"{f}: T{i}" for i, f in enumerate(fields))
+    body = "; ".join(f"{f}: {'object' if portable else f'T{i}'}" for i, f in enumerate(fields))
+    head = record_class(fields) if portable else f"{record_class(fields)}[{params}]"
     # a real method, not `__repr__ = helper`: mypy rejects assignments in a NamedTuple body
     return (
-        f"class {record_class(fields)}[{params}](_NT):\n"
+        f"class {head}(_NT):\n"
         f"    {body}\n"
         f"    def __repr__(self) -> str: return {REPR}(self)\n"
     )
 
 
-def transform(src: str, path: str = "<pyn>", tolerant: bool = False) -> Result:
+def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: bool = False) -> Result:
     """tolerant (editor only): a half-typed pattern item like `na` in `(name=, na) = r` becomes
     `_ds.na` instead of an error, so the checker can complete field names there."""
     toks = [
@@ -245,7 +248,7 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False) -> Result:
 
     prelude = ""
     if records:
-        prelude = PRELUDE + "".join(record_def(f) for f in records)
+        prelude = PRELUDE + "".join(record_def(f, portable) for f in records)
     standins.sort()
     return Result(prelude, body, edits, problems, standins)
 
@@ -360,11 +363,11 @@ def prelude_offset(body: str) -> int:
     return sum(len(line) for line in lines[: tree.body[k - 1].end_lineno])
 
 
-def to_python(src: str, path: str = "<pyn>", divider: str = "") -> str:
+def to_python(src: str, path: str = "<pyn>", divider: str = "", portable: bool = False) -> str:
     """Single plain-Python file (prelude inlined after docstring/__future__). For reading and type-checking.
     divider: a line put between the generated prelude and the user's code (always, even with no prelude,
-    so every output file has the same shape)."""
-    r = transform(src, path)
+    so every output file has the same shape). portable: record classes that run on Python 3.6+ (see record_def)."""
+    r = transform(src, path, portable=portable)
     at = prelude_offset(r.body)
     gap = divider + "\n" if divider else ""
     return r.body[:at] + r.prelude + gap + r.body[at:]

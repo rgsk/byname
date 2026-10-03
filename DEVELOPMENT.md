@@ -13,6 +13,7 @@ solutions there are written as `.pyn`.
 | `pyproject.toml` | byname as an editable path dependency (`../../projects/byname`), so byname changes apply straight away. Dev dependencies: ruff, mypy, basedpyright |
 | `python_main.pyn` | **LeetCode template**: `class Solution` plus an `if __name__ == "__main__":` block of local examples |
 | `ip_main.pyn` | **CSES / stdin template**: `set_io()` reads `input.txt` next to the file when run locally, then module-level I/O |
+| `cf_main.pyn` | **Codeforces template**: same shape as `ip_main.pyn`, shares `input.txt` |
 | `.vscode/settings.json` | `byname.outputOnSave` and `byname.outputStripMain` both on, so each save writes `<name>.pyn.py` without `__main__` |
 | `.vscode/tasks.json` | `check: current file` (Alt+L): runs ruff, mypy and basedpyright on `.pyn` through `byname tool` |
 | `.gitignore` | `*.pyn.py` (generated) and `.venv/` |
@@ -35,7 +36,10 @@ paste `<name>.pyn.py` into the judge.
 |---|---|
 | LeetCode | Two Sum and 3Sum **accepted**. The output **with records** works, so LeetCode's Python handles the 3.12 generic-class syntax |
 | LeetCode | Runs your file as `__main__`: prints from the `if __name__` block showed up in Stdout. That's why `outputStripMain` exists |
-| CSES | Weird Algorithm and Chessboard and Queens **accepted**. Neither used records, so **a record header on CSES is still untested** |
+| CSES | Weird Algorithm and Chessboard and Queens **accepted** (no records) |
+| CSES (PyPy3) | Nested Ranges Check with a 3.12 generic record header: **runtime error on every test**, a SyntaxError. That led to portable output headers |
+| Codeforces | 2269A with records: **accepted** on Python 3.13; **compilation error** on PyPy 3.10 (`class R[T0](_NT)`), before portable headers |
+| CSES (PyPy3), Codeforces (PyPy 3.10) | With portable headers, Nested Ranges Check and 2269A, both with records: **accepted** |
 
 ## Measured facts (don't re-measure)
 
@@ -63,6 +67,7 @@ paste `<name>.pyn.py` into the judge.
 - **Every output file gets the marker line and the `# ---- <name>.pyn ----` divider,** even with no generated header, so every output file has the same shape.
 - **Output-on-save lives in the server's didSave handler,** not the extension, so it works in any editor. It's off by default: projects that run `.pyn` through byname (like llm would) don't need output files. A `byname build --out-dir` (like `tsc --outDir`) is only for publishing to places without byname, and isn't built.
 - **`outputStripMain` is off by default** and on in `cp` only.
+- **Output files use portable record classes** (`class R(_NT):` with `object` fields, Python 3.6+), because judges' PyPy is 3.10 and rejects `class R[T0](...)`. The checker's translation keeps the 3.12 generic classes, since that's where field types come from. Both are 3 lines per record, so line numbers match.
 
 ## Parked designs (agreed, not built)
 
@@ -103,7 +108,6 @@ fn(age= ?? 18)                # in a call
 - **byname's `pyproject.toml` sets Ruff `line-length = 320`,** but the existing `.py` files haven't been reformatted under it. They change as they're saved.
 - **A global Ruff setup** across projects (the 320 line length and so on) is still to be decided. There's no `~/.config/ruff`.
 - **Display of field names containing `__`** is wrong, because `pretty()` splits the class name at `__`.
-- **The record header on CSES is untested** (see above).
 - **VS Code was launched with llm's `VIRTUAL_ENV`** in its environment, which made uv warn in tasks. The byname and `cp` tasks pin `VIRTUAL_ENV` to the workspace venv.
 
 ## Code map

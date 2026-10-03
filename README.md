@@ -156,7 +156,8 @@ from typing import NamedTuple as _NT
 ...                                    # your code, translated
 ```
 
-The generated header uses Python 3.12 syntax for generic classes.
+The generated header uses plain `NamedTuple` classes, so output files run on Python 3.6+ (judges often run
+PyPy 3.10). The checker's hidden translation uses Python 3.12 generic classes instead, for field types.
 
 ## How it works
 

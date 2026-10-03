@@ -1,3 +1,4 @@
+import ast
 import subprocess
 import sys
 import sysconfig
@@ -273,3 +274,18 @@ def test_divider_marks_where_the_users_code_starts():
     lines = out.splitlines()
     assert lines[lines.index("# ---- f.pyn ----") + 1] == "# my note"
     assert to_python("x = 1\n", divider="# ---- f.pyn ----") == "# ---- f.pyn ----\nx = 1\n"  # no header: divider anyway
+
+
+def test_output_files_run_on_old_pythons():
+    from byname.output import render
+
+    # judges run older Pythons (Codeforces/CSES PyPy is 3.10), which can't parse `class R[T0](...)`.
+    # Output files get plain NamedTuple classes; the checker's translation keeps the generic ones.
+    src = "def f(*, n: int):\n    return (n=, sq=n * n)\n(sq=) = f(n=3)\nprint(sq)\n"
+    out = render(src, Path("f.pyn"))
+    assert "class _rec_n__sq(_NT):\n    n: object; sq: object\n" in out
+    ast.parse(out, feature_version=(3, 8))
+    assert "class _rec_n__sq[T0, T1](_NT):" in to_python(src)
+    with pytest.raises(SyntaxError):
+        ast.parse(to_python(src), feature_version=(3, 8))
+    assert out.count("\n") == to_python(src, divider="# ---- f.pyn ----").count("\n") + 1  # same lines, plus the marker
