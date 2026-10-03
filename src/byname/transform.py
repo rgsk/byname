@@ -360,8 +360,11 @@ def prelude_offset(body: str) -> int:
     return sum(len(line) for line in lines[: tree.body[k - 1].end_lineno])
 
 
-def to_python(src: str, path: str = "<pyn>") -> str:
-    """Single plain-Python file (prelude inlined after docstring/__future__). For reading and type-checking."""
+def to_python(src: str, path: str = "<pyn>", divider: str = "") -> str:
+    """Single plain-Python file (prelude inlined after docstring/__future__). For reading and type-checking.
+    divider: a line put between the generated prelude and the user's code (always, even with no prelude,
+    so every output file has the same shape)."""
     r = transform(src, path)
     at = prelude_offset(r.body)
-    return r.body[:at] + r.prelude + r.body[at:]
+    gap = divider + "\n" if divider else ""
+    return r.body[:at] + r.prelude + gap + r.body[at:]

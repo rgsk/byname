@@ -1,5 +1,6 @@
 """byname run file.pyn [args...]   run a .pyn script
-byname show file.pyn             print the plain-Python translation
+byname show [--no-main] FILE     print the plain-Python translation (--no-main: drop the
+                                 `if __name__ == "__main__":` block, e.g. for LeetCode)
 byname lsp [-- checker cmd...]   language server (default checker: basedpyright-langserver --stdio)
 byname tool <cmd> [args...]      run ruff / mypy / basedpyright on .pyn files (positions mapped back)
 byname format [--check] FILE...  ruff format .pyn files in place"""
@@ -9,7 +10,8 @@ import types
 from pathlib import Path
 
 from .hook import install
-from .transform import to_code, to_python
+from .output import render
+from .transform import to_code
 
 
 def run(path: Path, argv: list[str]) -> None:
@@ -57,10 +59,13 @@ def main() -> None:
 
         lsp_main(args[1:])
         return
+    no_main = args[:1] == ["show"] and "--no-main" in args
+    if no_main:
+        args.remove("--no-main")
     if len(args) < 2 or args[0] not in ("run", "show"):
         sys.exit(__doc__)
     cmd, path = args[0], Path(args[1])
     if cmd == "show":
-        print(to_python(path.read_text(), str(path)), end="")
+        print(render(path.read_text(), path, strip_main=no_main), end="")
     else:
         run(path, args[2:])

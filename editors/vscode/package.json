@@ -2,7 +2,7 @@
   "name": "byname",
   "displayName": "byname (.pyn)",
   "description": "Language support for .pyn files: bind-by-name Python, type-checked through basedpyright.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "rgsk",
   "private": true,
   "license": "MIT",
@@ -14,7 +14,8 @@
   ],
   "main": "./extension.js",
   "activationEvents": [
-    "onLanguage:pyn"
+    "onLanguage:pyn",
+    "onCommand:byname.writeOutput"
   ],
   "contributes": {
     "languages": [
@@ -55,6 +56,16 @@
           },
           "default": [],
           "description": "Type checker language server behind byname, e.g. [\"pyrefly\", \"lsp\"]. Default: basedpyright-langserver --stdio."
+        },
+        "byname.outputOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "On save, write the plain-Python translation next to the file as <name>.pyn.py (e.g. for pasting into a judge)."
+        },
+        "byname.outputStripMain": {
+          "type": "boolean",
+          "default": false,
+          "description": "Leave the `if __name__ == \"__main__\":` block out of <name>.pyn.py (LeetCode runs it otherwise)."
         }
       }
     },
@@ -62,7 +73,13 @@
       "[pyn]": {
         "editor.defaultFormatter": "rgsk.byname"
       }
-    }
+    },
+    "commands": [
+      {
+        "command": "byname.writeOutput",
+        "title": "byname: Write Python Output (<name>.pyn.py)"
+      }
+    ]
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"

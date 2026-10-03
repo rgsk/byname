@@ -348,3 +348,68 @@ def test_format_document(lsp):
     edits = c.request("textDocument/formatting", {"textDocument": {"uri": uri}, "options": {"tabSize": 4, "insertSpaces": True}})
     assert len(edits) == 1
     assert "res = make(name=, age=)\n" in edits[0]["newText"]
+
+
+SOLUTION = """\
+def solve(*, x: int):
+    return (x=, double=x * 2)
+
+
+if __name__ == "__main__":
+    print(solve(x=2))
+"""
+
+
+def start(tmp_path, **opts):
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "sol.pyn").write_text(SOLUTION)
+    c = Client(root, tmp_path / "cache")
+    caps = {"workspace": {"configuration": True}}
+    c.request("initialize", {"processId": None, "rootUri": root.as_uri(), "capabilities": caps, "initializationOptions": opts})
+    c.send({"method": "initialized", "params": {}})
+    uri = (root / "sol.pyn").as_uri()
+    c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": uri, "languageId": "pyn", "version": 1, "text": SOLUTION}}})
+    return c, root, uri
+
+
+def save(c, uri, text, version):
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": version}, "contentChanges": [{"text": text}]}})
+    c.send({"method": "textDocument/didSave", "params": {"textDocument": {"uri": uri}}})
+    c.request("textDocument/hover", {"textDocument": {"uri": uri}, "position": {"line": 0, "character": 0}})  # round trip: save handled
+
+
+def test_output_on_save_off_by_default(tmp_path):
+    c, root, uri = start(tmp_path)
+    save(c, uri, SOLUTION, 2)
+    assert not (root / "sol.pyn.py").exists()
+    c.close()
+
+
+def test_output_on_save_writes_next_to_file_keeping_main(tmp_path):
+    # outputOnSave alone: the full translation, local runner included
+    c, root, uri = start(tmp_path, outputOnSave=True)
+    save(c, uri, SOLUTION, 2)
+    out = (root / "sol.pyn.py").read_text()
+    assert out.startswith("# pyn output of sol.pyn")
+    assert "# ---- sol.pyn ----" in out and '__name__ == "__main__"' in out
+    c.close()
+
+
+def test_output_strip_main_and_broken_save_keeps_old_output(tmp_path):
+    c, root, uri = start(tmp_path, outputOnSave=True, outputStripMain=True)
+    save(c, uri, SOLUTION, 2)
+    good = (root / "sol.pyn.py").read_text()
+    assert "__main__" not in good and "_rec_x__double(x=x, double=x * 2)" in good
+    save(c, uri, SOLUTION + "(oops=, nope) = solve(x=1)\n", 3)  # half-written pattern: an error
+    assert (root / "sol.pyn.py").read_text() == good
+    c.close()
+
+
+def test_write_output_command_works_with_on_save_off(tmp_path):
+    # Alt+C: writes now, whatever outputOnSave says; reports where
+    c, root, uri = start(tmp_path)
+    res = c.request("workspace/executeCommand", {"command": "byname.server.writeOutput", "arguments": [uri]})
+    assert res == str(root / "sol.pyn.py")
+    assert (root / "sol.pyn.py").exists()
+    c.close()

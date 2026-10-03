@@ -256,3 +256,20 @@ def test_traceback_points_at_pyn_line(tmp_path):
         cwd=tmp_path, capture_output=True, text=True,
     )
     assert 'bad.pyn", line 4' in out.stderr
+
+
+def test_show_no_main_drops_local_test_block():
+    # what Alt+C writes for LeetCode: the solution only, no `if __name__ == "__main__":` runner
+    from byname.output import drop_main
+
+    code = 'def f():\n    return 1\n\n\nif __name__ == "__main__":\n    print(f())\n    print(2)\n'
+    assert drop_main(code) == "def f():\n    return 1\n"
+    assert drop_main("x = 1\n") == "x = 1\n"  # nothing to drop
+
+
+def test_divider_marks_where_the_users_code_starts():
+    # `byname show` output: generated header, then a divider naming the source, then the .pyn
+    out = to_python("# my note\nx = (a=1)\n", divider="# ---- f.pyn ----")
+    lines = out.splitlines()
+    assert lines[lines.index("# ---- f.pyn ----") + 1] == "# my note"
+    assert to_python("x = 1\n", divider="# ---- f.pyn ----") == "# ---- f.pyn ----\nx = 1\n"  # no header: divider anyway

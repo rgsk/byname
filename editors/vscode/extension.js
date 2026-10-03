@@ -26,12 +26,32 @@ async function start() {
     {
       documentSelector: [{ scheme: "file", language: "pyn" }],
       synchronize: { fileEvents: vscode.workspace.createFileSystemWatcher("**/*.pyn") },
+      initializationOptions: {
+        outputOnSave: cfg.get("outputOnSave"),
+        outputStripMain: cfg.get("outputStripMain"),
+      },
     }
   );
   await client.start();
 }
 
+// Alt+C: write <name>.pyn.py for the active file now (the server renders it, honouring outputStripMain)
+async function writeOutput() {
+  const editor = vscode.window.activeTextEditor;
+  if (!client || !editor || editor.document.languageId !== "pyn") return;
+  try {
+    const out = await client.sendRequest("workspace/executeCommand", {
+      command: "byname.server.writeOutput",
+      arguments: [editor.document.uri.toString()],
+    });
+    vscode.window.setStatusBarMessage(`byname: wrote ${path.basename(out)}`, 3000);
+  } catch (e) {
+    vscode.window.showErrorMessage(e.message);
+  }
+}
+
 exports.activate = async (context) => {
+  context.subscriptions.push(vscode.commands.registerCommand("byname.writeOutput", writeOutput));
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(async (e) => {
       if (!e.affectsConfiguration("byname")) return;

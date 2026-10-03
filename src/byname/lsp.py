@@ -19,12 +19,14 @@ from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
+from .output import output_path, render
 from .srcmap import LineIndex, Translation
 from .transform import DS, REPR, pattern_slot
 
 DEFAULT_CHECKER = ["basedpyright-langserver", "--stdio"]
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache"}
 DROP = object()  # a result element whose position fell inside generated-only code
+WRITE_OUTPUT = "byname.server.writeOutput"  # executeCommand: write <file>.pyn.py now (Alt+C)
 PLACEHOLDER = "__byname_slot"  # stands in for an empty pattern item while completing
 EXTRA_TRIGGERS = ["(", ","]  # pop completion in pattern slots, like TS does after `{` / `,`
 SKIP_KINDS = {2, 3}  # CompletionItemKind Method, Function: not fields
@@ -150,6 +152,8 @@ class Proxy:
         self.counter = 0  # checker-side document versions
         self.temp_versions: set[int] = set()  # versions holding a completion-only temporary text
         self.own_triggers: set[str] = set()
+        self.output_on_save = False  # byname.outputOnSave: write <file>.pyn.py on every save
+        self.strip_main = False  # byname.outputStripMain: drop `if __name__ == "__main__":` from it
 
     # paths --------------------------------------------------------------
 
@@ -319,8 +323,15 @@ class Proxy:
             self.scan()
             caps = params.get("capabilities", {})
             caps.get("general", {}).pop("positionEncodings", None)  # we map in UTF-16
+            opts = params.pop("initializationOptions", None) or {}  # ours, from the editor's byname.* settings
+            self.output_on_save = bool(opts.get("outputOnSave"))
+            self.strip_main = bool(opts.get("outputStripMain"))
             self.pending[mid] = ("initialize", None)
             self.server.send(msg)
+            return
+
+        if method == "workspace/executeCommand" and params.get("command") == WRITE_OUTPUT:
+            self.client.send(self.run_write_output(mid, (params.get("arguments") or [None])[0]))
             return
 
         td = params.get("textDocument") or {}
@@ -355,6 +366,8 @@ class Proxy:
             versions = self.docs.get(path)
             self.write_shadow(path, versions[-1].tr.source if versions else None)
             self.server.send({**msg, "params": {"textDocument": {"uri": shadow}}})
+            if self.output_on_save and versions:
+                self.write_output(path, versions[-1])
             return
         if method == "textDocument/didClose":
             self.docs.pop(path, None)
@@ -456,6 +469,29 @@ class Proxy:
         whole = {"start": {"line": 0, "character": 0}, "end": doc.tr.src_lines.position(len(src))}
         return {"jsonrpc": "2.0", "id": mid, "result": [{"range": whole, "newText": out}]}
 
+    def write_output(self, path: Path, doc: Doc) -> str | None:
+        """Write <file>.pyn.py next to the .pyn. Returns an error message, or None on success.
+        A .pyn that doesn't translate leaves the previous output alone."""
+        if doc.tr.error is not None:
+            return f"not written: {path.name} has an error ({doc.tr.error})"
+        try:
+            text = render(doc.tr.source, path, strip_main=self.strip_main)
+            output_path(path).write_text(text, encoding="utf-8")
+        except (OSError, SyntaxError) as e:
+            return f"not written: {e}"
+        return None
+
+    def run_write_output(self, mid, uri) -> dict:
+        """Alt+C: write the output now, whatever outputOnSave says."""
+        if not self.is_pyn(uri):
+            return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "byname: not a .pyn file"}}
+        path = uri_to_path(uri)
+        versions = self.docs.get(path)
+        doc = versions[-1] if versions else Doc(uri, path.read_text(encoding="utf-8"), None)
+        if err := self.write_output(path, doc):
+            return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32603, "message": f"byname: {err}"}}
+        return {"jsonrpc": "2.0", "id": mid, "result": str(output_path(path))}
+
     def watched(self, change: dict) -> dict:
         uri = change.get("uri")
         if not self.is_pyn(uri):
@@ -510,6 +546,8 @@ class Proxy:
                     caps["textDocumentSync"] = {"openClose": True, "change": 1, "save": {"includeText": False}}
                     caps["declarationProvider"] = True  # served as definition on the keyword half of `x=`
                     caps["documentFormattingProvider"] = True  # ruff via stand-ins, served by us
+                    ecp = caps.setdefault("executeCommandProvider", {"commands": []})
+                    ecp["commands"] = [*ecp.get("commands", []), WRITE_OUTPUT]
                     if stp := caps.get("semanticTokensProvider"):
                         stp["full"] = True  # we remap whole token lists; no delta support
                     caps.pop("notebookDocumentSync", None)
