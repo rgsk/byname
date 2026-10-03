@@ -2,7 +2,7 @@
   "name": "byname",
   "displayName": "byname (.pyn)",
   "description": "Language support for .pyn files: bind-by-name Python, type-checked through basedpyright.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "rgsk",
   "private": true,
   "license": "MIT",
@@ -66,6 +66,11 @@
           "type": "boolean",
           "default": false,
           "description": "Leave the `if __name__ == \"__main__\":` block out of <name>.pyn.py (LeetCode runs it otherwise)."
+        },
+        "byname.diagnosticsOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show errors for the saved text only: no new red squiggles while typing, they update on save."
         }
       }
     },

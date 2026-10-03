@@ -376,12 +376,12 @@ if __name__ == "__main__":
 """
 
 
-def start(tmp_path, **opts):
+def start(tmp_path, caps=None, **opts):
     root = tmp_path / "ws"
     root.mkdir()
     (root / "sol.pyn").write_text(SOLUTION)
     c = Client(root, tmp_path / "cache")
-    caps = {"workspace": {"configuration": True}}
+    caps = caps or {"workspace": {"configuration": True}}
     c.request("initialize", {"processId": None, "rootUri": root.as_uri(), "capabilities": caps, "initializationOptions": opts})
     c.send({"method": "initialized", "params": {}})
     uri = (root / "sol.pyn").as_uri()
@@ -428,4 +428,54 @@ def test_write_output_command_works_with_on_save_off(tmp_path):
     res = c.request("workspace/executeCommand", {"command": "byname.server.writeOutput", "arguments": [uri]})
     assert res == str(root / "sol.pyn.py")
     assert (root / "sol.pyn.py").exists()
+    c.close()
+
+
+def drain(c, seconds):
+    end = time.time() + seconds
+    while time.time() < end:
+        try:
+            c.handle(c.q.get(timeout=0.2))
+        except queue.Empty:
+            pass
+
+
+def test_diagnostics_on_save_holds_them_while_typing(tmp_path):
+    # diagnosticsOnSave: an error typed in shows up only once the file is saved
+    # VS Code offers pull diagnostics, which the checker would use instead of pushing
+    caps = {"workspace": {"configuration": True, "diagnostics": {"refreshSupport": True}}, "textDocument": {"diagnostic": {"dynamicRegistration": True}}}
+    c, root, uri = start(tmp_path, caps, diagnosticsOnSave=True)
+    assert c.wait_diags(uri) == []  # the opened text counts as saved
+    broken = SOLUTION + "print(nope)\n"
+    c.diags.pop(uri)
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": broken}]}})
+    drain(c, 3)
+    assert c.diags.pop(uri, []) == []
+    c.send({"method": "textDocument/didSave", "params": {"textDocument": {"uri": uri}}})
+    assert any("nope" in d["message"] for d in c.wait_diags(uri))
+    c.close()
+
+
+def test_diagnostics_while_typing_by_default(tmp_path):
+    c, root, uri = start(tmp_path)
+    c.wait_diags(uri)
+    c.diags.pop(uri)
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": SOLUTION + "print(nope)\n"}]}})
+    assert any("nope" in d["message"] for d in c.wait_diags(uri))
+    c.close()
+
+
+def test_diagnostics_on_save_drops_fixed_errors_at_once(tmp_path):
+    # fixing an error clears it while typing; a new error still waits for the save
+    c, root, uri = start(tmp_path, diagnosticsOnSave=True)
+    c.wait_diags(uri)
+    c.diags.pop(uri)
+    save(c, uri, SOLUTION + "print(nope)\n", 2)
+    assert any("nope" in d["message"] for d in c.wait_diags(uri, timeout=10))
+    c.diags.pop(uri)
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 3}, "contentChanges": [{"text": SOLUTION + "print(other)\n"}]}})
+    assert c.wait_diags(uri, timeout=10) == []  # nope is gone, other isn't shown yet
+    c.diags.pop(uri)
+    c.send({"method": "textDocument/didSave", "params": {"textDocument": {"uri": uri}}})
+    assert any("other" in d["message"] for d in c.wait_diags(uri, timeout=10))
     c.close()

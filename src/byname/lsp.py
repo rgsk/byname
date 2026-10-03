@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from collections import Counter
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import url2pathname
@@ -166,6 +167,12 @@ class Proxy:
         self.field_type: int | None = None  # semantic token type for record field names ("property")
         self.output_on_save = False  # byname.outputOnSave: write <file>.pyn.py on every save
         self.strip_main = False  # byname.outputStripMain: drop `if __name__ == "__main__":` from it
+        # byname.diagnosticsOnSave: hold diagnostics back while typing, show the saved text's ones
+        self.diags_on_save = False
+        self.saved: dict[Path, int | None] = {}  # editor version of the last saved text, per open .pyn
+        self.held: dict[Path, dict] = {}  # newest diagnostics not shown yet, per open .pyn
+        self.shown: dict[Path, list] = {}  # diagnostics the editor shows now, per open .pyn
+        self.held_lock = threading.Lock()  # diagnostics arrive on the checker thread, saves on ours
 
     # paths --------------------------------------------------------------
 
@@ -335,9 +342,14 @@ class Proxy:
             self.scan()
             caps = params.get("capabilities", {})
             caps.get("general", {}).pop("positionEncodings", None)  # we map in UTF-16
+            # no pull diagnostics: VS Code would ask for them on every edit and get the checker's answer
+            # straight back; pushed ones go through diagnostics(), which maps and maybe holds them
+            caps.get("textDocument", {}).pop("diagnostic", None)
+            caps.get("workspace", {}).pop("diagnostics", None)
             opts = params.pop("initializationOptions", None) or {}  # ours, from the editor's byname.* settings
             self.output_on_save = bool(opts.get("outputOnSave"))
             self.strip_main = bool(opts.get("outputStripMain"))
+            self.diags_on_save = bool(opts.get("diagnosticsOnSave"))
             self.pending[mid] = ("initialize", None)
             self.server.send(msg)
             return
@@ -363,6 +375,7 @@ class Proxy:
             doc = Doc(uri, td["text"], td.get("version"))
             doc.sent = self.next_version()
             self.docs[path] = [doc]
+            self.saved[path] = doc.version  # opened from disk, so this text is the saved one
             self.write_shadow(path, td["text"])
             sent = {"uri": shadow, "languageId": "python", "version": doc.sent, "text": doc.tr.hidden}
             self.server.send({**msg, "params": {"textDocument": sent}})
@@ -380,9 +393,14 @@ class Proxy:
             self.server.send({**msg, "params": {"textDocument": {"uri": shadow}}})
             if self.output_on_save and versions:
                 self.write_output(path, versions[-1])
+            if versions:
+                self.release_held(path, versions[-1].version)
             return
         if method == "textDocument/didClose":
             self.docs.pop(path, None)
+            self.saved.pop(path, None)
+            self.held.pop(path, None)
+            self.shown.pop(path, None)
             self.server.send({**msg, "params": {"textDocument": {"uri": shadow}}})
             self.client.send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": uri, "diagnostics": []}})
             return
@@ -640,7 +658,32 @@ class Proxy:
             params["version"] = doc.version
         else:
             params.pop("version", None)
-        return {**msg, "params": params}
+        msg = {**msg, "params": params}
+        if self.diags_on_save:
+            path = uri_to_path(doc.uri)
+            with self.held_lock:
+                if doc.version != self.saved.get(path):
+                    # unsaved text: new errors wait for the save, but fixed ones go away now
+                    self.held[path] = msg
+                    out = still_shown(self.shown.get(path, []), out)
+                    msg = {**msg, "params": {**params, "diagnostics": out}}
+                else:
+                    self.held.pop(path, None)
+                self.shown[path] = out
+        return msg
+
+    def release_held(self, path: Path, version: int | None) -> None:
+        """On save: show the held diagnostics if they're for the saved text. If the checker hasn't
+        caught up yet, its diagnostics for this version go straight through when they arrive."""
+        with self.held_lock:
+            self.saved[path] = version
+            held = self.held.get(path)
+            if held is None or held["params"].get("version") != version:
+                return
+            del self.held[path]
+            self.shown[path] = held["params"]["diagnostics"]
+        self.client.send(held)
+
 
     # run ----------------------------------------------------------------
 
@@ -655,6 +698,22 @@ class Proxy:
         while (msg := read_message(stdin)) is not None:
             self.on_client(msg)
         self.proc.terminate()
+
+
+def still_shown(shown: list, new: list) -> list:
+    """The diagnostics in `new` that the editor already shows: same message, code and severity
+    (positions move as you type, so they don't count). Each shown one matches at most once."""
+
+    def key(d: dict) -> tuple:
+        return d.get("message"), json.dumps(d.get("code")), d.get("severity")
+
+    left = Counter(key(d) for d in shown)
+    out = []
+    for d in new:
+        if left[key(d)] > 0:
+            left[key(d)] -= 1
+            out.append(d)
+    return out
 
 
 def remap_tokens(data: list[int], doc: Doc | None, field_type: int | None = None) -> list[int]:

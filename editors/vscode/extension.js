@@ -29,6 +29,7 @@ async function start() {
       initializationOptions: {
         outputOnSave: cfg.get("outputOnSave"),
         outputStripMain: cfg.get("outputStripMain"),
+        diagnosticsOnSave: cfg.get("diagnosticsOnSave"),
       },
     }
   );

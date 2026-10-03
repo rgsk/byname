@@ -131,6 +131,7 @@ The extension starts `<workspace>/.venv/bin/byname lsp`.
 | `byname.checker` | `[]` | type checker behind byname, e.g. `["pyrefly", "lsp"]` (default: basedpyright) |
 | `byname.outputOnSave` | `false` | on save, write the translation next to the file as `<name>.pyn.py` |
 | `byname.outputStripMain` | `false` | leave the `if __name__ == "__main__":` block out of `<name>.pyn.py` |
+| `byname.diagnosticsOnSave` | `false` | new errors appear on save, not while typing; fixed ones disappear at once |
 
 The command **"byname: Write Python Output"** writes `<name>.pyn.py` on demand.
 
