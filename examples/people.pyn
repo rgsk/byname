@@ -1,0 +1,3 @@
+def make(*, name: str, age: int):
+    greeting = f"hi {name}"
+    return (name=, age=, greeting=)

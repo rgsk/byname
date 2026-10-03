@@ -1,0 +1,22 @@
+[project]
+name = "byname"
+version = "0.1.0"
+description = "Bind-by-name shorthand for Python: fn(name=, age=), (name=, age=) records, and destructuring."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+byname = "byname.cli:main"
+
+[project.optional-dependencies]
+lsp = [
+    "basedpyright>=1.40.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8"]

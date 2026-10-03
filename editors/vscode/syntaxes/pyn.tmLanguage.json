@@ -1,0 +1,4 @@
+{
+  "scopeName": "source.pyn",
+  "patterns": [{ "include": "source.python" }]
+}

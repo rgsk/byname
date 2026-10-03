@@ -1,0 +1,14 @@
+from people import make
+
+name = "Rahul"
+age = 26
+res = make(name=, age=)  # args bound by name
+
+
+def later():
+    (name=, greeting=) = res  # pick fields by name, any order
+    print(name, greeting)
+
+
+later()
+print(res.age, tuple(res))
