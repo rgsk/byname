@@ -1,103 +1,185 @@
 # byname
 
-Bind-by-name shorthand for Python, in `.pyn` files. All three forms use the `name=` shorthand
-from PEP 736 (rejected):
+Bind-by-name for Python: pass locals by name, return them by name, and destructure them by name, with full
+type inference in the editor. You write `.pyn` files; byname turns them into plain Python.
 
 ```python
 def make(*, name: str, age: int):
-    return (name=, age=)          # record: return locals by name
+    greeting = f"hi {name}"
+    return (name=, age=, greeting=)    # record: return locals by name
 
-res = make(name=, age=)           # call: pass locals by name
-(name=, age=) = res               # destructure: bind fields by name, any order
-(name=n) = res                    # rename: n = res.name
+res = make(name=, age=)                # call: pass locals by name
+(greeting=, age=years) = res           # destructure by name, any order, with rename
+print(res)                             # (name='Rahul', age=26, greeting='hi Rahul')
 ```
 
-The left of `=` is always the field, the right is always the local, in all forms.
-Destructuring is plain attribute access, so it works on any object: `(real=re, imag=im) = 3 + 4j`.
+Hover `years` in the editor and you get `int`; hover `make` and you get
+`-> (name: str, age: int, greeting: str)`. A misspelled field is a type error.
 
-Each form is a SyntaxError in plain Python, so valid Python is never changed by the transform.
+Status: experimental. Requires Python 3.12+.
 
-## How it works
+## The syntax
 
-`.pyn` → plain Python (`byname show file.pyn`):
+Everything is built on one piece of syntax, `name=`, from [PEP 736](https://peps.python.org/pep-0736/)
+(rejected). In `field=value`, the left side is always the field or parameter name and the right side is
+always your local. A bare `field=` means `field=field`.
+
+| Form | Example | Means |
+|---|---|---|
+| call | `fn(name=, age=age + 1)` | `fn(name=name, age=age + 1)` |
+| record | `(name=, score=99.5)` | an immutable record with fields `name`, `score` |
+| destructure | `(name=, age=) = r` | `name = r.name; age = r.age` |
+| rename | `(name=who) = r` | `who = r.name` |
+
+Every form is a syntax error in plain Python, so byname never changes the meaning of valid Python code.
+
+**Records** are generic NamedTuples:
+- **Access:** `.field` access, positional unpacking (`a, b = rec`), `rec._asdict()` and `rec._replace(age=27)`.
+- **Equality** is by value.
+- **They print the way you write them:** `(name='Rahul', age=26)`.
+- **Form:** one field needs no trailing comma (`(name=)`). Records can nest, and can appear anywhere an expression can, including comprehensions and lambdas.
+- **Field names** can't start with `_`, and can't repeat.
+
+**Destructuring** is plain attribute access, so it works on any object, not only records:
 
 ```python
-from typing import NamedTuple as _NT
-class _rec_name__age[T0, T1](_NT): name: T0; age: T1
-
-def make(*, name: str, age: int):
-    return _rec_name__age(name=name, age=age)
-
-res = make(name=name, age=age)
-_ds = res; name = _ds.name; age = _ds.age
+(real=re, imag=im) = 3 + 4j            # builtins
+(email=) = user                        # dataclasses, any object with attributes
+(sep=, curdir=) = os                   # even modules
+(x=self.x, y=self.y) = (x=, y=)        # targets can be attributes or subscripts
+(name=, name=alias) = r                # one field into two locals
+(a=b, b=a) = (a=, b=)                  # swap
 ```
 
-Records are generic NamedTuples, so pyright infers `make() -> _rec_name__age[str, int]` and
-`name: str` with no annotations, and a misspelled field is a type error. Records also unpack
-positionally and support `.name` access.
+**Not supported (yet):**
+- **Nested patterns:** `(user=(name=)) = r`.
+- **Destructuring in `for` targets.**
+- **Dicts:** destructuring reads attributes, not keys.
+- **Positional items in a pattern:** `(a, b=) = r`.
+- **Shorthand in `def` signatures.**
 
-## Run
+[`examples/all.pyn`](examples/all.pyn) runs every feature, one assert per use.
 
-```
-uv run byname run examples/main.pyn
-```
+## Install
 
-`import byname` installs an import hook, after which `.pyn` modules import like `.py` ones.
-Line numbers in tracebacks match the `.pyn` file.
-
-## Parked designs
-
-Decided in discussion, not built. Editor support comes first.
-
-**Dict literals and dict destructuring.** In braces, `=` means a key written literally and `:` keeps its
-normal Python meaning (a computed key):
-
-```python
-{name=, age=26, 'first-name'=f}   # → {'name': name, 'age': 26, 'first-name': f}
-{name=, age=} = d                 # name = d['name']; age = d['age']
-{key: v} = d                      # v = d[key]
-```
-
-Parked because dicts lose per-key types (`dict[str, str | int]`), and records `(name=, age=)` are the
-form that keeps exact types.
-
-**Defaults, `??` (PEP 505).** `x ?? d` inside a `field=…` entry means "x, or d if x is None". It
-reaches to the edges of its entry, so no operator-precedence handling is needed.
-
-```python
-(email= ?? "none") = user     # email = user.email if user.email is not None else "none"
-(email=e ?? "none") = user    # with rename
-(age= ?? 18)                  # building a record; narrows int | None → int
-fn(age= ?? 18)                # in a call
-```
-
-- Triggers on `None` only, not on a missing field. `getattr(obj, f, d)` types as `Any | T` and hides typos.
-- Rejected: TS-style `(email: e = "none")`. `:` reads as a type annotation in Python (the TS
-  `{ name: string }` trap), and it would make renaming use `:` while building uses `=`.
-- Rejected: `(email?="none")`. It leaves no place for a rename.
-
-## Editor support
+byname isn't on PyPI yet. Add it to a project from a local checkout:
 
 ```
-editor <--LSP--> byname lsp <--LSP--> basedpyright (or any checker)
+uv add --editable ../path/to/byname
+uv add --dev basedpyright ruff mypy        # editor checker, formatter, linters (optional)
 ```
 
-`byname lsp` translates each `.pyn` into a shadow `.py`, hands it to a type checker, and maps
-positions both ways: hover, completion, go-to-definition, rename and diagnostics all work in `.pyn`.
-Shadows live in `~/.cache/byname/`, so nothing is written to your project.
+## Command line
+
+| Command | What it does |
+|---|---|
+| `byname run file.pyn [args]` | run a `.pyn` script. Tracebacks point at `.pyn` lines |
+| `byname show [--no-main] file.pyn` | print the plain-Python translation (`--no-main` drops the `if __name__ == "__main__":` block) |
+| `byname format [--check] files…` | format `.pyn` files with Ruff |
+| `byname tool <cmd> [args] file.pyn` | run Ruff, mypy or basedpyright on `.pyn` files, with positions mapped back |
+| `byname lsp [-- checker cmd]` | language server (see below) |
+
+`import byname` installs an import hook. After that, `import foo` finds `foo.pyn`, and `.py` and `.pyn`
+modules can import each other.
+
+## Editor support (VS Code)
 
 ```
-uv sync --all-extras                                   # installs basedpyright
-cd editors/vscode && npm install && vsce package --allow-missing-repository --skip-license -o byname.vsix
+editor <--LSP--> byname lsp <--LSP--> basedpyright (or another checker)
+```
+
+`byname lsp` translates each `.pyn` to Python in memory, hands it to a real type checker, and maps every
+position back. Hidden translations live in `~/.cache/byname/`, never in your project.
+
+**What you get in `.pyn` files:**
+- **Navigation and editing:** hover, completion, go to definition, rename, outline, and colours from semantic highlighting.
+- **Errors** shown where you wrote the code.
+- **Formatting:** Format Document and format-on-save.
+- **Readable record types:** hover and error messages show `(name: str, age: int)`, not the generated class name.
+- **Field suggestions inside a pattern,** like TS's `const { | } = fn()`. `(name=, |) = make(...)` offers the remaining fields, and typing `,` inside a pattern opens the list.
+- **Ctrl+click on a shorthand name** (`name` in `fn(name=)`) goes to the **local variable**. *Go to Declaration* goes to the parameter.
+
+**Install the extension:**
+
+```
+uv sync --all-extras                       # installs basedpyright
+cd editors/vscode && npm install
+vsce package --allow-missing-repository --skip-license -o byname.vsix
 code --install-extension byname.vsix
 ```
 
-The extension starts `<workspace>/.venv/bin/byname lsp` (override with `byname.serverCommand`).
-Swap the checker with `"byname.checker": ["pyrefly", "lsp"]`. The checker must infer return types
-of unannotated functions: pyright, basedpyright and Pyrefly do; ty doesn't yet.
+The extension starts `<workspace>/.venv/bin/byname lsp`.
 
-## Status
+| Setting | Default | |
+|---|---|---|
+| `byname.serverCommand` | `[]` | command that starts the server, e.g. `["uv", "run", "byname", "lsp"]` |
+| `byname.checker` | `[]` | type checker behind byname, e.g. `["pyrefly", "lsp"]` (default: basedpyright) |
+| `byname.outputOnSave` | `false` | on save, write the translation next to the file as `<name>.pyn.py` |
+| `byname.outputStripMain` | `false` | leave the `if __name__ == "__main__":` block out of `<name>.pyn.py` |
 
-- [x] transform, import hook, CLI
-- [x] language server (proxy) + VS Code extension
-- [ ] semantic highlighting (dropped in the proxy for now; TextMate Python grammar is used)
+The command **"byname: Write Python Output"** writes `<name>.pyn.py` on demand.
+
+**Choosing a checker:** it must infer return types of functions without annotations, because that's
+where record types come from. pyright, basedpyright and Pyrefly do. ty doesn't yet (everything shows as
+`Unknown`).
+
+## Lint, type-check, format
+
+`byname tool` mirrors the project into `~/.cache`, with `.pyn` files translated and everything else
+symlinked. It runs the tool there and maps `file:line:col` back. Your project's tool config applies.
+
+```
+byname tool ruff check --output-format=concise file.pyn
+byname tool mypy file.pyn
+byname tool basedpyright file.pyn
+```
+
+mypy doesn't infer return types, so records look like `Any` to it. It won't catch `(nope=) = res`;
+basedpyright will.
+
+`byname format` runs `ruff format`. It swaps byname syntax for short plain-Python stand-ins, formats,
+then swaps them back:
+- **Width:** the stand-ins add a few characters per shorthand, so a line right at your length limit can wrap one step early.
+- **Reserved names:** files that use the names `__p` or `__P` are refused.
+- **Keeping a line as written:** `# fmt: skip` works the same as in `.py` files.
+
+## Output files
+
+`<name>.pyn.py` is plain Python with no dependency on byname. It's useful for handing code to something
+that doesn't have byname, such as an online judge:
+
+```python
+# pyn output of sol.pyn (generated by byname: edit the .pyn, not this file)
+from typing import NamedTuple as _NT
+...                                    # generated header, one class per record shape
+# ---- sol.pyn ----
+...                                    # your code, translated
+```
+
+The generated header uses Python 3.12 syntax for generic classes.
+
+## How it works
+
+```python
+def make(*, name: str, age: int):          from typing import NamedTuple as _NT
+    return (name=, age=)          ──▶      class _rec_name__age[T0, T1](_NT):
+                                               name: T0; age: T1
+res = make(name=, age=)                    def make(*, name: str, age: int):
+(name=, age=) = res                            return _rec_name__age(name=name, age=age)
+                                           res = make(name=name, age=age)
+                                           _ds = res; name = _ds.name; age = _ds.age
+```
+
+Each record shape becomes a generic NamedTuple, so the checker infers
+`make() -> _rec_name__age[str, int]` without annotations. The translation keeps every line on the same
+line number. The generated classes go in a header that's spliced in, which is why tracebacks and editor
+positions line up with your `.pyn`.
+
+## Development
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) for design decisions, parked designs, status and the code map.
+
+```
+uv sync --all-extras
+uv run pytest
+```
