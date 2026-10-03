@@ -2,14 +2,17 @@ def make(name: str, age: int):
     greeting = f"hi {name}"
     upper = name.upper()
     return (name=upper, age=, greeting=)
+
+
 def joker():
-    name = 'Joker'
+    name = "Joker"
     age = 99
-    (age=,name=,greeting=greet) = make(age=age+1, name=)
-    print(f'{name=}, {age=}, {greet=}')
+    (age=, name=, greeting=greet) = make(age=age + 1, name=)
+    print(f"{name=}, {age=}, {greet=}")
     print(age)
 
+
 joker()
-name = 'rahul'
+name = "rahul"
 age = 89
 print(name)

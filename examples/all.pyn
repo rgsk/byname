@@ -14,131 +14,146 @@ age = 26
 # 1. CALLS: pass locals by name
 # ============================================================================
 
+
 def greet(*, name: str, age: int, loud: bool = False) -> str:
     s = f"{name} is {age}"
     return s.upper() if loud else s
 
-assert greet(name=, age=) == "Rahul is 26"                 # name=name, age=age
-assert greet(name=, age=age + 1) == "Rahul is 27"          # mix shorthand and explicit
+
+assert greet(name=, age=) == "Rahul is 26"  # name=name, age=age
+assert greet(name=, age=age + 1) == "Rahul is 27"  # mix shorthand and explicit
 assert greet(name=, age=, loud=True) == "RAHUL IS 26"
 
 opts = {"loud": True}
-assert greet(name=, age=, **opts) == "RAHUL IS 26"          # with **kwargs
+assert greet(name=, age=, **opts) == "RAHUL IS 26"  # with **kwargs
 
 
 def tag(prefix: str, *, name: str) -> str:
     return f"{prefix}:{name}"
 
-assert tag("user", name=) == "user:Rahul"                  # after positional args
+
+assert tag("user", name=) == "user:Rahul"  # after positional args
 
 
 class Greeter:
     def hello(self, *, name: str) -> str:
         return f"hello {name}"
 
-assert Greeter().hello(name=) == "hello Rahul"             # method calls
-assert dict(name=, age=) == {"name": "Rahul", "age": 26}   # builtins: dict(name=, age=) is a dict
+
+assert Greeter().hello(name=) == "hello Rahul"  # method calls
+assert dict(name=, age=) == {"name": "Rahul", "age": 26}  # builtins: dict(name=, age=) is a dict
 
 
 # ============================================================================
 # 2. RECORDS: build a value from locals by name
 # ============================================================================
 
+
 def make(*, name: str, age: int):
     greeting = f"hi {name}"
-    return (name=, age=, greeting=)                        # return locals by name
+    return (name=, age=, greeting=)  # return locals by name
+
 
 p = make(name=, age=)
-assert p.name == "Rahul" and p.greeting == "hi Rahul"      # attribute access
+assert p.name == "Rahul" and p.greeting == "hi Rahul"  # attribute access
 
-r = (name=, score=99.5)                                    # explicit values
-r = (name=name.upper(), score=10 * 9)                      # any expression
-one = (name=)                                              # single field, no trailing comma needed
+r = (name=, score=99.5)  # explicit values
+r = (name=name.upper(), score=10 * 9)  # any expression
+one = (name=)  # single field, no trailing comma needed
 assert one.name == "Rahul"
 
 multi = (
     name=,
-    age=,                                                  # trailing comma, multi-line
+    age=,  # trailing comma, multi-line
 )
 
 # records are NamedTuples, so everything a NamedTuple does works:
-n, a, g = p                                                # positional unpacking (field order as written)
+n, a, g = p  # positional unpacking (field order as written)
 assert tuple(p) == ("Rahul", 26, "hi Rahul")
-assert p == make(name="Rahul", age=26)                     # equality by value
+assert p == make(name="Rahul", age=26)  # equality by value
 assert p._asdict() == {"name": "Rahul", "age": 26, "greeting": "hi Rahul"}
-older = p._replace(age=27)                                 # copy with a change
+older = p._replace(age=27)  # copy with a change
 assert older.age == 27 and p.age == 26
-assert greet(**multi._asdict()) == "Rahul is 26"           # record -> keyword args
+assert greet(**multi._asdict()) == "Rahul is 26"  # record -> keyword args
 
 # records nest, and appear anywhere an expression can
 nested = (user=(name=, age=), ok=True)
 assert nested.user.name == "Rahul"
-rows = [(i=, sq=i * i) for i in range(3)]                  # in comprehensions
+rows = [(i=, sq=i * i) for i in range(3)]  # in comprehensions
 assert rows[2].sq == 4
-pair = lambda x: (x=, double=x * 2)                        # in lambdas
+pair = lambda x: (x=, double=x * 2)  # in lambdas
 assert pair(5).double == 10
-print((name=, age=))                                       # as a call argument
+print((name=, age=))  # as a call argument
 
 
 # ============================================================================
 # 3. DESTRUCTURING: bind fields to locals by name
 # ============================================================================
 
-(name=, greeting=, age=) = make(name="Joker", age=99)      # any order
+(name=, greeting=, age=) = make(name="Joker", age=99)  # any order
 assert (name, age, greeting) == ("Joker", 99, "hi Joker")
 
-(greeting=) = make(name="Bob", age=1)                      # any subset
+(greeting=) = make(name="Bob", age=1)  # any subset
 assert greeting == "hi Bob"
 
-(name=who, age=years) = make(name="Ann", age=30)           # rename: who = .name, years = .age
+(name=who, age=years) = make(name="Ann", age=30)  # rename: who = .name, years = .age
 assert (who, years) == ("Ann", 30)
 
-(name=, name=alias) = make(name="Cy", age=2)               # same field into two locals
+(name=, name=alias) = make(name="Cy", age=2)  # same field into two locals
 assert name == alias == "Cy"
 
 d = {}
+
+
 class Box:
     label: str = ""
+
+
 box = Box()
-(name=box.label, age=d["age"]) = make(name="Dee", age=4)   # into attributes and subscripts
+(name=box.label, age=d["age"]) = make(name="Dee", age=4)  # into attributes and subscripts
 assert box.label == "Dee" and d == {"age": 4}
 
 (
     name=,
-    greeting=,                                             # multi-line target
+    greeting=,  # multi-line target
 ) = make(name="Eve", age=5)
 assert name == "Eve"
 
-(name=) = p; (age=) = p                                    # several on one line with ;
+(name=) = p; (age=) = p  # several on one line with ; (fmt: skip keeps ruff from splitting it)  # fmt: skip
 assert (name, age) == ("Rahul", 26)
 
 a, b = 1, 2
-(a=b, b=a) = (a=, b=)                                      # swap via rename
+(a=b, b=a) = (a=, b=)  # swap via rename
 assert (a, b) == (2, 1)
 
 # destructuring is plain attribute access, so it works on ANY object:
-(real=re, imag=im) = 3 + 4j                                # builtins
+(real=re, imag=im) = 3 + 4j  # builtins
 assert (re, im) == (3.0, 4.0)
+
 
 @dataclass
 class User:
     name: str
     email: str
 
-(email=) = User("Fay", "fay@x.com")                        # dataclasses
+
+(email=) = User("Fay", "fay@x.com")  # dataclasses
 assert email == "fay@x.com"
 
 import os
-(sep=, curdir=) = os                                       # even modules
+
+(sep=, curdir=) = os  # even modules
 assert curdir == "."
+
 
 class Point:
     def __init__(self, x: int, y: int):
-        (x=self.x, y=self.y) = (x=, y=)                    # assign many attrs at once
+        (x=self.x, y=self.y) = (x=, y=)  # assign many attrs at once
 
     def norm2(self) -> int:
-        (x=, y=) = self                                    # unpack self
+        (x=, y=) = self  # unpack self
         return x * x + y * y
+
 
 assert Point(3, 4).norm2() == 25
 
@@ -147,13 +162,15 @@ assert Point(3, 4).norm2() == 25
 # 4. ALL THREE TOGETHER
 # ============================================================================
 
+
 def area(*, w: float, h: float):
     a = w * h
     perimeter = 2 * (w + h)
     return (a=, perimeter=)
 
+
 w, h = 3.0, 4.0
-(a=, perimeter=p_) = area(w=, h=)                          # call by name -> record -> destructure
+(a=, perimeter=p_) = area(w=, h=)  # call by name -> record -> destructure
 assert (a, p_) == (12.0, 14.0)
 
 

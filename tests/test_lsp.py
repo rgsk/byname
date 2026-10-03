@@ -337,3 +337,14 @@ def test_temporary_completion_text_leaves_no_diagnostics(lsp):
         c.handle(c.q.get())
     for d in c.diags.get(uri, []):
         assert "__byname" not in d["message"]
+
+
+def test_format_document(lsp):
+    # Format Document on a .pyn returns one whole-file edit with ruff's layout
+    c, root, uri = lsp
+    assert c.init["capabilities"]["documentFormattingProvider"] is True
+    text = MAIN.replace("res = make(name=, age=)", "res=make( name= ,age= )")
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 900}, "contentChanges": [{"text": text}]}})
+    edits = c.request("textDocument/formatting", {"textDocument": {"uri": uri}, "options": {"tabSize": 4, "insertSpaces": True}})
+    assert len(edits) == 1
+    assert "res = make(name=, age=)\n" in edits[0]["newText"]

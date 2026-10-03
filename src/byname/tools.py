@@ -75,7 +75,7 @@ def has_pyright_config(root: Path) -> bool:
     if (root / "pyrightconfig.json").exists():
         return True
     pp = root / "pyproject.toml"
-    return pp.exists() and re.search(r"^\[tool\.(based)?pyright", pp.read_text(), re.M) is not None
+    return pp.exists() and re.search(r"^\[tool\.(based)?pyright", pp.read_text(), re.MULTILINE) is not None
 
 
 def remap(line: str, root: Path, out: Path, cache: dict) -> tuple[str | None, bool]:
@@ -127,7 +127,7 @@ def main(argv: list[str]) -> int:
         args.append(a)
     if Path(cmd).name in ("basedpyright", "pyright") and "--pythonpath" not in args:
         args = ["--pythonpath", sys.executable, *args]
-    proc = subprocess.run([resolve(cmd), *args], cwd=out, capture_output=True, text=True)
+    proc = subprocess.run([resolve(cmd), *args], cwd=out, capture_output=True, text=True, check=False)
     cache: dict = {}
     dropped = kept = 0
     lines = []

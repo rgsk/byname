@@ -2,41 +2,65 @@
   "name": "byname",
   "displayName": "byname (.pyn)",
   "description": "Language support for .pyn files: bind-by-name Python, type-checked through basedpyright.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "rgsk",
   "private": true,
   "license": "MIT",
-  "engines": { "vscode": "^1.75.0" },
-  "categories": ["Programming Languages"],
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
   "main": "./extension.js",
-  "activationEvents": ["onLanguage:pyn"],
+  "activationEvents": [
+    "onLanguage:pyn"
+  ],
   "contributes": {
     "languages": [
       {
         "id": "pyn",
-        "aliases": ["byname Python", "pyn"],
-        "extensions": [".pyn"],
+        "aliases": [
+          "byname Python",
+          "pyn"
+        ],
+        "extensions": [
+          ".pyn"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
-      { "language": "pyn", "scopeName": "source.pyn", "path": "./syntaxes/pyn.tmLanguage.json" }
+      {
+        "language": "pyn",
+        "scopeName": "source.pyn",
+        "path": "./syntaxes/pyn.tmLanguage.json"
+      }
     ],
     "configuration": {
       "title": "byname",
       "properties": {
         "byname.serverCommand": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Command that starts the server, e.g. [\"uv\", \"run\", \"byname\", \"lsp\"]. Default: <workspace>/.venv/bin/byname lsp, else byname lsp from PATH."
         },
         "byname.checker": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Type checker language server behind byname, e.g. [\"pyrefly\", \"lsp\"]. Default: basedpyright-langserver --stdio."
         }
+      }
+    },
+    "configurationDefaults": {
+      "[pyn]": {
+        "editor.defaultFormatter": "rgsk.byname"
       }
     }
   },

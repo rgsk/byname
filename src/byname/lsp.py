@@ -368,6 +368,9 @@ class Proxy:
             self.pending[mid] = (method, doc)
         if method == "textDocument/completion" and self.complete_slot(msg, path, doc):
             return
+        if method == "textDocument/formatting":
+            self.client.send(self.format(mid, path, doc))
+            return
         mapped = self.to_checker(params, doc)
         # on shorthand `x=`: definition -> the local x (value half); declaration -> the parameter/field
         if method == "textDocument/definition" and (vp := doc.tr.value_position(params["position"])):
@@ -439,6 +442,20 @@ class Proxy:
             out.append(it)
         return {"isIncomplete": False, "items": out}
 
+    def format(self, mid, path: Path, doc: Doc) -> dict:
+        """Whole-document ruff format via stand-ins (see fmt.py); answered here, not by the checker."""
+        from .fmt import FormatError, format_pyn
+
+        src = doc.tr.source
+        try:
+            out = format_pyn(src, str(path), cwd=self.root)
+        except (FormatError, SyntaxError) as e:
+            return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32603, "message": f"byname format: {e}"}}
+        if out == src:
+            return {"jsonrpc": "2.0", "id": mid, "result": []}
+        whole = {"start": {"line": 0, "character": 0}, "end": doc.tr.src_lines.position(len(src))}
+        return {"jsonrpc": "2.0", "id": mid, "result": [{"range": whole, "newText": out}]}
+
     def watched(self, change: dict) -> dict:
         uri = change.get("uri")
         if not self.is_pyn(uri):
@@ -492,6 +509,7 @@ class Proxy:
                     caps = msg["result"].setdefault("capabilities", {})
                     caps["textDocumentSync"] = {"openClose": True, "change": 1, "save": {"includeText": False}}
                     caps["declarationProvider"] = True  # served as definition on the keyword half of `x=`
+                    caps["documentFormattingProvider"] = True  # ruff via stand-ins, served by us
                     if stp := caps.get("semanticTokensProvider"):
                         stp["full"] = True  # we remap whole token lists; no delta support
                     caps.pop("notebookDocumentSync", None)

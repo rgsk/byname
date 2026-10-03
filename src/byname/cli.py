@@ -1,7 +1,8 @@
 """byname run file.pyn [args...]   run a .pyn script
 byname show file.pyn             print the plain-Python translation
 byname lsp [-- checker cmd...]   language server (default checker: basedpyright-langserver --stdio)
-byname tool <cmd> [args...]      run ruff / mypy / basedpyright on .pyn files (positions mapped back)"""
+byname tool <cmd> [args...]      run ruff / mypy / basedpyright on .pyn files (positions mapped back)
+byname format [--check] FILE...  ruff format .pyn files in place"""
 
 import sys
 import types
@@ -22,8 +23,31 @@ def run(path: Path, argv: list[str]) -> None:
     exec(to_code(src, str(path)), mod.__dict__)
 
 
+def format_files(args: list[str]) -> int:
+    from .fmt import FormatError, format_pyn
+
+    check = "--check" in args
+    changed = 0
+    for name in (a for a in args if a != "--check"):
+        path = Path(name)
+        src = path.read_text()
+        try:
+            out = format_pyn(src, str(path))
+        except (FormatError, SyntaxError) as e:
+            print(f"{name}: {e}", file=sys.stderr)
+            return 2
+        if out != src:
+            changed += 1
+            print(f"{'would reformat' if check else 'reformatted'} {name}")
+            if not check:
+                path.write_text(out)
+    return 1 if check and changed else 0
+
+
 def main() -> None:
     args = sys.argv[1:]
+    if args[:1] == ["format"]:
+        sys.exit(format_files(args[1:]))
     if args[:1] == ["tool"]:
         from .tools import main as tool_main
 

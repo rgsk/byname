@@ -21,6 +21,7 @@ import tokenize
 from dataclasses import dataclass, field
 
 DS = "_ds"
+SHORT, PAT = "__p", "__P"  # formatting stand-ins: `x=` -> `x=__p`, record `(` -> `__P(`, pattern -> `__P[...]`
 REPR = "_byname_repr"
 PRELUDE = (
     "from typing import NamedTuple as _NT\n"
@@ -56,6 +57,7 @@ class Result:
     body: str
     edits: list[Edit] = field(default_factory=list)
     problems: list[tuple[int, int, str]] = field(default_factory=list)  # (start, end, message), tolerant mode
+    standins: list[tuple[int, int, str]] = field(default_factory=list)  # (start, end, text): plain-Python stand-ins, for formatting
 
 
 def record_class(fields: tuple[str, ...]) -> str:
@@ -130,6 +132,7 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False) -> Result:
     edits: list[Edit] = []
     records: dict[tuple[str, ...], None] = {}  # ordered set
     problems: list[tuple[int, int, str]] = []
+    standins: list[tuple[int, int, str]] = []
 
     def span(a: int, b: int | None = None) -> tuple[int, int]:
         return off(toks[a].start), off(toks[a if b is None else b].end)
@@ -139,6 +142,7 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False) -> Result:
             if is_short(it):
                 at = off(toks[it[1]].end)
                 edits.append(Edit(at, at, toks[it[0]].string, span(it[0]), kind="shorthand"))
+                standins.append((at, at, SHORT))
 
     for i, t in enumerate(toks):
         if not (t.type == tokenize.OP and t.string == "("):
@@ -211,6 +215,12 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False) -> Result:
                 marks.append(Mark(len(binds), len(binds) + len(f), *span(it[0])))
                 binds += f
             stmt_end = off(toks[j - 1].end)
+            # stand-in: __P[a:__p, b:target] = expr (a subscript is a valid assignment target)
+            standins.append((group[0], group[0] + 1, PAT + "["))
+            standins.append((group[1] - 1, group[1], "]"))
+            for it in its:
+                if len(it) >= 2 and toks[it[1]].string == "=":
+                    standins.append((*span(it[1]), ":" + (SHORT if is_short(it) else "")))
             edits.append(Edit(*group, DS, group))
             edits.append(Edit(stmt_end, stmt_end, binds, group, marks))
             continue
@@ -224,6 +234,7 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False) -> Result:
         records[fields] = None
         at = off(t.start)
         edits.append(Edit(at, at, record_class(fields), (at, at + 1)))
+        standins.append((at, at, PAT))
         expand_shorthand(its)
 
     # apply edits back-to-front
@@ -235,7 +246,8 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False) -> Result:
     prelude = ""
     if records:
         prelude = PRELUDE + "".join(record_def(f) for f in records)
-    return Result(prelude, body, edits, problems)
+    standins.sort()
+    return Result(prelude, body, edits, problems, standins)
 
 
 def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:
