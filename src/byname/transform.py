@@ -21,7 +21,7 @@ import tokenize
 from dataclasses import dataclass, field
 
 DS = "_ds"
-SHORT, PAT = "__p", "__P"  # formatting stand-ins: `x=` -> `x=__p`, record `(` -> `__P(`, pattern -> `__P[...]`
+SHORT, PAT, TYP = "__p", "__P", "__T"  # formatting stand-ins: `x=` -> `x=__p`, record `(` -> `__P(`, pattern -> `__P[...]`, record type -> `__T[...]`
 REPR = "_byname_repr"
 PRELUDE = (
     "from typing import NamedTuple as _NT\n"
@@ -69,6 +69,8 @@ def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
     Otherwise a 3.12 generic class, so checkers infer each field's type."""
     params = ", ".join(f"T{i}" for i in range(len(fields)))
     body = "; ".join(f"{f}: {'object' if portable else f'T{i}'}" for i, f in enumerate(fields))
+    if portable:  # record types annotate as R[int, str]; the plain class ignores the subscript
+        body += "; __class_getitem__ = classmethod(lambda cls, _: cls)"
     head = record_class(fields) if portable else f"{record_class(fields)}[{params}]"
     # a real method, not `__repr__ = helper`: mypy rejects assignments in a NamedTuple body
     return (
@@ -166,6 +168,26 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
         if not its:
             continue
         close = pair[i]
+
+        # record type, e.g. `-> (height: int, diameter: int)`: every item is `name: type`, never valid
+        # Python. Becomes the generic class, R[int, int]; separate small edits, so nested types work
+        if all(len(it) >= 3 and is_name(toks[it[0]]) and toks[it[1]].string == ":" for it in its):
+            fields = tuple(toks[it[0]].string for it in its)
+            for it in its:
+                name = toks[it[0]]
+                if name.string.startswith("_"):
+                    raise err(f"record field {name.string!r} cannot start with '_'", name)
+            if len(set(fields)) != len(fields):
+                raise err(f"duplicate record field in {fields}", t)
+            records[fields] = None
+            group = span(i, close)
+            edits.append(Edit(group[0], group[0] + 1, record_class(fields) + "[", group))
+            edits.append(Edit(group[1] - 1, group[1], "]", group))
+            standins.append((group[0], group[0] + 1, TYP + "["))
+            standins.append((group[1] - 1, group[1], "]"))
+            for it in its:
+                edits.append(Edit(off(toks[it[0]].start), off(toks[it[2]].start), "", span(it[0])))
+            continue
         at_stmt_start = prev is None or prev.type in STMT_START or prev.string == ";"
         is_pattern = at_stmt_start and toks[close + 1].string == "="
         kw = [is_kw(it) for it in its]

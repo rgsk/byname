@@ -49,3 +49,11 @@ def test_all_pyn_keeps_its_meaning_and_is_idempotent():
 def test_refuses_sources_using_stand_in_names():
     with pytest.raises(FormatError):
         format_pyn("__p = 1\n")
+
+
+def test_format_record_types(tmp_path):
+    # stand-in __T[x: int] is a subscript ruff can format; it comes back as (x: int)
+    src = "def f(n:int)->(h:int,d:   (a: int, b: list[int])):\n    return (h=n, d=(a=1, b=[n]))\n"
+    out = format_pyn(src, str(tmp_path / "f.pyn"))
+    assert out == "def f(n: int) -> (h: int, d: (a: int, b: list[int])):\n    return (h=n, d=(a=1, b=[n]))\n"
+    assert format_pyn(out, str(tmp_path / "f.pyn")) == out

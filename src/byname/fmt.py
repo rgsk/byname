@@ -3,6 +3,7 @@
     fn(x=)            -> fn(x=__p)
     (x=, y=1)         -> __P(x=__p, y=1)
     (x=, y=t) = r     -> __P[x:__p, y:t] = r       (a subscript is a valid assignment target)
+    -> (x: int)       -> -> __T[x: int]            (record type)
 
 Stand-ins are a few characters wider than the real syntax, so a line right at the length limit
 can wrap one step early.
@@ -14,7 +15,7 @@ import tokenize
 from pathlib import Path
 
 from .tools import resolve
-from .transform import PAT, SHORT, transform
+from .transform import PAT, SHORT, TYP, transform
 
 
 class FormatError(Exception):
@@ -22,8 +23,8 @@ class FormatError(Exception):
 
 
 def encode(src: str) -> str:
-    if SHORT in src or PAT in src:
-        raise FormatError(f"source already uses the stand-in names {SHORT}/{PAT}")
+    if SHORT in src or PAT in src or TYP in src:
+        raise FormatError(f"source already uses the stand-in names {SHORT}/{PAT}/{TYP}")
     r = transform(src)
     out = src
     for start, end, text in reversed(r.standins):
@@ -59,19 +60,20 @@ def decode(code: str) -> str:
         # x=__p / x:__p -> drop the value (colon handled with its pattern); __P( -> ( for records
         if t.string == SHORT or (t.string == PAT and toks[nxt(i)].string == "("):
             edits.append((off(t.start), off(t.end), ""))
-        elif t.string == PAT and toks[nxt(i)].string == "[":  # pattern
+        elif t.string in (PAT, TYP) and toks[nxt(i)].string == "[":  # pattern / record type
             o, c = nxt(i), pair[nxt(i)]
+            sep = "=" if t.string == PAT else ": "
             edits.append((off(t.start), off(toks[o].end), "("))
             edits.append((off(toks[c].start), off(toks[c].end), ")"))
             depth, j = 0, nxt(o)
-            while j != c:  # top-level `name : target` -> `name=target`, eating ruff's slice spacing
+            while j != c:  # top-level `name : x` -> `name=x` / `name: x`, eating ruff's slice spacing
                 s = toks[j].string
                 if j in pair:
                     j = pair[j]
                 elif s == ":" and depth == 0:
                     prev_end = off(toks[sig[pos[j] - 1]].end)
                     after = nxt(j)
-                    edits.append((prev_end, off(toks[after].start), "="))
+                    edits.append((prev_end, off(toks[after].start), sep))
                 j = nxt(j)
     edits.sort()
     out = code

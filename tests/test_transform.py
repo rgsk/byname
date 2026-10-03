@@ -283,9 +283,44 @@ def test_output_files_run_on_old_pythons():
     # Output files get plain NamedTuple classes; the checker's translation keeps the generic ones.
     src = "def f(*, n: int):\n    return (n=, sq=n * n)\n(sq=) = f(n=3)\nprint(sq)\n"
     out = render(src, Path("f.pyn"))
-    assert "class _rec_n__sq(_NT):\n    n: object; sq: object\n" in out
+    assert "class _rec_n__sq(_NT):\n    n: object; sq: object; __class_getitem__ = classmethod(lambda cls, _: cls)\n" in out
     ast.parse(out, feature_version=(3, 8))
     assert "class _rec_n__sq[T0, T1](_NT):" in to_python(src)
     with pytest.raises(SyntaxError):
         ast.parse(to_python(src), feature_version=(3, 8))
     assert out.count("\n") == to_python(src, divider="# ---- f.pyn ----").count("\n") + 1  # same lines, plus the marker
+
+
+def test_record_type_annotation():
+    # `(name: type, ...)` in an annotation is the record's type, written the way hover shows it.
+    # It lets a recursive function declare what it returns: checkers can't infer through recursion
+    src = "def dfs(n: int) -> (h: int, d: int):\n    if n == 0:\n        return (h=0, d=0)\n    (h=, d=) = dfs(n - 1)\n    return (h=h + 1, d=d)\n"
+    out = to_python(src)
+    assert "def dfs(n: int) -> _rec_h__d[int, int]:" in out
+    assert out.count("class _rec_h__d") == 1  # the same class as the record it describes
+    # nested, and as a parameter / variable annotation
+    out = to_python("def f(p: (x: (a: int, b: str))) -> None:\n    q: (y: int) = (y=1)\n")
+    assert "def f(p: _rec_x[_rec_a__b[int, str]]) -> None:" in out
+    assert "q: _rec_y[int] = _rec_y(y=1)" in out
+
+
+def test_record_type_runs_on_old_pythons():
+    # output files: the plain class ignores the subscript, so the annotation evaluates on PyPy 3.10 too
+    from byname.output import render
+
+    src = "def f() -> (a: int):\n    return (a=1)\n\n\nprint(f(), f.__annotations__['return'].__name__)\n"
+    out = render(src, Path("f.pyn"))
+    ast.parse(out, feature_version=(3, 8))
+    p = subprocess.run([sys.executable, "-c", out], capture_output=True, text=True, check=True)
+    assert p.stdout == "(a=1) _rec_a\n"
+
+
+def test_record_type_errors():
+    with pytest.raises(SyntaxError, match="cannot start with '_'"):
+        to_python("def f() -> (_a: int): ...\n")
+    with pytest.raises(SyntaxError, match="duplicate"):
+        to_python("def f() -> (a: int, a: str): ...\n")
+    # not record types: lambdas, def parameter lists, walrus
+    assert to_python("f = (lambda x: x)\n") == "f = (lambda x: x)\n"
+    assert to_python("def g(a: int, b: str): ...\n") == "def g(a: int, b: str): ...\n"
+    assert to_python("if (n := 3): ...\n") == "if (n := 3): ...\n"

@@ -30,6 +30,7 @@ always your local. A bare `field=` means `field=field`.
 | record | `(name=, score=99.5)` | an immutable record with fields `name`, `score` |
 | destructure | `(name=, age=) = r` | `name = r.name; age = r.age` |
 | rename | `(name=who) = r` | `who = r.name` |
+| record type | `def f() -> (name: str, age: int):` | the record's type, in any annotation |
 
 Every form is a syntax error in plain Python, so byname never changes the meaning of valid Python code.
 
@@ -39,6 +40,18 @@ Every form is a syntax error in plain Python, so byname never changes the meanin
 - **They print the way you write them:** `(name='Rahul', age=26)`.
 - **Form:** one field needs no trailing comma (`(name=)`). Records can nest, and can appear anywhere an expression can, including comprehensions and lambdas.
 - **Field names** can't start with `_`, and can't repeat.
+
+**Record types** are written the way hover shows them, `(name: str, age: int)`, anywhere an annotation
+goes. You rarely need one, since return types are inferred. The exception is a recursive function: checkers
+can't infer through the recursive call, so its fields come out `Unknown`. Annotate the return type to fix that:
+
+```python
+def dfs(node: TreeNode | None) -> (height: int, diameter: int):
+    if node is None:
+        return (height=0, diameter=0)
+    (height=lh, diameter=ld) = dfs(node.left)
+    ...
+```
 
 **Destructuring** is plain attribute access, so it works on any object, not only records:
 
