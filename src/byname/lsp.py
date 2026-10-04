@@ -22,7 +22,7 @@ from urllib.request import url2pathname
 
 from .output import output_path, render
 from .srcmap import LineIndex, Translation
-from .transform import DS, FIELDSET, REPR, pattern_slot
+from .transform import DS, FIELDSET, REPR, STAR, pattern_slot
 
 DEFAULT_CHECKER = ["basedpyright-langserver", "--stdio"]
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache"}
@@ -152,7 +152,7 @@ def explain_fields(msg: str) -> str:
 
 def is_generated_name(name) -> bool:
     return isinstance(name, str) and (
-        name in (DS, REPR, FIELDSET, "_NT", "_t", "_TD", "_PR", "_L", "_S", "_Fi", "_It") or name.startswith(GENERATED_PREFIXES)
+        name in (DS, REPR, FIELDSET, STAR, "_NT", "_t", "_TD", "_PR", "_L", "_S", "_Fi", "_It", "_ov", "_A", "_Itb") or name.startswith(GENERATED_PREFIXES)
     )
 
 

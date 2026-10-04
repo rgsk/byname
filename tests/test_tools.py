@@ -98,6 +98,18 @@ def test_field_set_errors_between_record_types_point_the_right_way(project):
     assert "missing field: x" in q and "extra" not in q
 
 
+def test_star_unpacking_a_record_into_a_call_is_typed(project):
+    (project / "star.pyn").write_text(
+        "def fn(name: str, age: int) -> None: ...\n"
+        "fn(*(name='r', age=1))\n"   # fine
+        "fn(*(name=1, age=1))\n"     # name is an int
+    )
+    out, rc = tool(project, "basedpyright", "star.pyn")
+    assert "star.pyn:2" not in out
+    assert 'star.pyn:3:1 - error: Argument of type "int" cannot be assigned to parameter "name"' in out
+    assert "_byname_star" not in out
+
+
 def test_mypy_line_numbers_map_back(project):
     # mypy reports lines only; records are Any to it, so only the plain type error shows
     out, rc = tool(project, "mypy", "main.pyn")

@@ -109,7 +109,7 @@ class Translation:
         self.problems: list[dict] = []  # byname diagnostics from tolerant translation
         self.fields: list[tuple[int, int]] = []  # source spans of record field names
         try:
-            r = transform(source, tolerant=True)
+            r = transform(source, tolerant=True, checker=True)
             body, prelude, edits = r.body, r.prelude, r.edits
             self.fields = r.fields
         except Exception as e:  # mid-edit code: send it raw; the checker reports the syntax error

@@ -38,6 +38,17 @@ TYPED_PRELUDE = (  # checker-facing typing: typed methods, record types as Proto
     "from typing import TypedDict as _TD, Protocol as _PR, Literal as _L, Self as _S, Final as _Fi\n"
     "from collections.abc import Iterator as _It\n"
 )
+# pyright (1.1.414) loses a generic tuple subclass's type arguments when it's star-unpacked into a call:
+# `fn(*rec)` checks each argument as `object`. A plain tuple is fine, so in the checker's translation only,
+# every `*arg` in a call goes through this identity helper, typed to return a plain tuple.
+STAR = "_byname_star"
+STAR_PRELUDE = (
+    "from typing import overload as _ov, Any as _A\n"
+    "from collections.abc import Iterable as _Itb\n"
+    f"@_ov\ndef {STAR}[*Ts](t: tuple[*Ts], /) -> tuple[*Ts]: ...\n"
+    f"@_ov\ndef {STAR}[T](t: _Itb[T], /) -> _Itb[T]: ...\n"
+    f"def {STAR}(t: _A, /) -> _A: return t\n"
+)
 FIELDSET = "_byname_fieldset"  # a record's field names, sorted: what an exact record type matches on
 STMT_START = {tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT}
 
@@ -159,9 +170,12 @@ def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
     )
 
 
-def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: bool = False) -> Result:
+def transform(
+    src: str, path: str = "<pyn>", tolerant: bool = False, portable: bool = False, checker: bool = False
+) -> Result:
     """tolerant (editor only): a half-typed pattern item like `na` in `(name=, na) = r` becomes
-    `_ds.na` instead of an error, so the checker can complete field names there."""
+    `_ds.na` instead of an error, so the checker can complete field names there.
+    checker: the translation only type checkers see; works around their bugs (see STAR). Never run."""
     toks = [
         t
         for t in tokenize.generate_tokens(io.StringIO(src).readline)
@@ -222,6 +236,18 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
 
     def span(a: int, b: int | None = None) -> tuple[int, int]:
         return off(toks[a].start), off(toks[a if b is None else b].end)
+
+    stars = False
+
+    def wrap_stars(its: list[list[int]]) -> None:
+        # `*x` -> `*_byname_star(x)` (checker only, see STAR); `**x` is left alone
+        nonlocal stars
+        for it in its:
+            if len(it) >= 2 and toks[it[0]].string == "*":
+                a, b = off(toks[it[1]].start), off(toks[it[-1]].end)
+                edits.append(Edit(a, a, STAR + "(", span(it[1], it[-1])))
+                edits.append(Edit(b, b, ")", span(it[1], it[-1])))
+                stars = True
 
     def expand_shorthand(its: list[list[int]]) -> None:
         for it in its:
@@ -301,6 +327,8 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
         is_call = prev is not None and (is_name(prev) or prev.string in (")", "]"))
         if is_call:
             expand_shorthand(its)
+            if checker:
+                wrap_stars(its)
             continue
 
         if not its:
@@ -464,6 +492,8 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
             prelude += CHECKER_DIRECTIVE + TYPED_PRELUDE + "".join(dict_def(f) for f in dicts)
         prelude += "".join(record_def(f, portable) for f in records)
         prelude += "".join(type_def(f, o, portable) for f, o in types)
+    if stars:
+        prelude += STAR_PRELUDE
     standins.sort()
     return Result(prelude, body, edits, problems, standins, sorted(field_spans))
 

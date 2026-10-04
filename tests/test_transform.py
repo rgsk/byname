@@ -422,6 +422,16 @@ def test_replace_and_asdict_are_typed_for_the_checker_only():
     assert ns["r2"] == ("a", 2) and ns["d"] == {"name": "a", "age": 1}
 
 
+def test_star_args_go_through_a_plain_tuple_for_the_checker_only():
+    # pyright checks `fn(*rec)` with each argument as `object` (generic tuple subclass); the checker's
+    # translation passes `*x` through an identity helper typed to return a plain tuple
+    src = "fn(*u, **kw)\nprint(*[1])\n"
+    r = transform(src, checker=True)
+    assert r.body == "fn(*_byname_star(u), **kw)\nprint(*_byname_star([1]))\n"
+    assert "def _byname_star[*Ts](t: tuple[*Ts], /) -> tuple[*Ts]: ..." in r.prelude
+    assert transform(src).body == src and transform(src).prelude == ""  # what runs: untouched
+
+
 def test_record_type_annotation():
     # `(name: type, ...)` in an annotation is the record's type, written the way hover shows it.
     # It lets a recursive function declare what it returns: checkers can't infer through recursion
