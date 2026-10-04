@@ -343,6 +343,17 @@ def test_replace_completes_and_checks_fields(lsp):
     assert any('No parameter named "age"' in m for m in msgs)  # age, greeting have no parameter in h
 
 
+def test_mixed_record_list_is_checked_in_the_editor(lsp):
+    # basedpyright would infer list[Unknown] here and stay silent; the strict-inference comment keeps it typed
+    c, root, uri = lsp
+    text = MAIN + 'rs = [(name="a", age="90"), (name="b", age=23)]\nrs[0]._replace(nme="x")\n'
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 950}, "contentChanges": [{"text": text}]}})
+    end, msgs = time.time() + 60, []
+    while time.time() < end and not any("nme" in m for m in msgs):  # skip diagnostics for the previous text
+        c.diags.pop(uri, None)
+        msgs = [d["message"] for d in c.wait_diags(uri)]
+    assert any('No parameter named "nme"' in m for m in msgs)
+
 def test_comma_trigger_only_inside_patterns(lsp):
     # `,` pops completion in a pattern; in an ordinary call it returns nothing instead of noise
     c, root, uri = lsp

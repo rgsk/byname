@@ -50,6 +50,13 @@ def test_basedpyright_errors_land_on_pyn_lines(project):
     assert ".cache" not in out and "_rec_" not in out  # no mirror paths, no generated names
 
 
+def test_mixed_record_list_stays_typed(project):
+    # without strict list inference a mixed list is list[Unknown] and the typo below passes silently
+    (project / "mixed.pyn").write_text('rs = [(name="a", age="90"), (name="b", age=23)]\nrs[0]._replace(nme="x")\n')
+    out, rc = tool(project, "basedpyright", "mixed.pyn")
+    assert 'mixed.pyn:2:16 - error: No parameter named "nme"' in out
+
+
 def test_mypy_line_numbers_map_back(project):
     # mypy reports lines only; records are Any to it, so only the plain type error shows
     out, rc = tool(project, "mypy", "main.pyn")

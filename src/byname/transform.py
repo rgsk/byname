@@ -29,6 +29,10 @@ PRELUDE = (
     "from typing import NamedTuple as _NT\n"
     f"def {REPR}(self) -> str: return '(' + ', '.join(f'{{k}}={{v!r}}' for k, v in zip(self._fields, self)) + ')'\n"
 )
+# basedpyright infers a mixed list like [(age="90"), (age=23)] as list[Unknown], which switches off every
+# check on what comes out of it. Strict inference gives list[A | B]. A comment, not a config setting: the
+# checker runs in the user's project, and these aren't language-server settings.
+CHECKER_DIRECTIVE = "# pyright: strictListInference=true, strictDictionaryInference=true, strictSetInference=true\n"
 TYPED_PRELUDE = "from typing import TYPE_CHECKING as _TC, TypedDict as _TD\n"  # for the checker-only methods
 STMT_START = {tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT}
 
@@ -396,8 +400,8 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
         body = body[: e.start] + e.text + body[e.end :]
 
     prelude = ""
-    if records:
-        prelude = PRELUDE + ("" if portable else TYPED_PRELUDE) + "".join(record_def(f, portable) for f in records)
+    if records:  # only files with records: plain Python is left exactly as written
+        prelude = PRELUDE + ("" if portable else CHECKER_DIRECTIVE + TYPED_PRELUDE) + "".join(record_def(f, portable) for f in records)
     standins.sort()
     return Result(prelude, body, edits, problems, standins, sorted(field_spans))
 
