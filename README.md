@@ -213,7 +213,8 @@ The command **"byname: Write Python Output"** writes `<name>.pyn.py` on demand.
 
 **Choosing a checker:** it must infer return types of functions without annotations, because that's
 where record types come from. pyright, basedpyright and Pyrefly do. ty doesn't yet (everything shows as
-`Unknown`).
+`Unknown`). basedpyright is the one byname is tested against; Pyrefly leaves records built from spreads
+unchecked.
 
 ## Lint, type-check, format
 
@@ -226,8 +227,9 @@ byname tool mypy file.pyn
 byname tool basedpyright file.pyn
 ```
 
-mypy doesn't infer return types, so records look like `Any` to it. It won't catch `(nope=) = res`;
-basedpyright will.
+basedpyright is the checker byname supports. Pyrefly checks everything but records built from
+spreads. mypy doesn't infer return types, so records mostly look like `Any` to it (it won't catch
+`(nope=) = res`), and it wrongly rejects nested record types like `(user: (name: str))`.
 
 `byname format` runs `ruff format`. It swaps byname syntax for short plain-Python stand-ins, formats,
 then swaps them back:

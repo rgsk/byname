@@ -15,7 +15,7 @@ solutions there are written as `.pyn`.
 | `ip_main.pyn` | **CSES / stdin template**: `set_io()` reads `input.txt` next to the file when run locally, then module-level I/O |
 | `cf_main.pyn` | **Codeforces template**: same shape as `ip_main.pyn`, shares `input.txt` |
 | `.vscode/settings.json` | `byname.outputOnSave` and `byname.outputStripMain` both on, so each save writes `<name>.pyn.py` without `__main__` |
-| `.vscode/tasks.json` | `check: current file` (Alt+L): runs ruff, mypy and basedpyright on `.pyn` through `byname tool` |
+| `.vscode/tasks.json` | `check: current file` (Alt+L): runs ruff and basedpyright on `.pyn` through `byname tool` (mypy was dropped 2026-10-04: only false errors, see Checkers); ruff and mypy on `.py` |
 | `.gitignore` | `*.pyn.py` (generated) and `.venv/` |
 
 **Workflow there:** write the `.pyn`, press Alt+R to run it, save (which writes `<name>.pyn.py`), then
@@ -44,7 +44,10 @@ paste `<name>.pyn.py` into the judge.
 ## Measured facts (don't re-measure)
 
 - **Return-type inference through the translation:** pyright, basedpyright and Pyrefly give identical results (`-> _rec_…[str, int]`, field types, and an error on unknown fields). ty returns `Unknown` everywhere.
-- **mypy:** records are `Any`, because mypy doesn't infer return types. It runs clean but can't catch field typos.
+- **Checkers (2026-10-04): basedpyright is the one byname supports;** byname is designed and tested against it. Pyrefly and mypy are best-effort: they must not crash and generated code stays quiet, but no new workarounds for them. The ones already in place stay while they cost nothing (mypy: `if MYPY:` in CTX_PRELUDE, the `Any` default, `__repr__` as a method); revisit them only if they get in the way. A 29-case matrix of every feature, each line tagged as an expected error or not:
+  - basedpyright 1.40.1: all right.
+  - Pyrefly 1.3.2: misses errors in all 4 spread-built records (`p: T = (**u,)`, `f((**u,))`, `f(p=…)`, overloads), never a false error: it doesn't give a lambda's parameter the expected type, so they're unchecked. Everything else matches basedpyright.
+  - mypy: a false error on nested record types (`q: (user: (name: str)) = …` says the type isn't assignable to itself); misses fields of inferred return types (`mk().nme`: mypy doesn't infer them, so records are mostly `Any`) and spread records passed to overloads.
 - **basedpyright's default mode is noisy:** "recommended" flags `reportImplicitRelativeImport` and similar. Both the language server and `byname tool` default it to `standard`, unless the project has its own pyright config.
 - **basedpyright infers a mixed list as `list[Unknown]`** (`[(age="90"), (age=23)]`, even `[1, "a"]`), unlike pyright's `list[int | str]`. Unknown switches off checking for everything read from it, so `rs[0]._replace(nme=...)` passed silently. byname turns on `strictListInference`, `strictDictionaryInference` and `strictSetInference` with a `# pyright:` comment at the top of the generated prelude (`CHECKER_DIRECTIVE` in `transform.py`), giving `list[A | B]`. A comment, not a setting: these aren't language-server settings (injecting them via `workspace/configuration` silently did nothing), and the checker runs in the user's project, where byname writes no config file. Only files with records get it, and the comment overrides a project config for those files. Output files don't get it. Records can't be told apart at runtime (one class per field set; field types exist only for the checker), so `isinstance(r.age, int)` narrows the field, not the record; to require one type, annotate: `rs: list[(name: str, age: int)] = [...]`.
 - **basedpyright config:** it asks for the `python` and `basedpyright` sections, with `analysis` nested inside. It only asks when the client declares `workspace.configuration`; VS Code does.
