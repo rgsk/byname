@@ -57,3 +57,26 @@ def test_format_record_types(tmp_path):
     out = format_pyn(src, str(tmp_path / "f.pyn"))
     assert out == "def f(n: int) -> (h: int, d: (a: int, b: list[int])):\n    return (h=n, d=(a=1, b=[n]))\n"
     assert format_pyn(out, str(tmp_path / "f.pyn")) == out
+
+
+def test_grid_packs_to_the_first_lines_width(tmp_path):
+    # the first line sets the most a line may hold; ruff alone would put one item per line
+    src = "s = [\n    1,2, 3,\n    4, 5, 6, 7, 8, 9,\n]\nf(\n    a, b, c,\n    d=jfljdskfsd, e=fdsljfsdklfd, g=, h=,\n)\n"
+    out = format_pyn(src, cwd=tmp_path)
+    assert out == "s = [\n    1, 2, 3,\n    4, 5, 6,\n    7, 8, 9,\n]\nf(\n    a, b, c,\n    d=jfljdskfsd,\n    e=fdsljfsdklfd,\n    g=, h=,\n)\n"
+    assert format_pyn(out, cwd=tmp_path) == out
+
+
+def test_grid_falls_back_to_one_per_line(tmp_path):
+    # one item on the first line, a comment inside, or an item spanning lines: plain ruff layout
+    one = "s = [\n    1,\n    2, 3,\n]\n"
+    comment = "s = [\n    1, 2,  # first\n    3,\n]\n"
+    assert format_pyn(one, cwd=tmp_path) == "s = [\n    1,\n    2,\n    3,\n]\n"
+    assert format_pyn(comment, cwd=tmp_path) == "s = [\n    1,\n    2,  # first\n    3,\n]\n"
+    nested = "s = [\n    [1], [\n        2, 3,\n        4,\n    ],\n]\n"
+    assert format_pyn(nested, cwd=tmp_path) == "s = [\n    [1],\n    [\n        2, 3,\n        4,\n    ],\n]\n"
+
+
+def test_grid_leaves_fmt_skip_alone(tmp_path):
+    src = "s = [\n    1, 2,\n    3, 4, 5,\n]  # fmt: skip\n"
+    assert format_pyn(src, cwd=tmp_path) == src

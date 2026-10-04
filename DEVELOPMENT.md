@@ -49,6 +49,7 @@ paste `<name>.pyn.py` into the judge.
 - **basedpyright config:** it asks for the `python` and `basedpyright` sections, with `analysis` nested inside. It only asks when the client declares `workspace.configuration`; VS Code does.
 - **Ruff formatter:** it rejects `__P(a=__p) = x` as an invalid assignment target, but accepts `__P[a:__p] = x`. It writes complex slices as `a : b`, and `decode` strips that spacing.
 - **mypy and `__repr__`:** mypy rejects `__repr__ = helper` inside a NamedTuple body, so the generated classes define a real method.
+- **Grids ride on a comment:** Ruff has no bin-packing option, but it keeps a comment that follows an opening bracket on that line. `grid` tags each grid with `# __grid:<k>` (k = items on its first line). After Ruff, `ungrid` measures the width of those k items as Ruff wrote them and repacks to it, so the result doesn't depend on how the first line was spaced, and a second format changes nothing.
 - **Ruff's maximum `line-length` is 320.** It can't turn wrapping off, and it has no option to keep `a; b` on one line (only `# fmt: skip`).
 
 ## Design decisions and why

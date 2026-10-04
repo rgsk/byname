@@ -158,6 +158,20 @@ then swaps them back:
 - **Width:** the stand-ins add a few characters per shorthand, so a line right at your length limit can wrap one step early.
 - **Reserved names:** files that use the names `__p` or `__P` are refused.
 - **Keeping a line as written:** `# fmt: skip` works the same as in `.py` files.
+- **Grids:** if the first line inside a split bracket holds several items, later lines are packed up
+  to its width instead of one item per line. Put one item on the first line to get Ruff's layout back.
+
+  ```python
+  s = [
+      1, 2, 3,
+      4, 5, 6,
+  ]
+  bfs(
+      n, m, k,
+      start=(sr, sc),
+      blocked=walls,
+  )
+  ```
 
 `byname fix` runs `ruff check` on the translation, so `f(os=)` counts as a use of `os`, and applies
 the safe fixes whose edits fall on code you wrote. Fixes that would touch generated code are skipped.
