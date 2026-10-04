@@ -9,6 +9,10 @@ dependencies = []
 [project.scripts]
 byname = "byname.cli:main"
 
+[project.entry-points.pytest11]
+# pytest collects test_*.pyn wherever byname is installed (see pytest_plugin.py)
+byname = "byname.pytest_plugin"
+
 [project.optional-dependencies]
 lsp = [
     "basedpyright>=1.40.1",

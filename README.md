@@ -256,6 +256,15 @@ then swaps them back:
 `byname fix` runs `ruff check` on the translation, so `f(os=)` counts as a use of `os`, and applies
 the safe fixes whose edits fall on code you wrote. Fixes that would touch generated code are skipped.
 
+## Tests in `.pyn`
+
+pytest collects `test_*.pyn` (any `python_files` pattern, with `.pyn` for `.py`) wherever byname is
+installed: the plugin is registered through pytest's `pytest11` entry point, nothing to configure.
+Asserts are rewritten as in `.py` tests (`assert 26 == 27`), failures point at `.pyn` lines, and a test
+imports its `.pyn` and `.py` neighbours. VS Code's Testing panel and the run buttons in the gutter work
+as for `.py` files once pytest is enabled (`"python.testing.pytestEnabled": true`). byname's own
+`tests/test_records.pyn` is an example.
+
 ## Output files
 
 `<name>.pyn.py` is plain Python with no dependency on byname. It's useful for handing code to something

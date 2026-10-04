@@ -1082,14 +1082,20 @@ def _body_ast(r: Result, path: str) -> ast.Module:
     return tree
 
 
-def to_code(src: str, path: str):
-    """Compile .pyn source. Body line numbers match the .pyn file exactly."""
+def to_ast(src: str, path: str) -> ast.Module:
+    """The module that runs, as an AST, prelude included: what to_code compiles. Body line numbers match
+    the .pyn file exactly. For tools that rewrite it first (the pytest plugin rewrites asserts)."""
     r = transform(src, path)
     tree = _body_ast(r, path)
     if r.prelude:
         k = prelude_index(tree)
         tree.body[k:k] = ast.parse(r.prelude).body
-    return compile(tree, path, "exec", dont_inherit=True)
+    return tree
+
+
+def to_code(src: str, path: str):
+    """Compile .pyn source. Body line numbers match the .pyn file exactly."""
+    return compile(to_ast(src, path), path, "exec", dont_inherit=True)
 
 
 def prelude_offset(body: str) -> int:

@@ -1,0 +1,45 @@
+# Records, tested in .pyn itself: pytest collects this file through byname's plugin (pytest_plugin.py)
+
+
+def make(*, name: str, age: int):
+    greeting = f"hi {name}"
+    return (name=, age=, greeting=)
+
+
+def test_a_record_holds_locals_by_name():
+    name, age = "rahul", 26
+    r = make(name=, age=)
+    # compared as a dict: `==` on records compares values by position (see the next test), so it
+    # wouldn't catch a misspelled field name
+    assert r._asdict() == {"name": "rahul", "age": 26, "greeting": "hi rahul"}
+    assert repr(r) == "(name='rahul', age=26, greeting='hi rahul')"
+
+
+def test_equality_compares_values_by_position_not_names():
+    # records are NamedTuples: `==` and hash are the tuple's, so field names don't take part
+    assert (name="r", age=26) == (name="r", agee=26)
+    assert (a=1, b=2) == (1, 2)
+    assert (a=1, b=2) != (b=2, a=1)
+
+
+def test_destructuring_reads_fields_in_any_order_with_rename():
+    (greeting=, age=years) = make(name="tasha", age=23)
+    assert (greeting, years) == ("hi tasha", 23)
+
+
+def test_a_spread_takes_later_fields_and_keeps_the_first_position():
+    defaults = (lr=1e-2, eval_iters=100)
+    cfg = (**defaults, batch_size=32, lr=3e-3)
+    assert cfg._fields == ("lr", "eval_iters", "batch_size")
+    assert cfg.lr == 3e-3
+
+
+def test_replace_copies_with_one_field_changed():
+    cfg = (n_layer=3, n_head=4)
+    deep = cfg._replace(n_layer=6)
+    assert (cfg.n_layer, deep.n_layer, deep.n_head) == (3, 6, 4)
+
+
+def test_for_loops_destructure_each_record():
+    people = [(name="rahul", age=26), (name="tasha", age=23)]
+    assert [f"{name}:{age}" for (name=, age=) in people] == ["rahul:26", "tasha:23"]

@@ -108,6 +108,8 @@ there run through byname directly; no output files.
 - **Output files use portable record classes** (`class R(_NT):` with `object` fields, Python 3.6+), because judges' PyPy is 3.10 and rejects `class R[T0](...)`. The checker's translation keeps the 3.12 generic classes, since that's where field types come from.
 - **`_replace` and `_asdict` are typed for the checkers only.** NamedTuple types them `(**kwargs: Any)` and `dict[str, Any]`, so `r._replace(n=90)` and a stale `GPT(**cfg._asdict())` passed silently. Each record class has a checkers' version (`if _t.TYPE_CHECKING:` ... `else:` the runtime class) that declares `_replace(self, *, name: T0 = ..., ...)` and `_asdict() -> _dct_<fields>[...]` (a generic TypedDict, shown as `{name: str, ...}` in hover). basedpyright and mypy both complete and check field names, and check `**rec._asdict()` against the callee's parameters. They can't exist at runtime: NamedTuple refuses to let a class override them. The checkers' complaint about overriding final methods is silenced in the generated code. Measured: `if TYPE_CHECKING` must be spelled so both checkers recognise it; `from typing import TYPE_CHECKING as _TC` isn't (pyright then reads both branches, mypy reports a redefinition), `import typing as _t` + `_t.TYPE_CHECKING` is, and keeps `TYPE_CHECKING` out of the user's namespace. An `if` inside a NamedTuple body is "Invalid statement" to mypy, so the earlier in-class block was basedpyright-only. New public names like `replace`/`asdict` were rejected: they'd take names from fields and add API beyond binding by name. Output files don't get any of this.
 
+- **`.pyn` tests through a pytest plugin, not a conftest:** the `pytest11` entry point makes it work in every project with byname installed (llm, cp), with no per-project file. It subclasses `pytest.Module` and overrides `_getobj` (pytest's own import path can't load `.pyn` with assert rewriting, which only hooks `.py`), building the module from `to_ast` so `rewrite_asserts` runs on the real tree. Measured: VS Code's Python extension discovery (`vscode_pytest`) reports `.pyn` files and their tests with the right `lineno`, so the gutter's run buttons appear. Its parametrized-test code splits the nodeid at `.py`, so a parametrized `.pyn` test gets an odd internal parent id (`…pynn::`); not tried in the editor. After adding the entry point, each project needs `uv sync --reinstall-package byname` for the metadata to register.
+
 ## Not yet built
 
 **Designed, not built:**
@@ -144,6 +146,7 @@ there run through byname directly; no output files.
 | `src/byname/output.py` | `<name>.pyn.py` rendering: marker, divider, `drop_main` |
 | `src/byname/hook.py` | import hook for `.pyn` |
 | `src/byname/cli.py` | `run`, `show`, `format`, `tool`, `lsp` |
+| `src/byname/pytest_plugin.py` | pytest collects `test_*.pyn` (`pytest11` entry point): `to_ast`, pytest's `rewrite_asserts` on it, then exec into a module registered in `sys.modules`, with the test's folder on `sys.path` like pytest's default prepend mode |
 | `editors/vscode/` | thin extension: launches `byname lsp`, settings, the "Write Python Output" command |
 
 ## Conventions

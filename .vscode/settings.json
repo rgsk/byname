@@ -1,0 +1,6 @@
+{
+    // Testing panel + run buttons in the gutter, for test_*.py and test_*.pyn (byname's pytest plugin)
+    "python.testing.pytestEnabled": true,
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestArgs": ["tests"]
+}
