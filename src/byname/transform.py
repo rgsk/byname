@@ -897,9 +897,13 @@ def prelude_index(tree: ast.Module) -> int:
     return i
 
 
-def to_code(src: str, path: str):
-    """Compile .pyn source. Body line numbers match the .pyn file exactly."""
-    r = transform(src, path)
+def source_ast(src: str, path: str = "<pyn>") -> ast.Module:
+    """The translation's AST with the .pyn file's own line numbers, without the prelude. For tools that
+    match checker output back to source constructs (e.g. which function a line is in)."""
+    return _body_ast(transform(src, path), path)
+
+
+def _body_ast(r: Result, path: str) -> ast.Module:
     tree = ast.parse(r.body, path)
     if r.inserted:  # generated lines (parameter patterns): count as the line before them, the `def`
         extra = [line + k for k, line in enumerate(r.inserted)]
@@ -914,6 +918,13 @@ def to_code(src: str, path: str):
                 node.lineno = source_line(node.lineno)  # type: ignore[attr-defined]
                 if isinstance(getattr(node, "end_lineno", None), int):
                     node.end_lineno = source_line(node.end_lineno)  # type: ignore[attr-defined]
+    return tree
+
+
+def to_code(src: str, path: str):
+    """Compile .pyn source. Body line numbers match the .pyn file exactly."""
+    r = transform(src, path)
+    tree = _body_ast(r, path)
     if r.prelude:
         k = prelude_index(tree)
         tree.body[k:k] = ast.parse(r.prelude).body

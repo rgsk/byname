@@ -24,6 +24,21 @@ paste `<name>.pyn.py` into the judge.
 - **CSES I/O stays at module level,** because `outputStripMain` would delete a `__main__` block, leaving a program that does nothing.
 - **Solution style:** plain, like `cses/*/sol.cpp`. Logic inline, short comments at each step, no helper functions, and no byname features forced in where they don't fall out naturally.
 
+**`/home/rahul/Documents/codes/projects/llm`**, a build-an-LLM-from-scratch repo (PyTorch). `.pyn` files
+there run through byname directly; no output files.
+
+| File | Purpose |
+|---|---|
+| `pyproject.toml` | byname as an editable path dependency (`../byname`); basedpyright as a dev dependency |
+| `src/records/second.pyn` | `src/video/minimal.py` (char-level GPT on Shakespeare) ported to records, built 2026-10-04. Trains to the same val loss as the original (2.50 at step 500) |
+| `scripts/any_check.py` | lists local names typed `Any`/`Unknown` (white in the editor). Why: an `Any` name switches off checking for everything computed from it, so a typo or wrong method on `logits` passes silently, and in torch code it's common (every module call is `Any`). Normal basedpyright runs say nothing about it; `reportAny` alone is too noisy (returns, arguments, torch's own gaps). Runs basedpyright with `reportAny`/`reportUnknownVariableType` on, keeps only `Type of "name" is Any` for names with no annotation in their scope (found via `source_ast`). `# any:ok` in a line's comment skips it. Works on `.py` too |
+| `.vscode/tasks.json` | `check: current file` (Alt+L): on `.pyn`, ruff and basedpyright through `byname tool`, then `any_check.py`; on `.py`, ruff and mypy |
+
+**What the port settled on** (shapes for torch code in `.pyn`):
+- **Configs are records** with `type GPTConfig = (...)` aliases (closed: exact fields) at the top. Functions take them through parameter patterns with inline open types: `def __init__(self, (vocab_size=, ...): (vocab_size: int, ..., ...))`, called as `GPT(gpt_cfg)`.
+- **Defaults hold only size-independent fields** (`train_defaults = (eval_interval=100, eval_iters=100)`); each config spreads them and must set the size-dependent ones: `train_cfg: TrainConfig = (**train_defaults, batch_size=32, ...)`. `_replace` from a full config was rejected: a stale `block_size` rides along silently. The annotation is needed, an unannotated spread is `Any`.
+- **`nn.Module.__call__` is `Callable[..., Any]`,** so `model(x)` is `Any`. `GPT` gets a checker-only `if TYPE_CHECKING: def __call__(self, idx: Tensor) -> Tensor: ...` (`__call__ = forward` doesn't work: the base's declared type wins). Calls to torch's own layers inside `forward` get one annotation at the first local (`qkv: Tensor = self.qkv(x)`); einops' `rearrange` is generic, so types flow through it.
+
 **Global VS Code config** (`~/.config/Code/User/`):
 - `keybindings.json` has **Alt+R** for `.pyn`: save, then `uv run byname run "${file}"` in the terminal, with `VIRTUAL_ENV` pinned.
 - **Alt+C** (write output) was added and then removed; output-on-save replaced it.
@@ -84,7 +99,7 @@ paste `<name>.pyn.py` into the judge.
 - **Completion in an empty pattern slot** uses a temporary text: the slot is filled with `_ds.<prefix>` (plus a dummy `x=` item so `(x) = y` counts), the checker is asked, then the real text is restored. The proxy numbers document versions itself, so diagnostics computed on the temporary text are dropped.
 - **Output files are named `<name>.pyn.py`,** following the `foo.min.js` convention. They sort right after their source, and the gitignore pattern `*.pyn.py` can't hide a hand-written file.
 - **Every output file gets the marker line and the `# ---- <name>.pyn ----` divider,** even with no generated header, so every output file has the same shape.
-- **Output-on-save lives in the server's didSave handler,** not the extension, so it works in any editor. It's off by default: projects that run `.pyn` through byname (like llm would) don't need output files. A `byname build --out-dir` (like `tsc --outDir`) is only for publishing to places without byname, and isn't built.
+- **Output-on-save lives in the server's didSave handler,** not the extension, so it works in any editor. It's off by default: projects that run `.pyn` through byname (like llm does) don't need output files. A `byname build --out-dir` (like `tsc --outDir`) is only for publishing to places without byname, and isn't built.
 - **`outputStripMain` is off by default** and on in `cp` only.
 - **`diagnosticsOnSave` holds the checker's diagnostics in the proxy** until the editor version they were computed for is the saved one, then sends them (on save, or on arrival if the save came first). While the text is unsaved it still sends the shown ones that survive (matched by message, code and severity, since positions move), so a fixed error disappears at once and only new ones wait. On in `cp`, where half-typed code covered the file in red. VS Code moves the squiggles already shown along with edits, so they stay roughly in place while typing. The proxy removes the client's pull-diagnostics capability (`textDocument.diagnostic`) in `initialize`: basedpyright registers pull diagnostics when VS Code offers them, and pulled results would skip `diagnostics()` (the first version of this setting failed in the editor because of that). There's no debounce option: the user wanted "nothing until I save", and holding diagnostics in the proxy works with any checker.
 - **Lint fixes run on the translation, not the formatter's stand-ins.** Stand-ins turn `f(os=)` into `f(os=__p)`, so `import os` would look unused and F401 would delete it. On the translation every use is real. A fix is applied only if each of its edits maps back to source text that matches the hidden text exactly; anything touching generated code or the prelude is dropped whole. It loops until nothing changes, because fixes unlock others (`List[int]` → `list[int]` leaves `from typing import List` unused). Only `safe` fixes, like Ruff's own on-save.
@@ -116,7 +131,7 @@ paste `<name>.pyn.py` into the judge.
 
 | File | Role |
 |---|---|
-| `src/byname/transform.py` | token-level `.pyn` → Python. Records `Edit`/`Mark` provenance for position mapping, `standins` for formatting, and `problems` (tolerant mode, editor only). Also `pattern_slot` for completion |
+| `src/byname/transform.py` | token-level `.pyn` → Python. Records `Edit`/`Mark` provenance for position mapping, `standins` for formatting, and `problems` (tolerant mode, editor only). Also `pattern_slot` for completion, and `source_ast`: the translation's AST with the `.pyn`'s own line numbers (parameter-pattern lines count as the `def`, no prelude), shared with `to_code`, for tools that match checker output to source (llm's `scripts/any_check.py`) |
 | `src/byname/srcmap.py` | `Translation`: source ↔ hidden position mapping (UTF-16 columns, prelude offset). Display vs edit vs exact range modes |
 | `src/byname/lsp.py` | the proxy: rewrites URIs and positions, shadow files, config injection, semantic tokens, slot completion, formatting, output writing, the `byname.server.writeOutput` command |
 | `src/byname/tools.py` | `byname tool`: project mirror plus output remapping |

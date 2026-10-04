@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from byname import to_code, to_python, transform
+from byname import source_ast, to_code, to_python, transform
 from byname.transform import pattern_slot
 
 
@@ -632,6 +632,18 @@ def test_parameter_patterns_keep_line_numbers():
     with pytest.raises(ValueError) as e:
         exec(code, {})
     assert [fr.lineno + 1 for fr in e.traceback if fr.frame.code.path == "q.pyn"] == [6, 3]
+
+
+def test_source_ast_has_the_pyn_line_numbers():
+    # for tools matching checker output to source: the parameter pattern's generated line counts as
+    # the `def`, so the function spans its .pyn lines and the statements after it keep theirs
+    src = "x = 1\ndef f((a=, b=)):\n    y = a\n    return y\n\n\nz: int = f((a=1, b=2))\n"
+    tree = source_ast(src)
+    f = tree.body[1]
+    assert isinstance(f, ast.FunctionDef) and (f.lineno, f.end_lineno) == (2, 4)
+    assert [s.lineno for s in f.body][-2:] == [3, 4]
+    assert tree.body[2].lineno == 7 and isinstance(tree.body[2], ast.AnnAssign)
+    assert not any(isinstance(s, ast.ImportFrom) for s in tree.body)  # no prelude
 
 
 def test_parameter_pattern_runs_on_old_pythons():
