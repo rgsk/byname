@@ -21,6 +21,8 @@ its width instead of one item per line:
         blocked=walls,
     )
 
+The first line may also start right after the bracket (`s = [1, 2, 3,`). Like ruff's magic trailing
+comma, it all needs a trailing comma after the last item.
 `grid` tags these brackets with a comment before ruff runs, and `ungrid` repacks them after.
 """
 
@@ -141,7 +143,6 @@ def grid(src: str) -> str:
         toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
     except (tokenize.TokenError, SyntaxError):
         return src  # broken code: ruff reports it
-
     pair = _pairs(toks)
     starts = [0]
     for line in src.splitlines(keepends=True):
@@ -158,21 +159,22 @@ def grid(src: str) -> str:
             skip.add(i)
         if t.type == tokenize.NEWLINE:
             stmt = i + 1
-    tags: list[tuple[int, int]] = []  # (offset after the bracket, items on the first line)
+    inserts: list[tuple[int, str]] = []
     for o, c in pair.items():
-        if o in skip or toks[o + 1].type != tokenize.NL:
+        if o in skip or toks[c].start[0] == toks[o].start[0]:
             continue
         items = _items(toks, o, c, pair)
         if not items:
             continue
+        hug = toks[o + 1].type != tokenize.NL  # `[1, 2, 3,` : the first line starts right after the bracket
         row = toks[items[0][0]].start[0]
         k = sum(1 for _, b in items if toks[b].end[0] == row)
         if k >= 2 and toks[items[k - 1][1] + 1].type == tokenize.NL:  # k whole items, nothing after
             r, col = toks[o].end
-            tags.append((starts[r - 1] + col, k))
+            inserts.append((starts[r - 1] + col, f"  {GRID}{k}" + "\n" * hug))  # a hugged first line moves below the tag
     out = src
-    for at, k in sorted(tags, reverse=True):
-        out = out[:at] + f"  {GRID}{k}" + out[at:]
+    for at, text in sorted(inserts, reverse=True):
+        out = out[:at] + text + out[at:]
     return out
 
 

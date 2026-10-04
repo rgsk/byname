@@ -80,3 +80,16 @@ def test_grid_falls_back_to_one_per_line(tmp_path):
 def test_grid_leaves_fmt_skip_alone(tmp_path):
     src = "s = [\n    1, 2,\n    3, 4, 5,\n]  # fmt: skip\n"
     assert format_pyn(src, cwd=tmp_path) == src
+
+
+def test_grid_from_items_right_after_the_bracket(tmp_path):
+    # `[1, 2, 3,` : the items on the bracket line are the first line
+    src = "s = [1, 2, 3,\n4, 5, 6, 7, 8, 9,]\nr = bfs(n, m, k,\n  start=(sr, sc), blocked=walls,)\n"
+    out = format_pyn(src, cwd=tmp_path)
+    assert out == "s = [\n    1, 2, 3,\n    4, 5, 6,\n    7, 8, 9,\n]\nr = bfs(\n    n, m, k,\n    start=(sr, sc),\n    blocked=walls,\n)\n"
+    assert format_pyn(out, cwd=tmp_path) == out
+
+
+def test_grid_needs_a_trailing_comma(tmp_path):
+    # no trailing comma: plain ruff, which joins what fits on one line
+    assert format_pyn("s = [1, 2, 3,\n4, 5, 6]\n", cwd=tmp_path) == "s = [1, 2, 3, 4, 5, 6]\n"
