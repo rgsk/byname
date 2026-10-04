@@ -22,6 +22,12 @@ def test_stand_ins_are_plain_python():
     assert decode(encode(src)) == src
 
 
+def test_for_target_stand_in(tmp_path):
+    src = "for (x=, y=t) in pts:\n    pass\n"
+    assert encode(src) == "for __P[x:__p, y:t] in pts:\n    pass\n"
+    assert format_pyn("for (x= ,y = t) in pts :\n  pass\n", cwd=tmp_path) == src
+
+
 def test_decode_eats_slice_spacing():
     # ruff writes complex slices as `a : b`; that must come back as `a=b`
     assert decode('__P[name:__p, age : d["age"]] = r\n') == '(name=, age=d["age"]) = r\n'

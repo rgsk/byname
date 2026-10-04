@@ -30,6 +30,7 @@ always your local. A bare `field=` means `field=field`.
 | record | `(name=, score=99.5)` | an immutable record with fields `name`, `score` |
 | destructure | `(name=, age=) = r` | `name = r.name; age = r.age` |
 | rename | `(name=who) = r` | `who = r.name` |
+| loop | `for (name=, age=) in rs:` | each item destructured, also in comprehensions |
 | record type | `def f() -> (name: str, age: int):` | the record's type, in any annotation |
 
 Every form is a syntax error in plain Python, so byname never changes the meaning of valid Python code.
@@ -62,11 +63,12 @@ def dfs(node: TreeNode | None) -> (height: int, diameter: int):
 (x=self.x, y=self.y) = (x=, y=)        # targets can be attributes or subscripts
 (name=, name=alias) = r                # one field into two locals
 (a=b, b=a) = (a=, b=)                  # swap
+for (x=, y=) in pts: ...               # for-loop targets
+[x * y for (x=, y=) in pts]            # comprehension targets
 ```
 
 **Not supported (yet):**
 - **Nested patterns:** `(user=(name=)) = r`.
-- **Destructuring in `for` targets.**
 - **Dicts:** destructuring reads attributes, not keys.
 - **Positional items in a pattern:** `(a, b=) = r`.
 - **Shorthand in `def` signatures.**

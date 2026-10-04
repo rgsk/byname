@@ -6,6 +6,7 @@ Everything is built on the `name=` shorthand from PEP 736 (rejected):
     (name=, age=)             record       -> _rec_name__age(name=name, age=age)
     (name=, age=) = expr      destructure  -> _ds = expr; name = _ds.name; age = _ds.age
     (name=n) = expr           rename       -> _ds = expr; n = _ds.name
+    for (name=, age=) in xs:  loop         -> for (name, age) in ((_ds.name, _ds.age) for _ds in xs):
 
 Left of `=` is always the field, right is always the local, in all three forms.
 
@@ -193,18 +194,19 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
             continue
         at_stmt_start = prev is None or prev.type in STMT_START or prev.string == ";"
         is_pattern = at_stmt_start and toks[close + 1].string == "="
+        is_for = prev is not None and prev.string == "for" and toks[close + 1].string == "in"
         kw = [is_kw(it) for it in its]
         bare = [len(it) == 1 and is_name(toks[it[0]]) for it in its]
         if not all(kw):
             # a pattern with some `field=` items and some bare names: half-typed, or a mistake
-            if not (is_pattern and any(kw) and all(k or b for k, b in zip(kw, bare))):
+            if not ((is_pattern or is_for) and any(kw) and all(k or b for k, b in zip(kw, bare))):
                 continue  # ordinary parenthesised expression / tuple / genexp
             name = toks[its[bare.index(True)][0]]
             if not tolerant:
                 raise err(f"pattern item {name.string!r} needs '=': write {name.string}= or {name.string}=target", name)
 
         fields = tuple(toks[it[0]].string for it in its)
-        if is_pattern:
+        if is_pattern or is_for:
             # (field=) binds local `field`; (field=target) binds `target`; bare `field` (tolerant) binds nothing
             targets = []
             for it, b in zip(its, bare):
@@ -219,11 +221,64 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
                 if not is_target(text):
                     raise err(f"cannot bind field {toks[it[0]].string!r} to {text!r}", toks[it[2]])
                 targets.append(text)
+            # stand-in: __P[a:__p, b:target] = expr / for __P[...] in xs (a subscript is a valid target)
+            group = span(i, close)
+            standins.append((group[0], group[0] + 1, PAT + "["))
+            standins.append((group[1] - 1, group[1], "]"))
+            for it in its:
+                if len(it) >= 2 and toks[it[1]].string == "=":
+                    standins.append((*span(it[1]), ":" + (SHORT if is_short(it) else "")))
+            field_spans.extend(span(it[0]) for it, b in zip(its, bare) if not b)
+        if is_for:
+            # for (a=, b=t) in xs:  ->  for (a, t) in ((_ds.a, _ds.b) for _ds in xs):
+            # one line, so line numbers hold; the generator keeps field types and scopes `_ds`
+            for it, b in zip(its, bare):
+                if b:  # half-typed (tolerant): reads the field, binds nothing
+                    edits.append(Edit(*span(it[0]), "_", span(it[0])))
+                elif is_short(it):
+                    edits.append(Edit(*span(it[1]), "", span(it[0])))
+                else:
+                    edits.append(Edit(off(toks[it[0]].start), off(toks[it[2]].start), "", span(it[0])))
+            # the iterable ends at the statement's `:`, or a comprehension's next clause or closing bracket
+            pre = toks[i - 2] if i > 1 else None
+            is_async = pre is not None and pre.string == "async"
+            if is_async:  # an async iterable needs an async generator
+                pre = toks[i - 3] if i > 2 else None
+            stmt = pre is None or pre.type in STMT_START or pre.string == ";"
+            first = j = close + 2
+            comma = False
+            while True:
+                s = toks[j]
+                if s.type in (tokenize.NEWLINE, tokenize.ENDMARKER) or s.string in (")", "]", "}"):
+                    break
+                if (s.string == ":") if stmt else (s.type == tokenize.NAME and s.string in ("if", "for", "async")):
+                    break
+                comma = comma or s.string == ","
+                j = pair.get(j, j) + 1
+            if j == first:
+                raise err("missing iterable after 'in'", toks[close + 1])
+            text, marks = " (", []
+            if len(its) > 1:
+                text += "("
+            for k, (it, f) in enumerate(zip(its, fields)):
+                text += ", " if k else ""
+                text += f"{DS}."
+                marks.append(Mark(len(text), len(text) + len(f), *span(it[0])))
+                text += f
+            text += (")" if len(its) > 1 else "") + f" {'async ' if is_async else ''}for {DS} in"
+            at = off(toks[close + 1].end)
+            edits.append(Edit(at, at, text, group, marks))
+            if comma:  # `for x in a, b:` is a tuple; a generator needs it parenthesised
+                at = off(toks[first].start)
+                edits.append(Edit(at, at, "(", group))
+            at = off(toks[j - 1].end)
+            edits.append(Edit(at, at, "))" if comma else ")", group))
+            continue
+        if is_pattern:
             # end of statement: NEWLINE or ';' at depth 0
             j = close + 2
             while toks[j].type not in (tokenize.NEWLINE, tokenize.ENDMARKER) and toks[j].string != ";":
                 j = pair.get(j, j) + 1
-            group = span(i, close)
             binds, marks = "", []
             for it, f, tg in zip(its, fields, targets):
                 binds += "; "
@@ -243,15 +298,8 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
                 marks.append(Mark(len(binds), len(binds) + len(f), *span(it[0])))
                 binds += f
             stmt_end = off(toks[j - 1].end)
-            # stand-in: __P[a:__p, b:target] = expr (a subscript is a valid assignment target)
-            standins.append((group[0], group[0] + 1, PAT + "["))
-            standins.append((group[1] - 1, group[1], "]"))
-            for it in its:
-                if len(it) >= 2 and toks[it[1]].string == "=":
-                    standins.append((*span(it[1]), ":" + (SHORT if is_short(it) else "")))
             edits.append(Edit(*group, DS, group))
             edits.append(Edit(stmt_end, stmt_end, binds, group, marks))
-            field_spans.extend(span(it[0]) for it, b in zip(its, bare) if not b)
             continue
 
         for it in its:
@@ -281,7 +329,7 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
 
 
 def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:
-    """If offset `at` is a field position in a destructuring pattern `(...) = expr` (an empty item,
+    """If offset `at` is a field position in a destructuring pattern `(...) = expr` or `for (...) in xs` (an empty item,
     or the field name being typed): (word_start, word_end, close_paren, fields_already_listed).
     Used for completion; also matches `(x|) = y`, which is plain Python but a pattern in the making."""
     try:
@@ -312,9 +360,12 @@ def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:
             continue
         prev = toks[i - 1] if i else None
         close = pair[i]
-        if not (prev is None or prev.type in STMT_START or prev.string == ";"):
+        if close + 1 >= len(toks):
             continue
-        if close + 1 >= len(toks) or toks[close + 1].string != "=":
+        if prev is not None and prev.string == "for":  # for (...) in xs
+            if toks[close + 1].string != "in":
+                continue
+        elif not (prev is None or prev.type in STMT_START or prev.string == ";") or toks[close + 1].string != "=":
             continue
         lo, hi = off(t.end), off(toks[close].start)
         if not lo <= at <= hi:

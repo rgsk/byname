@@ -149,6 +149,66 @@ def test_body_keeps_line_count():
     assert r.body.count("\n") == src.count("\n")
 
 
+
+# --- for-loop targets ---------------------------------------------------------
+
+
+def test_for_target_destructures_each_item():
+    # one line, so line numbers hold; the generator keeps field types
+    src = "for (name=, age=a) in rows:\n    pass\n"
+    assert transform(src).body == "for (name, a) in ((_ds.name, _ds.age) for _ds in rows):\n    pass\n"
+
+
+def test_for_target_single_field_needs_no_tuple():
+    assert transform("for (x=) in pts: print(x)\n").body == "for (x) in (_ds.x for _ds in pts): print(x)\n"
+
+
+def test_for_target_runs():
+    src = (
+        "rows = [(name='a', age=1), (name='b', age=2)]\n"
+        "out = []\n"
+        "for (age=, name=n) in rows:\n"
+        "    out.append((n, age))\n"
+        "pairs = [(n, a) for (name=n, age=a) in rows if a > 1]\n"
+        "d = {}\n"
+        "for (name=d['k']) in rows: pass\n"
+    )
+    ns = {}
+    exec(compile_pyn(src), ns)
+    assert ns["out"] == [("a", 1), ("b", 2)]
+    assert ns["pairs"] == [("b", 2)]
+    assert ns["d"] == {"k": "b"}
+
+
+def test_for_target_iterable_ends_at_the_right_place():
+    cases = {
+        # ternary in a for statement belongs to the iterable
+        "for (a=) in f(n=) if c else xs:\n    pass\n": "for (a) in (_ds.a for _ds in f(n=n) if c else xs):\n    pass\n",
+        # a bare tuple gets parenthesised
+        "for (a=) in xs, ys:\n    pass\n": "for (a) in (_ds.a for _ds in (xs, ys)):\n    pass\n",
+        # comprehension: stops at the next clause / closing bracket
+        "s = [a for (a=) in xs if a for q in r]\n": "s = [a for (a) in (_ds.a for _ds in xs) if a for q in r]\n",
+        "d = {k: v for (k=, v=) in items}\n": "d = {k: v for (k, v) in ((_ds.k, _ds.v) for _ds in items)}\n",
+    }
+    for src, expected in cases.items():
+        assert transform(src).body == expected
+
+
+def test_async_for_target_uses_an_async_generator():
+    src = "async def f():\n    async for (a=) in g(): pass\n"
+    assert transform(src).body == "async def f():\n    async for (a) in (_ds.a async for _ds in g()): pass\n"
+
+
+def test_for_target_half_typed_item_reads_the_field():
+    r = transform("for (name=, ag) in rows: pass\n", tolerant=True)
+    assert r.body == "for (name, _) in ((_ds.name, _ds.ag) for _ds in rows): pass\n"
+    with pytest.raises(SyntaxError, match="'ag' needs '='"):
+        transform("for (name=, ag) in rows: pass\n")
+
+
+def test_plain_for_tuple_untouched():
+    assert transform("for (a, b) in xs: pass\n").body == "for (a, b) in xs: pass\n"
+
 # --- errors ------------------------------------------------------------------
 
 
@@ -184,6 +244,7 @@ def test_tolerant_mode_turns_half_typed_item_into_attribute_access():
         ("(gree|) = r\n", ("gree", [])),                           # first item: plain Python so far
         ("(age=, gr|) = r\n", ("gr", ["age"])),                     # bare name being typed
         ("(gre|eting=g) = r\n", ("greeting", [])),                  # renaming the field of an item
+        ("for (age=, |) in rows:\n", ("", ["age"])),                # for-loop target
     ],
 )
 def test_pattern_slot_finds_field_positions(src, expected):
@@ -201,6 +262,7 @@ def test_pattern_slot_finds_field_positions(src, expected):
         "fn(a=, |)\n",       # a call, not a pattern
         "(a=, |)\n",         # a record literal, not a pattern
         "x = (a=, |) = r\n", # not at statement start
+        "for (a=, b=x|) in r:\n",  # target side, in a for
     ],
 )
 def test_pattern_slot_ignores_non_field_positions(src):

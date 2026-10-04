@@ -60,6 +60,7 @@ paste `<name>.pyn.py` into the judge.
 - **TS-style `(email: e = "x")` was rejected for defaults and renaming.** `:` reads as a type annotation in Python (the TS `{ name: string }` trap), and it would make building use `=` while taking apart used `:`.
 - **No trailing comma required on a single-field record.** Unlike `(x)`, `(x=)` can't be read as grouping, so a comma would only be noise.
 - **Positional items in patterns are left an error.** Reading A, where a bare name means by-name, conflicts with Python's `(a, b) = r`, which is positional. Reading B, positional first and then keywords like a call, is consistent, but it brings back the field-order fragility that by-name avoids, and only records support it. If ever built, use B.
+- **`for (a=, b=t) in xs:` becomes `for (a, t) in ((_ds.a, _ds.b) for _ds in xs):`**, on one line so line numbers hold. A generator, not binds at the top of the body: the body's first statement may be compound (`a = …; if …:` is invalid), and the generator keeps exact field types and scopes `_ds`. The same rewrite covers comprehension `for` clauses. The iterable ends at the statement's `:`, or for a comprehension at the next `if`/`for`/`async` or the closing bracket. A bare tuple iterable (`in a, b`) is parenthesised; `async for` gets an async generator. Costs a generator per loop, which is fine for judges' time limits but not free.
 - **Records are generic NamedTuples,** so checkers infer exact field types without annotations. Each file generates its own classes, so records from two files are different types; equality still works.
 - **Ctrl+click on shorthand `x=` goes to the local** (the implicit value); Go to Declaration goes to the parameter. A shortcut for Declaration was skipped as rarely needed.
 - **The editor uses a language-server proxy,** not a piggyback on Pylance, so the checker can be swapped (Pyrefly works) and it works outside VS Code. Pylance itself can't sit behind a proxy because it's closed-source.
@@ -103,7 +104,6 @@ fn(age= ?? 18)                # in a call
 
 **Other not-yet items:**
 - Nested patterns.
-- Destructuring in `for` targets.
 - Ctrl+click on a field inside a pattern. It goes nowhere now; the natural target is where the record was built.
 - `byname build --out-dir`.
 
