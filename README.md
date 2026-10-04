@@ -97,8 +97,10 @@ def make() -> Person:
 ```
 
 A spread record is checked against the type expected where it stands, so you never have to name one.
-With no type expected, like `x = (**u, **r)`, it works but isn't checked: the checker can't know its
-fields, so it's `Any`. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
+With no type expected, like `x = (**u, **r)`, it still gets its exact type when every spread is a name
+the file shows the fields of: bound once, to a record or a spread of such names, or annotated with a
+record type (a parameter's too). Then `x` is `(name: str, age: int, sex: str, surname: str)` and a typo
+like `x.surnme` is an error. Otherwise (a name bound twice, from a call, an import) it's `Any`. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
 `f((**u, **r))` (with basedpyright; mypy doesn't check spread records passed to overloads).
 A field can't be called `keys`: records have a `keys()` method, which is what lets `**` work.
 

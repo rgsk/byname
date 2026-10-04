@@ -139,14 +139,44 @@ def test_spread_mistakes_are_named(project):
         "take((**u, **r, surname='g'))\n"     # fine: no type written, the parameter's is used
         "take((**u, **r))\n"                  # missing surname
         "take(p=(**u, **r, surname=1))\n"     # by keyword: surname is an int
-        "x = (**u, **r)\n"                    # no type expected: unchecked
+        "x = (**u, **r)\n"                    # u, r are known records: x is typed, nothing to check here
     )
     out, rc = tool(project, "basedpyright", "spread.pyn")
     assert 'spread.pyn:5:1 - error: Argument missing for parameter "surname"' in out
     assert out.count("missing field: surname") == 3 and "extra field: x" in out
     assert "spread.pyn:11" not in out and "spread.pyn:12:6" in out and "spread.pyn:14" not in out
-    assert 'spread.pyn:13:8 - error: Argument of type "{name: str, age: int, sex: str, surname: Literal[1]}"' in out
+    assert 'spread.pyn:13:8 - error: Argument of type "(age: int, name: str, sex: str, surname: int)"' in out
     assert "_byname" not in out and "_dct_" not in out
+
+
+def test_spread_of_known_records_is_typed_without_an_annotation(project):
+    # defaults spread into a config: no annotation, yet the result has its exact type, so a typo is caught
+    (project / "defaults.pyn").write_text(
+        "train_defaults = (eval_interval=100, lr=1e-2)\n"
+        "cfg = (**train_defaults, batch_size=32, lr=3e-3)\n"
+        "reveal_type(cfg)\n"
+        "cfg.btach_size\n"
+    )
+    out, rc = tool(project, "basedpyright", "defaults.pyn")
+    assert 'defaults.pyn:3:13 - information: Type of "cfg" is "(eval_interval: int, lr: float, batch_size: int)"' in out
+    assert 'defaults.pyn:4:5 - error: Cannot access attribute "btach_size"' in out
+
+
+def test_spread_of_a_rebound_name_keeps_its_narrowing(project):
+    # `r` is bound twice, so its fields aren't known and the generic path checks the spread inside a
+    # lambda, where pyright drops narrowing for a name reassigned later. Read through a lambda default,
+    # `r` is the record it holds at that point, not the union of both bindings
+    (project / "rebound.pyn").write_text(
+        "type Args = (name: str, age: int)\n"
+        "def fn(*, user: Args): ...\n"
+        "u = (name='r',)\n"
+        "r = (age=1,)\n"
+        "fn(user=(**u, **r))\n"
+        "fn(user=(**u, **r, age='x'))\n"   # still checked: wrong type
+        "r = (tag='a', note=1)\n"
+    )
+    out, rc = tool(project, "basedpyright", "rebound.pyn")
+    assert "rebound.pyn:5" not in out and "rebound.pyn:6:9 - error" in out and "1 error," in out
 
 
 def test_spread_record_picks_the_overload_that_takes_a_record(project):
@@ -164,14 +194,15 @@ def test_spread_record_picks_the_overload_that_takes_a_record(project):
         "lookup((**u,))\n"                     # missing age
         "x = (**u, age=1)\n"
         "def fn(p: Person) -> None: ...\n"
-        "fn(x)\n"                               # no type expected for x: Any, as before
+        "fn(x)\n"                               # x = (**u, age=1) is (name: str, age: int): fine
         "reveal_type(print((**u, age=1)))\n"
     )
     out, rc = tool(project, "basedpyright", "ov.pyn")
     line9 = next(ln for ln in out.splitlines() if "ov.pyn:9:13" in ln)
     assert line9.endswith('is "str"')
     assert "ov.pyn:10:8 - error" in out and "missing field: age" in out
-    assert "ov.pyn:13" not in out and "1 error," in out
+    # the missing age is reported on the argument, plus pyright's "no overload matches" for the call
+    assert "ov.pyn:13" not in out and "2 errors," in out and "ov.pyn:10:1 - error: No overloads" in out
 
 
 def test_parameter_patterns_are_typed(project):

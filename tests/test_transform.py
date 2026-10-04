@@ -473,17 +473,50 @@ def test_spreads_leave_valid_python_alone_at_runtime():
 
 
 def test_spread_records_are_checked_against_the_expected_type():
-    # for the checker, a build takes the type expected where it stands (argument, annotation, return), see
-    # CTX_PRELUDE; an inline type `(name: str)(**u)` is a cast. What runs is just _byname_rec
-    r = transform(SPREADS, checker=True)
-    ctx = "_byname_ctx(lambda _byname_t: _byname_check(lambda: _byname_t)({"
-    assert f"p: Person = {ctx}**_byname_kw(u), **_byname_kw(r)}}))" in r.body
-    assert f"    return {ctx}**_byname_kw(u)" in r.body
+    # when a spread's fields can't be read off the file (here `u` comes from a call), the checker's build
+    # takes the type expected where it stands (argument, annotation, return), see CTX_PRELUDE; an inline
+    # type `(name: str)(**u)` is a cast. What runs is just _byname_rec
+    r = transform(SPREADS.replace('u = (age=26, name="rahul")', "u = load()"), checker=True)
+    # a spread name is read through a lambda default, so it keeps its narrowing (pyright drops it inside a
+    # lambda for a name reassigned later); the user's `u` stays in place, picked over by the narrowed copy
+    ctx = (
+        "_byname_ctx(lambda _byname_t, _byname_s0=_byname_kw(u), _byname_s1=_byname_kw(r): "
+        "_byname_check(lambda: _byname_t)({**_byname_pick(u, _byname_s0), **_byname_pick(r, _byname_s1)}))"
+    )
+    assert f"p: Person = {ctx}" in r.body and f"    return {ctx}" in r.body
     assert "q = _cast(_typ_name__age__sex__surname[str, int, str, str], _byname_rec(_byname_check(" in r.body
     assert "def _byname_ctx(" in r.prelude
     r = transform(SPREADS)
     assert "p: Person = _byname_rec({**u, **r})" in r.body and "both = _byname_rec({**u, **r})" in r.body
     assert "_byname_ctx" not in r.prelude + r.body
+
+
+def test_spread_records_of_known_names_are_plain_records():
+    # for the checker, a spread of names bound once to a record (or annotated with a record type) is built
+    # field by field, so it has its exact type with no annotation; a later field wins and keeps the first
+    # one's position, as at runtime. What runs doesn't change
+    body = transform(SPREADS, checker=True).body
+    assert "both = _rec_age__name__sex__surname(age=u.age, name=r.name, sex=r.sex, surname=r.surname)" in body
+    assert "override, first = _rec_age__name(name=u.name, age=27), _byname_ctx(" in body  # `(age=27, **u)`: generic
+    assert "p: Person = _rec_age__name__sex__surname(age=u.age" in body
+    assert "    return _rec_age__name__sex__surname(" in body
+    src = (
+        "type T = (a: int, b: str)\n"
+        "def f(c: T, d):\n"
+        "    x = (**c, z=1)\n"            # a parameter's record type
+        "    y = (**d, z=1)\n"            # no type: unknown
+        "t: T = (a=1, b='x')\n"
+        "n = (**t,)\n"
+        "again = (**n, b='y')\n"          # a spread of a spread
+        "w = (a=1,)\n"
+        "w = (a=1, b=2)\n"
+        "rebound = (**w,)\n"              # `w` is bound twice: unknown
+    )
+    lines = transform(src, checker=True).body.splitlines()
+    assert lines[2] == "    x = _rec_a__b__z(a=c.a, b=c.b, z=1)"
+    assert "_byname_ctx(" in lines[3] and "_byname_ctx(" in lines[9]
+    assert lines[6] == "again = _rec_a__b(a=n.a, b='y')"
+    assert "_rec_" not in transform(SPREADS).body.split("both = ")[1].split("\n")[0]  # runtime: _byname_rec
 
 
 def test_spread_records_as_call_arguments_fall_back_to_a_record():

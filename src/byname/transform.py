@@ -95,6 +95,7 @@ CTX_PRELUDE = (  # checker only: T is the type expected where the record is buil
     "from typing_extensions import TypeVar as _TV\n"
     "_byname_T = _TV('_byname_T', default=_A)\n"
     "def _byname_ctx(f: _Cl[[_byname_T], object], /) -> _byname_T: ...  # pyright: ignore\n"
+    "def _byname_pick[V](x: object, v: V, /) -> V: ...  # pyright: ignore\n"  # x: the user's name, v: its narrowed copy
     # a call argument: a record type (or None) expected, or else _byname_AnyRec, which a non-record
     # overload `f(x: int)` rejects, so the checker moves on to the overload that takes a record. mypy uses
     # the default whenever there is one, so it gets _byname_ctx: mypy reads `MYPY` as true, pyright as False
@@ -256,12 +257,106 @@ def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
     )
 
 
+def known_fields(body: str) -> dict[str, tuple[str, ...]]:
+    """Names whose record fields can be read off the translation: bound exactly once in the whole file,
+    by a record literal, a spread record of such names, or an annotation with a record type (inline, a
+    `type` alias, or a parameter's). Any other binding of the name anywhere makes it unknown: a wrong
+    field set would be worse than the generic spread path. Checker translation only (see known_build)."""
+    try:
+        tree = ast.parse(body)
+    except SyntaxError:
+        return {}
+    count: dict[str, int] = {}
+    source: dict[str, tuple[str, ast.expr]] = {}  # name -> ("value" | "type", node)
+
+    def bind(name: str, n: int = 1) -> None:
+        count[name] = count.get(name, 0) + n
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            bind(node.id)
+        elif isinstance(node, ast.arg):
+            bind(node.arg)
+            if node.annotation is not None:
+                source[node.arg] = ("type", node.annotation)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bind(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for a in node.names:
+                bind((a.asname or a.name).split(".")[0])
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            for name in node.names:
+                bind(name, 2)  # rebinds a name across scopes: never known
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            bind(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bind(node.rest)
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            source[node.targets[0].id] = ("value", node.value)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            source[node.target.id] = ("type", node.annotation)
+        elif isinstance(node, ast.TypeAlias):
+            source[node.name.id] = ("type", node.value)
+
+    memo: dict[str, tuple[str, ...] | None] = {}
+
+    def resolve(name: str) -> tuple[str, ...] | None:
+        if name in memo:
+            return memo[name]
+        memo[name] = None  # a cycle stays unknown
+        if count.get(name) == 1 and name in source:
+            kind, node = source[name]
+            memo[name] = of_value(node) if kind == "value" else of_type(node)
+        return memo[name]
+
+    def of_value(e: ast.expr) -> tuple[str, ...] | None:
+        if isinstance(e, ast.Name):
+            return resolve(e.id)
+        if not isinstance(e, ast.Call) or not isinstance(e.func, ast.Name):
+            return None
+        if e.func.id.startswith("_rec_") and all(k.arg for k in e.keywords) and not e.args:
+            return tuple(k.arg for k in e.keywords if k.arg)  # a record literal
+        if e.func.id in ("_byname_ctx", "_byname_arg"):  # a spread record: its dict display, in order
+            d = next((n for n in ast.walk(e) if isinstance(n, ast.Dict)), None)
+            if d is None:
+                return None
+            out: dict[str, None] = {}
+            for k, v in zip(d.keys, d.values):
+                if k is None:
+                    inner = v.args[0] if isinstance(v, ast.Call) and v.args else v
+                    got = resolve(inner.id) if isinstance(inner, ast.Name) else None
+                    if got is None:
+                        return None
+                    out.update(dict.fromkeys(got))
+                elif isinstance(k, ast.Constant) and isinstance(k.value, str):
+                    out[k.value] = None
+                else:
+                    return None
+            return tuple(out)
+        return None
+
+    def of_type(t: ast.expr) -> tuple[str, ...] | None:
+        if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id.startswith("_typ_"):
+            return tuple(t.value.id.removeprefix("_typ_").split("__"))  # exact types only, not `_opn_`
+        if isinstance(t, ast.Name):
+            return resolve(t.id)
+        return None
+
+    return {name: f for name in source if (f := resolve(name))}
+
+
 def transform(
-    src: str, path: str = "<pyn>", tolerant: bool = False, portable: bool = False, checker: bool = False
+    src: str,
+    path: str = "<pyn>",
+    tolerant: bool = False,
+    portable: bool = False,
+    checker: bool = False,
+    known: dict[str, tuple[str, ...]] | None = None,
 ) -> Result:
     """tolerant (editor only): a half-typed pattern item like `na` in `(name=, na) = r` becomes
     `_ds.na` instead of an error, so the checker can complete field names there.
-    checker: the translation only type checkers see; works around their bugs (see STAR). Never run."""
+    checker: the translation only type checkers see; works around their bugs (see STAR). Never run.
+    known: names with fields known from the file (known_fields); set by the checker translation's second pass."""
     toks = [
         t
         for t in tokenize.generate_tokens(io.StringIO(src).readline)
@@ -381,13 +476,65 @@ def transform(
         before = i - 2 if toks[i - 1].string == "=" and is_name(toks[i - 2]) else i
         return toks[before - 1].string in ("(", ",")
 
+    def known_build(i: int, close: int, its: list[list[int]]) -> bool:
+        """Checker only: a spread record whose `**` items are all names with known fields (known_fields) is
+        built as a plain record, `(**u, age=27)` -> `_rec_name__age(name=u.name, age=27)`, so it has its
+        exact type without an expected type. A later item wins and the first position stays, as at runtime.
+        False: left to the generic path, which also reports any mistakes."""
+        order: dict[str, list[int]] = {}  # field -> the item that gives it
+        for it in its:
+            first = toks[it[0]]
+            if first.string == "**":
+                if len(it) != 2 or not is_name(toks[it[1]]) or toks[it[1]].string not in (known or {}):
+                    return False
+                for f in (known or {})[toks[it[1]].string]:
+                    if f in order and toks[order[f][0]].string != "**":
+                        return False  # overrides a field written before it: rare, generic path
+                    order[f] = it
+            elif is_kw(it):
+                f = first.string
+                if f.startswith("_") or f in RESERVED or (f in order and toks[order[f][0]].string != "**"):
+                    return False
+                order[f] = it
+            else:
+                return False
+        given = {it[0]: [f for f, src in order.items() if src is it] for it in its if toks[it[0]].string == "**"}
+        if not all(given.values()):
+            return False  # a spread whose every field is overridden: generic path
+        fields = tuple(order)
+        records[fields] = None
+        g0 = span(i)[0]
+        edits.append(Edit(g0, g0, record_class(fields), (g0, g0 + 1)))
+        for it in its:
+            if toks[it[0]].string == "**":
+                # `**u` -> `name=u.name, age=u.age`: the user's `u` stays real text (hover, colour, rename)
+                name, (first, *rest) = toks[it[1]].string, given[it[0]]
+                at = off(toks[it[1]].end)
+                edits.append(Edit(off(toks[it[0]].start), off(toks[it[0]].end), f"{first}=", span(it[1])))
+                tail = f".{first}" + "".join(f", {f}={name}.{f}" for f in rest)
+                edits.append(Edit(at, at, tail, span(it[1])))
+            else:
+                # the field name as generated text, like the generic path: the checker would colour a
+                # keyword argument over the record-field colour (field_spans)
+                f = toks[it[0]].string
+                edits.append(Edit(off(toks[it[0]].start), off(toks[it[1]].end), f"{f}=", span(it[0])))
+                field_spans.append(span(it[0]))
+        expand_shorthand(its)
+        standins.append((g0, g0, PAT))
+        return True
+
     def build(i: int, close: int, its: list[list[int]], target: str | None = None, inline_at: int | None = None) -> None:
         """A record built from spreads and fields, `(**u, age=27)`, as `_byname_rec({**u, 'age': 27})`.
         target: the inline record type `(name: str)(**u)` (source text) to check it against."""
-        nonlocal builds
+        nonlocal builds, kw_used
+        if target is None and checker and known and known_build(i, close, its):
+            return
         builds = True
         names = []
-        wrap_kw(its)
+        # checker, no type written: `**name` spreads are read through a lambda default (see below)
+        hoist = [it for it in its if toks[it[0]].string == "**" and len(it) == 2 and is_name(toks[it[1]])]
+        hoist = hoist if target is None and checker else []
+        wrap_kw([it for it in its if it not in hoist])
         for it in its:
             first = toks[it[0]]
             if len(it) >= 2 and first.string == "**":
@@ -409,7 +556,18 @@ def transform(
         g0, g1 = span(i, close)
         if target is None and checker:  # checked against the type expected where it stands, if any
             ctx = "_byname_arg" if is_argument(i, close) else "_byname_ctx"
-            pre, post = f"{ctx}(lambda _byname_t: _byname_check(lambda: _byname_t)({{", "}))"
+            # Inside a lambda pyright drops narrowing of a name that's reassigned later, so a rebound `r`
+            # would be its whole union there. A default is evaluated where the record stands, narrowed:
+            # `lambda _byname_t, _byname_s0=_byname_kw(r): ...{**_byname_pick(r, _byname_s0)}`. The user's
+            # `r` stays real text in place (hover, colour); the copy in the default is generated.
+            defaults = ""
+            for k, it in enumerate(hoist):
+                defaults += f", _byname_s{k}=_byname_kw({toks[it[1]].string})"
+                a, b = span(it[1])
+                edits.append(Edit(a, a, "_byname_pick(", (a, b)))
+                edits.append(Edit(b, b, f", _byname_s{k})", (a, b)))
+                kw_used = True
+            pre, post = f"{ctx}(lambda _byname_t{defaults}: _byname_check(lambda: _byname_t)({{", "}))"
         elif target is None:
             pre, post = "_byname_rec({", "})"
         else:
@@ -766,6 +924,9 @@ def transform(
     body = src
     for e in reversed(edits):
         body = body[: e.start] + e.text + body[e.end :]
+    # checker: spread records of names whose fields the file shows get their exact type (known_build)
+    if checker and known is None and builds and (k := known_fields(body)):
+        return transform(src, path, tolerant, portable, checker, known=k)
 
     prelude = ""
     if records or types:  # only files with records: plain Python is left exactly as written

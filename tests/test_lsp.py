@@ -243,6 +243,24 @@ def test_semantic_tokens_cover_only_source_text(lsp):
     assert "property" in seen["greeting"]  # record field names, which the checker leaves uncoloured
 
 
+def test_spread_names_and_fields_keep_their_colours(lsp):
+    # a spread of a known record is rebuilt field by field for the checker; the user's `d` must stay real
+    # text (variable colour, not dropped), and field names written next to it are record fields (property)
+    c, root, uri = lsp
+    text = "d = (a=1, b=2)\nx = (**d, c=3)\ny = (**load(), c=3)\n"
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 992}, "contentChanges": [{"text": text}]}})
+    legend = c.init["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"]
+    data = c.request("textDocument/semanticTokens/full", {"textDocument": {"uri": uri}})["data"]
+    lines, line, col, got = text.splitlines(), 0, 0, {}
+    for i in range(0, len(data), 5):
+        dl, dc, length, typ, _ = data[i : i + 5]
+        line, col = line + dl, (col + dc if dl == 0 else dc)
+        got[(line, lines[line][col : col + length])] = legend[typ]
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 993}, "contentChanges": [{"text": MAIN}]}})
+    assert got.get((1, "d")) == "variable" and got.get((1, "c")) == "property", got
+    assert got.get((2, "c")) == "property", got  # the generic path, for comparison
+
+
 def test_fields_read_through_record_types_look_like_record_fields(lsp):
     # `p.age` through a record type reads a Final Protocol attribute (readonly static); a record's own
     # field is static. Both must get the same token, or themes colour them differently
