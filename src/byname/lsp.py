@@ -88,6 +88,8 @@ GENERATED_PREFIXES = ("_rec_", "_dct_", "_typ_", "_opn_")
 # an exact record type's field-set mismatch, as pyright reports it: "...Literal['a,b,c']" ... "...Literal['a,b']"
 FIELDSET_RE = re.compile(r"""Literal\['([\w,]*)'\]" is not assignable to type "(?:\(\) -> )?Literal\['([\w,]*)'\]""")
 TARGET_RE = re.compile(r'is incompatible with protocol "_typ_(\w+?)\[')
+# both full field sets from the first protocol line; the Literal lines can be cut short ('...vocab_si…')
+PROTOCOL_RE = re.compile(r'"_(?:rec|typ|opn)_(\w+?)\[[^"]*" is incompatible with protocol "_typ_(\w+?)\[')
 LITERAL_RE = re.compile(r"Literal\['([\w,]*)'\]")
 DICT_MISSING_RE = re.compile(r'"(\w+)" is required in "_dct_')
 DICT_EXTRA_RE = re.compile(r'"(\w+)" is an undefined item in type "_dct_')
@@ -146,16 +148,22 @@ def explain_fields(msg: str) -> str:
         if rule := RULE_RE.search(lines[-1]):
             out[-1] += f" ({rule[1]})"
         return "\n".join(out)
-    if FIELDSET not in msg or not (m := FIELDSET_RE.search(msg)):
+    if FIELDSET not in msg:
         return msg
-    got, want = set(filter(None, m[1].split(","))), set(filter(None, m[2].split(",")))
-    # Which side is which: between two record types pyright also compares them the other way round, and
-    # the innermost Literal line can be that reversed check. The first protocol line names the target.
-    if t := TARGET_RE.search(msg):
-        target = set(t[1].split("__"))
-        sets = [set(filter(None, x.split(","))) for x in LITERAL_RE.findall(msg)]
-        if target in sets and (others := [x for x in sets if x != target]):
-            got, want = others[0], target
+    # pyright cuts literals over 50 characters to `…`, so prefer the class names, which it doesn't cut
+    if p := PROTOCOL_RE.search(msg):
+        got, want = set(p[1].split("__")), set(p[2].split("__"))
+    elif m := FIELDSET_RE.search(msg):
+        got, want = set(filter(None, m[1].split(","))), set(filter(None, m[2].split(",")))
+        # Which side is which: between two record types pyright also compares them the other way round, and
+        # the innermost Literal line can be that reversed check. The first protocol line names the target.
+        if t := TARGET_RE.search(msg):
+            target = set(t[1].split("__"))
+            sets = [set(filter(None, x.split(","))) for x in LITERAL_RE.findall(msg)]
+            if target in sets and (others := [x for x in sets if x != target]):
+                got, want = others[0], target
+    else:
+        return msg
     lines = msg.split("\n")
     indent = lines[1][: len(lines[1]) - len(lines[1].lstrip())] if len(lines) > 1 else "  "
     out = [lines[0]]

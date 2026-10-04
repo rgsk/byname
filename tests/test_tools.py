@@ -98,6 +98,20 @@ def test_field_set_errors_between_record_types_point_the_right_way(project):
     assert "missing field: x" in q and "extra" not in q
 
 
+def test_field_set_errors_on_long_records_name_the_fields(project):
+    # pyright cuts literals over 50 chars ('...vocab_si…'), so the field sets come from the class names
+    (project / "long.pyn").write_text(
+        "type Cfg = (vocab_size: int, block_size: int, n_embed: int, n_head: int, n_layer: int)\n"
+        "a: Cfg = (vocab_size=65, block_size=32, n_embed=64, n_head=4, n_layer=3, dropout=0.1)\n"
+        "b: Cfg = (vocab_size=65, block_size=32, n_embed=64, n_head=4, dropout_rate=0.1)\n"
+    )
+    out, rc = tool(project, "basedpyright", "long.pyn")
+    a, b = out.split("long.pyn:2:")[1].split("long.pyn:3:")[0], out.split("long.pyn:3:")[1]
+    assert "extra field: dropout (reportAssignmentType)" in a and "missing" not in a
+    assert "extra field: dropout_rate\n" in b and "missing field: n_layer (reportAssignmentType)" in b
+    assert "_byname_fieldset" not in out
+
+
 def test_star_unpacking_a_record_into_a_call_is_typed(project):
     (project / "star.pyn").write_text(
         "def fn(name: str, age: int) -> None: ...\n"
