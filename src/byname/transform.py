@@ -29,6 +29,7 @@ PRELUDE = (
     "from typing import NamedTuple as _NT\n"
     f"def {REPR}(self) -> str: return '(' + ', '.join(f'{{k}}={{v!r}}' for k, v in zip(self._fields, self)) + ')'\n"
 )
+TYPED_PRELUDE = "from typing import TYPE_CHECKING as _TC, TypedDict as _TD\n"  # for the checker-only methods
 STMT_START = {tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT}
 
 
@@ -67,6 +68,11 @@ def record_class(fields: tuple[str, ...]) -> str:
     return "_rec_" + "__".join(fields)
 
 
+def dict_class(fields: tuple[str, ...]) -> str:
+    """The TypedDict a record's `_asdict()` returns, as the checker sees it."""
+    return "_dct_" + "__".join(fields)
+
+
 def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
     """portable: plain `class R(_NT):` with `object` fields, which runs on Python 3.6+ (judges run PyPy 3.10).
     Otherwise a 3.12 generic class, so checkers infer each field's type."""
@@ -76,10 +82,26 @@ def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
         body += "; __class_getitem__ = classmethod(lambda cls, _: cls)"
     head = record_class(fields) if portable else f"{record_class(fields)}[{params}]"
     # a real method, not `__repr__ = helper`: mypy rejects assignments in a NamedTuple body
-    return (
+    out = (
         f"class {head}(_NT):\n"
         f"    {body}\n"
         f"    def __repr__(self) -> str: return {REPR}(self)\n"
+    )
+    if portable:
+        return out
+    # checker-only: NamedTuple types `_replace(**kwargs: Any)` and `_asdict() -> dict[str, Any]`, so field
+    # typos and `f(**rec._asdict())` go unchecked. Typed versions fix that; they can't exist at runtime
+    # (NamedTuple refuses to let a class override them), hence `if _TC`. The checker objects to overriding
+    # NamedTuple's final methods; that's in generated code, so it's silenced.
+    kw = ", ".join(f"{f}: T{i} = ..." for i, f in enumerate(fields))
+    td = dict_class(fields)
+    return (
+        f"class {td}[{params}](_TD):\n"
+        f"    {body}\n"
+        + out
+        + f"    if _TC:  # type: ignore\n"
+        f"        def _replace(self, *, {kw}) -> '{head}': ...  # pyright: ignore\n"
+        f"        def _asdict(self) -> {td}[{params}]: ...  # pyright: ignore\n"
     )
 
 
@@ -375,7 +397,7 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
 
     prelude = ""
     if records:
-        prelude = PRELUDE + "".join(record_def(f, portable) for f in records)
+        prelude = PRELUDE + ("" if portable else TYPED_PRELUDE) + "".join(record_def(f, portable) for f in records)
     standins.sort()
     return Result(prelude, body, edits, problems, standins, sorted(field_spans))
 

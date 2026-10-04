@@ -37,6 +37,9 @@ Every form is a syntax error in plain Python, so byname never changes the meanin
 
 **Records** are generic NamedTuples:
 - **Access:** `.field` access, positional unpacking (`a, b = rec`), `rec._asdict()` and `rec._replace(age=27)`.
+- **Copies are checked:** records are immutable, so change one with `rec = rec._replace(age=27)`. The editor
+  completes and checks `_replace`'s field names and types, and checks `f(**rec._asdict())` against `f`'s
+  parameters, so a field `f` doesn't take is flagged.
 - **Equality** is by value.
 - **They print the way you write them:** `(name='Rahul', age=26)`.
 - **Form:** one field needs no trailing comma (`(name=)`). Records can nest, and can appear anywhere an expression can, including comprehensions and lambdas.

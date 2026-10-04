@@ -38,11 +38,9 @@ def test_record_literal_becomes_generic_namedtuple():
     # a bare paren group of keywords is a record; the class goes in the prelude
     r = transform("def f():\n    return (name=, age=)\n")
     assert r.body == "def f():\n    return _rec_name__age(name=name, age=age)\n"
-    assert r.prelude.splitlines()[-3:] == [
-        "class _rec_name__age[T0, T1](_NT):",
-        "    name: T0; age: T1",
-        "    def __repr__(self) -> str: return _byname_repr(self)",
-    ]
+    lines = r.prelude.splitlines()
+    at = lines.index("class _rec_name__age[T0, T1](_NT):")
+    assert lines[at + 1 : at + 3] == ["    name: T0; age: T1", "    def __repr__(self) -> str: return _byname_repr(self)"]
 
 
 def test_record_with_explicit_values():
@@ -61,7 +59,7 @@ def test_record_prints_like_its_literal():
 
 def test_records_with_same_fields_share_one_class():
     r = transform("x = (a=, b=)\ny = (a=1, b=2)\n")
-    assert r.prelude.count("class ") == 1
+    assert r.prelude.count("class _rec_") == 1
 
 
 def test_destructure_binds_fields_by_name():
@@ -405,7 +403,19 @@ def test_output_files_run_on_old_pythons():
     assert "class _rec_n__sq[T0, T1](_NT):" in to_python(src)
     with pytest.raises(SyntaxError):
         ast.parse(to_python(src), feature_version=(3, 8))
-    assert out.count("\n") == to_python(src, divider="# ---- f.pyn ----").count("\n") + 1  # same lines, plus the marker
+    assert "_TC" not in out and "_dct_" not in out  # the checker-only typed methods stay out of output files
+
+
+def test_replace_and_asdict_are_typed_for_the_checker_only():
+    # NamedTuple types them `(**kwargs: Any)` / `dict[str, Any]`; the checker gets per-field versions,
+    # behind `if _TC` because NamedTuple won't let a class override them at runtime
+    r = transform("x = (name=, age=)\n")
+    assert "        def _replace(self, *, name: T0 = ..., age: T1 = ...) -> '_rec_name__age[T0, T1]': ...  # pyright: ignore" in r.prelude
+    assert "        def _asdict(self) -> _dct_name__age[T0, T1]: ...  # pyright: ignore" in r.prelude
+    assert "class _dct_name__age[T0, T1](_TD):" in r.prelude
+    ns = {}
+    exec(compile_pyn("r = (name='a', age=1)\nr2 = r._replace(age=2)\nd = r._asdict()\n"), ns)
+    assert ns["r2"] == ("a", 2) and ns["d"] == {"name": "a", "age": 1}
 
 
 def test_record_type_annotation():

@@ -47,6 +47,7 @@ def test_pretty_record_types():
     assert pretty("_rec_a__b[dict[str, int], list[_rec_x[int]]]") == "(a: dict[str, int], b: list[(x: int)])"
     assert pretty('class "_rec_name__age"') == 'class "(name, age)"'  # unparametrised
     assert pretty("no records here") == "no records here"
+    assert pretty("-> _dct_name__age[str, int]") == "-> {name: str, age: int}"  # what _asdict() returns
 
 
 class Client:
@@ -325,6 +326,21 @@ def test_completion_in_for_and_nested_slots(lsp):
     assert [i["label"] for i in items] == ["greeting"]
     _, items = complete(c, uri, MAIN + "for (x=(age=, |)) in [(x=res)]: pass\n")
     assert {i["label"] for i in items} == {"name", "greeting"}
+
+
+def test_replace_completes_and_checks_fields(lsp):
+    # `_replace(` offers the record's fields; a stale `**cfg._asdict()` is an error in the editor
+    c, root, uri = lsp
+    _, items = complete(c, uri, MAIN + "res._replace(|)\n")
+    assert {"name=", "age=", "greeting="} <= {i["label"] for i in items}
+    text = MAIN + "res._replace(nme='x')\ndef h(*, name: str): ...\nh(**res._asdict())\n"
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 900}, "contentChanges": [{"text": text}]}})
+    end, msgs = time.time() + 60, []
+    while time.time() < end and not any("nme" in m for m in msgs):  # skip diagnostics for the previous text
+        c.diags.pop(uri, None)
+        msgs = [d["message"] for d in c.wait_diags(uri)]
+    assert any('No parameter named "nme"' in m for m in msgs)
+    assert any('No parameter named "age"' in m for m in msgs)  # age, greeting have no parameter in h
 
 
 def test_comma_trigger_only_inside_patterns(lsp):

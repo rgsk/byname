@@ -83,16 +83,18 @@ def uri_to_path(uri: str) -> Path:
     return Path(url2pathname(urlparse(uri).path))
 
 
-REC_RE = re.compile(r"_rec_(\w+)")
+REC_RE = re.compile(r"_(rec|dct)_(\w+)")
 CODE_KEYS = {"newText", "insertText", "filterText", "sortText", "uri", "targetUri", "data"}
 
 
 def pretty(text: str) -> str:
-    """Display form of record types: _rec_name__age[str, int] -> (name: str, age: int)."""
+    """Display form of record types: _rec_name__age[str, int] -> (name: str, age: int), and of the
+    TypedDict a record's `_asdict()` returns: _dct_name__age[str, int] -> {name: str, age: int}."""
     out, i = [], 0
     while m := REC_RE.search(text, i):
         out.append(text[i : m.start()])
-        fields = m.group(1).split("__")
+        fields = m.group(2).split("__")
+        lp, rp = ("{", "}") if m.group(1) == "dct" else ("(", ")")
         j = m.end()
         if j < len(text) and text[j] == "[":
             args, depth, start = [], 0, j + 1
@@ -108,16 +110,16 @@ def pretty(text: str) -> str:
                 elif text[k] == "," and depth == 1:
                     args.append(text[start:k].strip())
                     start = k + 1
-            out.append("(" + ", ".join(f"{f}: {pretty(a)}" for f, a in zip(fields, args)) + ")")
+            out.append(lp + ", ".join(f"{f}: {pretty(a)}" for f, a in zip(fields, args)) + rp)
         else:
-            out.append("(" + ", ".join(fields) + ")")
+            out.append(lp + ", ".join(fields) + rp)
         i = j
     out.append(text[i:])
     return "".join(out)
 
 
 def is_generated_name(name) -> bool:
-    return isinstance(name, str) and (name in (DS, REPR, "_NT") or name.startswith("_rec_"))
+    return isinstance(name, str) and (name in (DS, REPR, "_NT", "_TC", "_TD") or name.startswith(("_rec_", "_dct_")))
 
 
 def is_range(v) -> bool:
@@ -275,7 +277,7 @@ class Proxy:
             items = [self.to_editor(x, doc, display, key) for x in obj]
             return [x for x in items if x is not DROP]
         if isinstance(obj, str):
-            return obj if key in CODE_KEYS or "_rec_" not in obj else pretty(obj)
+            return obj if key in CODE_KEYS or ("_rec_" not in obj and "_dct_" not in obj) else pretty(obj)
         if not isinstance(obj, dict):
             return obj
         if is_range(obj):
