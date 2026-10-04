@@ -184,6 +184,24 @@ def age_of(p: (age: int, ...)) -> int:  # open: any object with at least an int 
 
 assert age_of((name="Ivy", age=7, extra=True)) == 7
 
+# spreads: records are mappings by field name, so `**` works on them
+first, last = (name="Ann", age=30), (surname="Lee", city="Oslo")
+
+
+def card(name: str, age: int, surname: str, city: str) -> str:
+    return f"{name} {surname}, {age}, {city}"
+
+
+assert card(**first, **last) == "Ann Lee, 30, Oslo"  # spread into a call: checked by name
+assert {**first, **last} == {"name": "Ann", "age": 30, "surname": "Lee", "city": "Oslo"}
+older = (**first, age=31)  # build a record: a later field wins (like {**a, **b})
+assert older == (name="Ann", age=31)
+type Contact = (name: str, age: int, surname: str, city: str)
+c: Contact = (**first, **last)  # checked against Contact: a missing or extra field is an error
+assert c.city == "Oslo"
+c2 = (name: str, age: int, surname: str, city: str)(**first, **last)  # or name the type inline
+assert c2 == c
+
 
 # ============================================================================
 # 4. ALL THREE TOGETHER
@@ -205,6 +223,7 @@ assert (a, p_) == (12.0, 14.0)
 # NOT PLANNED - each of these fails
 # ============================================================================
 # (name=) = {"name": "x"}             dicts: destructuring reads attributes, not keys (AttributeError)
+# (keys=1)                            `keys` is reserved: records have keys() so that **record works
 # (a, b=) = r                         positional items: fields are read by name, never by order
 # def f(name=): ...                   would mean "default to the outer name"; shorthand is for call sites
 # (_private=1)                        record fields can't start with "_" (NamedTuple rule)

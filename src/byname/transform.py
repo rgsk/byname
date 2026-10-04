@@ -28,6 +28,12 @@ REPR = "_byname_repr"
 PRELUDE = (
     "from typing import NamedTuple as _NT\n"
     f"def {REPR}(self) -> str: return '(' + ', '.join(f'{{k}}={{v!r}}' for k, v in zip(self._fields, self)) + ')'\n"
+    # records are mappings by field name at runtime, so `f(**rec)` and `{**rec}` work (see RESERVED)
+    "def _byname_keys(self): return self._fields\n"
+    "def _byname_item(self, k):\n"
+    "    if not isinstance(k, str): return tuple.__getitem__(self, k)\n"
+    "    if k in self._fields: return getattr(self, k)\n"
+    "    raise KeyError(k)\n"
 )
 # basedpyright infers a mixed list like [(age="90"), (age=23)] as list[Unknown], which switches off every
 # check on what comes out of it. Strict inference gives list[A | B]. A comment, not a config setting: the
@@ -48,6 +54,52 @@ STAR_PRELUDE = (
     f"@_ov\ndef {STAR}[*Ts](t: tuple[*Ts], /) -> tuple[*Ts]: ...\n"
     f"@_ov\ndef {STAR}[T](t: _Itb[T], /) -> _Itb[T]: ...\n"
     f"def {STAR}(t: _A, /) -> _A: return t\n"
+)
+# Spreads: `**rec` in a call or dict display, and records built from spreads, `(**u, **r, age=27)`.
+# At runtime records are mappings by field name (`keys()` and `rec["name"]`), so Python's own `**` works
+# on them and valid Python is never rewritten. For the checker, `**x` goes through _byname_kw (a record
+# becomes its typed `_asdict()` TypedDict, a dict passes through), checker translation only, like STAR.
+# A spread record is built from a dict display, so a later field wins and keeps the first one's position,
+# like `{**a, **b}`. With a record type in reach (inline `(name: str)(**u)`, `p: T = (**u)`, `return (**u)`
+# under `-> T`), the dict is checked against T's `_asdict()` TypedDict (`cast(T, …)` makes the checker read
+# T as a type); elsewhere the result is Any.
+RESERVED = {"keys"}  # record methods that make `**rec` work
+HASDICT = (
+    "from typing import overload as _ov, Any as _A, Protocol as _PR\n"
+    "class _byname_HasDict[D](_PR):\n"
+    "    def _asdict(self) -> D: ...\n"
+)
+KW_PRELUDE = (  # checker only
+    "@_ov\ndef _byname_kw[D](x: _byname_HasDict[D], /) -> D: ...  # pyright: ignore\n"
+    "@_ov\ndef _byname_kw[M](x: M, /) -> M: ...  # pyright: ignore\n"
+    "def _byname_kw(x: _A, /) -> _A: return x._asdict() if hasattr(x, '_asdict') else x  # pyright: ignore\n"
+)
+BUILD_PRELUDE = (
+    "from typing import cast as _cast\n"
+    "from collections.abc import Callable as _Cl, Mapping as _Mp\n"
+    "from collections import namedtuple as _ntf\n"
+    "@_ov\ndef _byname_check[D](t: _Cl[[], _byname_HasDict[D]], /) -> _Cl[[D], D]: ...  # pyright: ignore\n"
+    "@_ov\ndef _byname_check(t: _Cl[[], object], /) -> _Cl[[_A], _A]: ...  # pyright: ignore\n"
+    "def _byname_check(t: _A, /) -> _A: return _byname_same  # pyright: ignore\n"
+    "def _byname_same(d: _A, /) -> _A: return d\n"
+    "_byname_anyv: _A = None\n"
+)
+BUILD_PORTABLE = (  # what runs in output files: no typing
+    "from typing import cast as _cast\n"
+    "from collections import namedtuple as _ntf\n"
+    "def _byname_same(d): return d\n"
+    "def _byname_check(t): return _byname_same\n"
+    "_byname_anyv = None\n"
+)
+BUILD_REC = (  # build a record from a dict: one class per field tuple, made on first use
+    "_byname_cls = {}  # type: ignore\n"
+    "{sig}\n"
+    "    k = tuple(d)\n"
+    "    c = _byname_cls.get(k)\n"
+    "    if c is None:\n"
+    "        c = _byname_cls[k] = _ntf('_rec_' + '__'.join(k), k)\n"
+    f"        c.__repr__, c.keys, c.__getitem__ = {REPR}, _byname_keys, _byname_item  # type: ignore\n"
+    "    return c(**d)\n"
 )
 FIELDSET = "_byname_fieldset"  # a record's field names, sorted: what an exact record type matches on
 STMT_START = {tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT}
@@ -82,6 +134,12 @@ class Result:
     problems: list[tuple[int, int, str]] = field(default_factory=list)  # (start, end, message), tolerant mode
     standins: list[tuple[int, int, str]] = field(default_factory=list)  # (start, end, text): plain-Python stand-ins, for formatting
     fields: list[tuple[int, int]] = field(default_factory=list)  # source spans of record field names, for highlighting
+
+
+def field_error(name: str) -> str:
+    if name in RESERVED:
+        return f"record field {name!r} is reserved: records have a {name}() method, which lets `**record` work"
+    return f"record field {name!r} cannot start with '_'"
 
 
 def record_class(fields: tuple[str, ...]) -> str:
@@ -148,6 +206,8 @@ def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
         f"class {head}(_NT):\n"
         f"    {body}\n"
         f"    def __repr__(self) -> str: return {REPR}(self)\n"
+        "    def keys(self): return _byname_keys(self)\n"
+        "    def __getitem__(self, k): return _byname_item(self, k)\n"
     )
     if portable:
         return out
@@ -182,7 +242,7 @@ def transform(
         if t.type not in (tokenize.COMMENT, tokenize.NL)
     ]
 
-    # matching bracket for every opener
+    # matching bracket for every opener (and back)
     pair: dict[int, int] = {}
     stack: list[int] = []
     for i, t in enumerate(toks):
@@ -190,6 +250,8 @@ def transform(
             stack.append(i)
         elif t.type == tokenize.OP and t.string in ")]}":
             pair[stack.pop()] = i
+
+    rpair = {c: o for o, c in pair.items()}
 
     line_starts = [0]
     for line in src.splitlines(keepends=True):
@@ -256,6 +318,122 @@ def transform(
                 edits.append(Edit(at, at, toks[it[0]].string, span(it[0]), kind="shorthand"))
                 standins.append((at, at, SHORT))
 
+    kw_used = builds = False
+    type_groups: set[int] = set()  # `(` of record types, for inline construction `(name: str)(**u)`
+
+    def wrap_kw(its: list[list[int]]) -> None:
+        # checker only: `**x` -> `**_byname_kw(x)` in calls and dict displays, so the checker sees a record's
+        # fields one by one (see RESERVED); what runs is untouched
+        nonlocal kw_used
+        if not checker:
+            return
+        for it in its:
+            if len(it) >= 2 and toks[it[0]].string == "**":
+                a, b = off(toks[it[1]].start), off(toks[it[-1]].end)
+                edits.append(Edit(a, a, "_byname_kw(", span(it[1], it[-1])))
+                edits.append(Edit(b, b, ")", span(it[1], it[-1])))
+                kw_used = True
+
+    def one_line(text: str) -> str:
+        """`text` (a type) translated, on one line, for copying into generated code."""
+        body = transform(text, path, portable=portable).body.strip()
+        try:
+            return ast.unparse(ast.parse(body, mode="eval"))
+        except SyntaxError:
+            return " ".join(body.split())
+
+    def ends_stmt(j: int) -> bool:
+        return toks[j].type in (tokenize.NEWLINE, tokenize.ENDMARKER) or toks[j].string == ";"
+
+    def annotation_of(eq: int) -> str | None:
+        """The annotation of `target: T = ...` whose `=` is token `eq`, if it's an annotated assignment."""
+        j, colon = eq - 1, None
+        while j >= 0 and toks[j].type not in STMT_START and toks[j].string != ";":
+            j = rpair.get(j, j)
+            if toks[j].string == ":":
+                colon = j
+            j -= 1
+        if colon is None or colon + 1 >= eq:
+            return None
+        return src[off(toks[colon + 1].start) : off(toks[eq - 1].end)]
+
+    # function bodies and their `-> T`, for `return (**u, **r)`
+    def_spans: list[tuple[int, int, str | None]] = []
+    for d, dt in enumerate(toks):
+        if dt.type != tokenize.NAME or dt.string != "def" or d + 2 >= len(toks):
+            continue
+        o = d + 2
+        if toks[o].string == "[" and o in pair:  # def f[T](...)
+            o = pair[o] + 1
+        if toks[o].string != "(" or o not in pair:
+            continue
+        j, ann = pair[o] + 1, None
+        if toks[j].string == "->":
+            k = j + 1
+            while k < len(toks) and toks[k].string != ":" and not ends_stmt(k):
+                k = pair.get(k, k) + 1
+            ann = src[off(toks[j + 1].start) : off(toks[k - 1].end)]
+            j = k
+        if j + 1 >= len(toks):
+            continue
+        if toks[j + 1].type == tokenize.NEWLINE:
+            depth, e = 0, j + 2
+            for e in range(j + 2, len(toks)):
+                depth += {tokenize.INDENT: 1, tokenize.DEDENT: -1}.get(toks[e].type, 0)
+                if depth == 0:
+                    break
+            def_spans.append((j + 2, e, ann))
+        else:
+            e = j + 1
+            while not ends_stmt(e):
+                e += 1
+            def_spans.append((j + 1, e, ann))
+
+    def return_type(k: int) -> str | None:
+        inside = [(s, e, a) for s, e, a in def_spans if s <= k < e]
+        return max(inside)[2] if inside else None  # the innermost def
+
+    def build(i: int, close: int, its: list[list[int]], target: str | None, inline_at: int | None = None) -> None:
+        """A record built from spreads and fields, `(**u, age=27)`, as `_byname_rec({**u, 'age': 27})`.
+        target: the record type to check it against (source text), if one is in reach."""
+        nonlocal builds
+        builds = True
+        names = []
+        wrap_kw(its)
+        for it in its:
+            first = toks[it[0]]
+            if len(it) >= 2 and first.string == "**":
+                pass
+            elif is_kw(it):
+                if first.string.startswith("_") or first.string in RESERVED:
+                    raise err(field_error(first.string), first)
+                names.append(first.string)
+                field_spans.append(span(it[0]))
+                edits.append(Edit(off(first.start), off(toks[it[1]].end), repr(first.string) + ": ", span(it[0])))
+                if is_short(it):
+                    at = off(toks[it[1]].end)
+                    edits.append(Edit(at, at, first.string, span(it[0]), kind="shorthand"))
+                    standins.append((at, at, SHORT))
+            else:
+                raise err("a record built from spreads takes `**record` and `name=value` items", first)
+        if len(set(names)) != len(names):
+            raise err(f"duplicate record field in {tuple(names)}", toks[i])
+        g0, g1 = span(i, close)
+        if target is None:  # nothing to check against: Any
+            pre, post = "_byname_rec({", "})"
+        else:
+            t = one_line(target)
+            pre, post = f"_byname_rec(_byname_check(lambda: _cast({t}, _byname_anyv))({{", "})))"
+            if inline_at is None:
+                pre = f"_cast({t}, " + pre
+            else:  # `(name: str)(**u)`: the type in the source is the cast's first argument
+                edits.append(Edit(inline_at, inline_at, "_cast(", (inline_at, g1)))
+                pre = ", " + pre
+        edits.append(Edit(g0, g0 + 1, pre, (g0, g1)))
+        edits.append(Edit(g1 - 1, g1, post, (g0, g1)))
+        if inline_at is None:
+            standins.append((g0, g0, PAT))  # formatter: a call, `__P(**u, age=27)`
+
     consumed: set[int] = set()  # `(` of nested pattern groups, handled with their outer pattern
 
     def pattern_items(open_i: int) -> tuple[list[list[int]], list[bool]] | None:
@@ -312,6 +490,9 @@ def transform(
         return text
 
     for i, t in enumerate(toks):
+        if t.type == tokenize.OP and t.string == "{" and i in pair:  # dict display: `{**u, **r}`
+            wrap_kw(items(i))
+            continue
         if not (t.type == tokenize.OP and t.string == "("):
             continue
         if i in consumed:
@@ -324,9 +505,15 @@ def transform(
         if prev2 is not None and prev2.string in ("def", "class"):
             continue
 
+        # building a record type: `(name: str, age: int)(**u, **r)`
+        if prev is not None and prev.string == ")" and rpair.get(i - 1) in type_groups:
+            build(i, pair[i], its, src[off(toks[rpair[i - 1]].start) : off(prev.end)], off(toks[rpair[i - 1]].start))
+            continue
+
         is_call = prev is not None and (is_name(prev) or prev.string in (")", "]"))
         if is_call:
             expand_shorthand(its)
+            wrap_kw(its)
             if checker:
                 wrap_stars(its)
             continue
@@ -344,11 +531,12 @@ def transform(
             fields = tuple(toks[it[0]].string for it in named)
             for it in named:
                 name = toks[it[0]]
-                if name.string.startswith("_"):
-                    raise err(f"record field {name.string!r} cannot start with '_'", name)
+                if name.string.startswith("_") or name.string in RESERVED:
+                    raise err(field_error(name.string), name)
             if len(set(fields)) != len(fields):
                 raise err(f"duplicate record field in {fields}", t)
             types[(fields, is_open)] = None
+            type_groups.add(i)
             group = span(i, close)
             edits.append(Edit(group[0], group[0] + 1, type_class(fields, is_open) + "[", group))
             edits.append(Edit(group[1] - 1, group[1], "]", group))
@@ -360,6 +548,15 @@ def transform(
             if is_open:  # drop `, ...`: the Protocol's name says it's open
                 dots = its[-1][0]
                 edits.append(Edit(off(toks[named[-1][-1]].end), off(toks[dots].end), "", span(dots)))
+            continue
+        # a record built from spreads: `(**u, **r, age=27)`
+        if any(toks[it[0]].string == "**" for it in its):
+            target = None
+            if ends_stmt(close + 1) and prev is not None and prev.string == "=":
+                target = annotation_of(i - 1)  # `p: T = (**u)`
+            elif ends_stmt(close + 1) and prev is not None and prev.string == "return":
+                target = return_type(i)  # `return (**u)` under `-> T`
+            build(i, close, its, target)
             continue
         at_stmt_start = prev is None or prev.type in STMT_START or prev.string == ";"
         is_pattern = at_stmt_start and toks[close + 1].string == "="
@@ -467,8 +664,8 @@ def transform(
 
         for it in its:
             name = toks[it[0]]
-            if name.string.startswith("_"):
-                raise err(f"record field {name.string!r} cannot start with '_'", name)
+            if name.string.startswith("_") or name.string in RESERVED:
+                raise err(field_error(name.string), name)
         if len(set(fields)) != len(fields):
             raise err(f"duplicate record field in {fields}", t)
         records[fields] = None
@@ -492,6 +689,15 @@ def transform(
             prelude += CHECKER_DIRECTIVE + TYPED_PRELUDE + "".join(dict_def(f) for f in dicts)
         prelude += "".join(record_def(f, portable) for f in records)
         prelude += "".join(type_def(f, o, portable) for f, o in types)
+    if builds or kw_used:
+        if not prelude:
+            prelude = PRELUDE
+        if not portable:
+            prelude += HASDICT + (KW_PRELUDE if kw_used else "")
+        if builds and portable:
+            prelude += BUILD_PORTABLE + BUILD_REC.replace("{sig}", "def _byname_rec(d):")
+        elif builds:
+            prelude += BUILD_PRELUDE + BUILD_REC.replace("{sig}", "def _byname_rec(d: _Mp[str, _A], /) -> _A:")
     if stars:
         prelude += STAR_PRELUDE
     standins.sort()

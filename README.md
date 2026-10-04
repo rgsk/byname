@@ -76,6 +76,27 @@ def dfs(node: TreeNode | None) -> (height: int, diameter: int):
     ...
 ```
 
+**Spreads:** records work with `**`, by field name, like dicts:
+
+```python
+u = (name="rahul", age=26)
+r = (sex="male", surname="gupta")
+
+fn(**u, **r)                     # into a call: checked against fn's parameters
+{**u, **r}                       # into a dict
+(**u, age=27)                    # build a record: a later field wins, like {**a, **b}
+
+type Person = (name: str, age: int, sex: str, surname: str)
+p: Person = (**u, **r)           # checked against Person: missing / extra / wrong-typed fields are errors
+def make() -> Person:
+    return (**u, **r)            # checked against `-> Person`
+(name: str, age: int, sex: str, surname: str)(**u, **r)   # or name the type inline
+```
+
+A record built from spreads with no type nearby, like `fn((**u, **r))`, works but isn't checked: the
+checker can't know its fields, so it's `Any`. Give it a type (`p: Person = …`, inline) to check it.
+A field can't be called `keys`: records have a `keys()` method, which is what lets `**` work.
+
 **Destructuring** is plain attribute access, so it works on any object, not only records:
 
 ```python

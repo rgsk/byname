@@ -427,10 +427,77 @@ def test_star_args_go_through_a_plain_tuple_for_the_checker_only():
     # translation passes `*x` through an identity helper typed to return a plain tuple
     src = "fn(*u, **kw)\nprint(*[1])\n"
     r = transform(src, checker=True)
-    assert r.body == "fn(*_byname_star(u), **kw)\nprint(*_byname_star([1]))\n"
+    assert r.body == "fn(*_byname_star(u), **_byname_kw(kw))\nprint(*_byname_star([1]))\n"
     assert "def _byname_star[*Ts](t: tuple[*Ts], /) -> tuple[*Ts]: ..." in r.prelude
     assert transform(src).body == src and transform(src).prelude == ""  # what runs: untouched
 
+
+SPREADS = """\
+def fn(name: str, age: int, sex: str, surname: str):
+    return (name, age, sex, surname)
+
+
+type Person = (name: str, age: int, sex: str, surname: str)
+u = (age=26, name="rahul")
+r = (sex="male", surname="gupta", name="mehak")
+called = fn(**u, **(sex="m", surname="g"))
+merged = {**u, **r}
+both = (**u, **r)
+override, first = (**u, age=27), (age=27, **u)
+p: Person = (**u, **r)
+q = (name: str, age: int, sex: str, surname: str)(**u, **r)
+
+
+def mk() -> Person:
+    return (**u, **r)
+"""
+
+
+def test_records_spread_with_double_star():
+    # records are mappings by field name at runtime: f(**rec), {**rec}; (**u, **r) builds a record, later wins
+    ns = {}
+    exec(compile_pyn(SPREADS), ns)
+    assert ns["called"] == ("rahul", 26, "m", "g")
+    assert ns["merged"] == {"age": 26, "name": "mehak", "sex": "male", "surname": "gupta"}
+    assert repr(ns["both"]) == "(age=26, name='mehak', sex='male', surname='gupta')"
+    assert (ns["override"].age, ns["first"].age) == (27, 26)  # a later field wins, wherever it is
+    assert ns["p"] == ns["q"] == ns["mk"]() == ns["both"]
+    assert ns["p"].surname == "gupta" and ns["u"]["name"] == "rahul" and list(ns["u"].keys()) == ["age", "name"]
+
+
+def test_spreads_leave_valid_python_alone_at_runtime():
+    # `**kw` is only wrapped for the checker; what runs is the source as written
+    src = "f(**kw)\nd = {**a, **b}\n"
+    assert transform(src).body == src and transform(src).prelude == ""
+    assert transform(src, checker=True).body == "f(**_byname_kw(kw))\nd = {**_byname_kw(a), **_byname_kw(b)}\n"
+
+
+def test_spread_records_are_checked_where_a_type_is_in_reach():
+    # inline type, annotated assignment, return under `-> T`: a cast to T; a bare build is just _byname_rec
+    r = transform(SPREADS)
+    assert "p: Person = _cast(Person, _byname_rec(_byname_check(lambda: _cast(Person, _byname_anyv))({**u, **r})))" in r.body
+    assert "q = _cast(_typ_name__age__sex__surname[str, int, str, str], _byname_rec(_byname_check(" in r.body
+    assert "    return _cast(Person, _byname_rec(_byname_check(lambda: _cast(Person, _byname_anyv))({" in r.body
+    assert "both = _byname_rec({**u, **r})" in r.body
+
+
+def test_spread_record_errors():
+    with pytest.raises(SyntaxError, match="duplicate record field"):
+        transform("x = (**u, a=1, a=2)\n")
+    with pytest.raises(SyntaxError, match="takes `\\*\\*record` and `name=value`"):
+        transform("x = (**u, 3)\n")
+    with pytest.raises(SyntaxError, match="'keys' is reserved"):
+        transform("x = (keys=1)\n")
+
+
+def test_spread_records_run_on_old_pythons():
+    from byname.output import render
+
+    src = SPREADS.replace("type Person = ", "Person = ")  # `type` statements need 3.12
+    out = render(src + "print(both, p.surname, fn(**p))\n", Path("s.pyn"))
+    ast.parse(out, feature_version=(3, 8))
+    p = subprocess.run([sys.executable, "-c", out], capture_output=True, text=True, check=True)
+    assert p.stdout == "(age=26, name='mehak', sex='male', surname='gupta') gupta ('mehak', 26, 'male', 'gupta')\n"
 
 def test_record_type_annotation():
     # `(name: type, ...)` in an annotation is the record's type, written the way hover shows it.

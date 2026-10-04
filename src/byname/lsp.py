@@ -89,6 +89,8 @@ GENERATED_PREFIXES = ("_rec_", "_dct_", "_typ_", "_opn_")
 FIELDSET_RE = re.compile(r"""Literal\['([\w,]*)'\]" is not assignable to type "(?:\(\) -> )?Literal\['([\w,]*)'\]""")
 TARGET_RE = re.compile(r'is incompatible with protocol "_typ_(\w+?)\[')
 LITERAL_RE = re.compile(r"Literal\['([\w,]*)'\]")
+DICT_MISSING_RE = re.compile(r'"(\w+)" is required in "_dct_')
+DICT_EXTRA_RE = re.compile(r'"(\w+)" is an undefined item in type "_dct_')
 RULE_RE = re.compile(r"\s*\((report\w+)\)\s*$")
 CODE_KEYS = {"newText", "insertText", "filterText", "sortText", "uri", "targetUri", "data"}
 
@@ -127,7 +129,19 @@ def pretty(text: str) -> str:
 
 def explain_fields(msg: str) -> str:
     """An exact record type rejected a record whose field set differs. pyright's message is a page about
-    FIELDSET, a generated property; keep the first line and say which fields are extra or missing."""
+    FIELDSET, a generated property; keep the first line and say which fields are extra or missing.
+    Likewise a record built from spreads, checked as a dict against the type's TypedDict (`_dct_`)."""
+    if "_dct_" in msg and (DICT_MISSING_RE.search(msg) or DICT_EXTRA_RE.search(msg)):
+        lines = msg.split("\n")
+        indent = lines[1][: len(lines[1]) - len(lines[1].lstrip())] if len(lines) > 1 else "  "
+        out = [lines[0]]
+        if extra := DICT_EXTRA_RE.findall(msg):
+            out.append(f"{indent}extra field{'s' if len(extra) > 1 else ''}: {', '.join(extra)}")
+        if missing := DICT_MISSING_RE.findall(msg):
+            out.append(f"{indent}missing field{'s' if len(missing) > 1 else ''}: {', '.join(missing)}")
+        if rule := RULE_RE.search(lines[-1]):
+            out[-1] += f" ({rule[1]})"
+        return "\n".join(out)
     if FIELDSET not in msg or not (m := FIELDSET_RE.search(msg)):
         return msg
     got, want = set(filter(None, m[1].split(","))), set(filter(None, m[2].split(",")))
@@ -152,7 +166,7 @@ def explain_fields(msg: str) -> str:
 
 def is_generated_name(name) -> bool:
     return isinstance(name, str) and (
-        name in (DS, REPR, FIELDSET, STAR, "_NT", "_t", "_TD", "_PR", "_L", "_S", "_Fi", "_It", "_ov", "_A", "_Itb") or name.startswith(GENERATED_PREFIXES)
+        name in (DS, REPR, FIELDSET, STAR, "_NT", "_cast", "_Cl", "_Mp", "_ntf", "_t", "_TD", "_PR", "_L", "_S", "_Fi", "_It", "_ov", "_A", "_Itb") or name.startswith((*GENERATED_PREFIXES, "_byname_"))
     )
 
 

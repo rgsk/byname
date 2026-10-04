@@ -110,6 +110,24 @@ def test_star_unpacking_a_record_into_a_call_is_typed(project):
     assert "_byname_star" not in out
 
 
+def test_spread_mistakes_are_named(project):
+    (project / "spread.pyn").write_text(
+        "type Person = (name: str, age: int, sex: str, surname: str)\n"
+        "def fn(name: str, age: int, sex: str, surname: str): ...\n"
+        "u = (age=26, name='rahul')\n"
+        "r = (sex='male',)\n"
+        "fn(**u, **r)\n"
+        "p: Person = (**u, **r)\n"
+        "q = (name: str, age: int, sex: str, surname: str)(**u, **r, surname='g', x=1)\n"
+        "def mk() -> Person:\n"
+        "    return (**u, **r)\n"
+    )
+    out, rc = tool(project, "basedpyright", "spread.pyn")
+    assert 'spread.pyn:5:1 - error: Argument missing for parameter "surname"' in out
+    assert out.count("missing field: surname") == 2 and "extra field: x" in out
+    assert "_byname" not in out and "_dct_" not in out
+
+
 def test_mypy_line_numbers_map_back(project):
     # mypy reports lines only; records are Any to it, so only the plain type error shows
     out, rc = tool(project, "mypy", "main.pyn")

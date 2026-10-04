@@ -34,6 +34,13 @@ def test_nested_pattern_stand_in(tmp_path):
     assert format_pyn("(id= ,user=( name=,age = a ))=r\n", cwd=tmp_path) == src
 
 
+def test_spreads_format(tmp_path):
+    src = "both = (**u,**r)\nx=(**u, age =27, name=)\nq = (name: str)( **u )\nfn(**u, **r)\n"
+    want = "both = (**u, **r)\nx = (**u, age=27, name=)\nq = (name: str)(**u)\nfn(**u, **r)\n"
+    assert format_pyn(src, cwd=tmp_path) == want
+    assert format_pyn(want, cwd=tmp_path) == want
+
+
 def test_decode_eats_slice_spacing():
     # ruff writes complex slices as `a : b`; that must come back as `a=b`
     assert decode('__P[name:__p, age : d["age"]] = r\n') == '(name=, age=d["age"]) = r\n'
