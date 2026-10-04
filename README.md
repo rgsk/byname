@@ -68,10 +68,17 @@ for (x=, y=) in pts: ...               # for-loop targets
 (id=, user=(name=, age=a)) = r         # nested: name = r.user.name
 ```
 
-**Not supported (yet):**
-- **Dicts:** destructuring reads attributes, not keys.
-- **Positional items in a pattern:** `(a, b=) = r`.
-- **Shorthand in `def` signatures.**
+**Not planned:**
+- **Dict keys:** destructuring reads attributes, not keys. Dict syntax would buy nothing over records,
+  and dicts lose per-key types (`dict[str, str | int]`).
+- **Positional items in a pattern,** like `(a, b=) = r`. Fields are read by name so field order never
+  matters; positional items would bring that fragility back.
+- **Shorthand in `def` signatures,** like `def f(name=)`. There it would mean "default to the outer
+  `name`", and a function should almost never take outer variables by the same name.
+- **Syntax that isn't binding by name,** like defaults with `(email= ?? "none") = user`. Python has no
+  `??` ([PEP 505](https://peps.python.org/pep-0505/) is deferred), so byname leaves it to plain Python,
+  `email = user.email if user.email is not None else "none"`, rather than invent an operator that a
+  future Python might define differently.
 
 [`examples/all.pyn`](examples/all.pyn) runs every feature, one assert per use.
 
@@ -213,7 +220,7 @@ positions line up with your `.pyn`.
 
 ## Development
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for design decisions, parked designs, status and the code map.
+See [DEVELOPMENT.md](DEVELOPMENT.md) for design decisions, status and the code map.
 
 ```
 uv sync --all-extras

@@ -183,10 +183,11 @@ assert (a, p_) == (12.0, 14.0)
 
 
 # ============================================================================
-# NOT SUPPORTED (yet) - each of these is a SyntaxError
+# NOT PLANNED - each of these fails
 # ============================================================================
-# (name=) = {"name": "x"}             dicts: destructuring reads attributes, not keys
+# (name=) = {"name": "x"}             dicts: destructuring reads attributes, not keys (AttributeError)
+# (a, b=) = r                         positional items: fields are read by name, never by order
+# def f(name=): ...                   would mean "default to the outer name"; shorthand is for call sites
 # (_private=1)                        record fields can't start with "_" (NamedTuple rule)
-# def f(name=): ...                   shorthand is for call sites, not definitions
 
 print("all good")

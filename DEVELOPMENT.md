@@ -55,11 +55,15 @@ paste `<name>.pyn.py` into the judge.
 ## Design decisions and why
 
 - **`field=value`: the left side is always the field, the right side always the local,** in calls, records and patterns. Renaming is `(name=n) = r`, matching `{ name: n }` in TS.
-- **Patterns use parens `(…) = r`, not braces.** Braces are reserved for the dict design (parked).
+- **Patterns use parens `(…) = r`, not braces,** matching record literals.
+- **No dict syntax.** A dict design was drafted: in braces, `=` for a literal key and `:` keeping its Python meaning (`{name=, age=} = d`, `{key: v} = d`). Dropped because it buys nothing over records, and dict literals lose per-key types (`dict[str, str | int]`).
+- **No shorthand in `def` signatures.** `def f(name=)` would mean "default to the outer `name`", and a function should almost never take outer variables by the same name.
 - **Record types are `(name: type, ...)` in annotations,** matching hover's display. Added because recursive functions can't be inferred (pyright treats the recursive call as `Unknown` while inferring), and a record's generated class can't be named in a `.pyn`. Here `:` really is a type annotation, unlike in the rejected `(email: e)` pattern form below. Never valid Python, so no clash: lambdas start with a keyword, walrus is its own `:=` token, and def parameter lists are skipped. Translated by small edits (`(` → `R[`, drop `name:`, `)` → `]`), so nested record types work. Output files' plain classes get `__class_getitem__` returning the class, so `R[int, str]` evaluates on PyPy 3.10, where annotations are evaluated eagerly. Formatter stand-in: `__T[name: type]`.
+- **Scope: byname adds binding by name and nothing else.** Every form is `name=` (in calls, records and patterns), or the record type that annotates the result. General-purpose syntax that happens to be convenient is out of scope, even next to a pattern.
+- **No defaults in patterns, `??` included.** `(email= ?? "none") = user` was designed and dropped. `??` is a general null-coalescing operator, not a binding form. [PEP 505](https://peps.python.org/pep-0505/) is deferred, not rejected, so if Python ever adds `??` with different meaning or precedence, byname would clash with real Python. (`name=` can't clash that way, since PEP 736 was rejected.) Records always have their fields, so a default only matters for an `Optional` field, and the plain-Python line is short: `email = user.email if user.email is not None else "none"`.
 - **TS-style `(email: e = "x")` was rejected for defaults and renaming.** `:` reads as a type annotation in Python (the TS `{ name: string }` trap), and it would make building use `=` while taking apart used `:`.
 - **No trailing comma required on a single-field record.** Unlike `(x)`, `(x=)` can't be read as grouping, so a comma would only be noise.
-- **Positional items in patterns are left an error.** Reading A, where a bare name means by-name, conflicts with Python's `(a, b) = r`, which is positional. Reading B, positional first and then keywords like a call, is consistent, but it brings back the field-order fragility that by-name avoids, and only records support it. If ever built, use B.
+- **Positional items in patterns are left an error.** Reading A, where a bare name means by-name, conflicts with Python's `(a, b) = r`, which is positional. Reading B, positional first and then keywords like a call, is consistent, but it brings back the field-order fragility that by-name avoids, and only records support it. Not planned.
 - **`for (a=, b=t) in xs:` becomes `for (a, t) in ((_ds.a, _ds.b) for _ds in xs):`**, on one line so line numbers hold. A generator, not binds at the top of the body: the body's first statement may be compound (`a = …; if …:` is invalid), and the generator keeps exact field types and scopes `_ds`. The same rewrite covers comprehension `for` clauses. The iterable ends at the statement's `:`, or for a comprehension at the next `if`/`for`/`async` or the closing bracket. A bare tuple iterable (`in a, b`) is parenthesised; `async for` gets an async generator. Costs a generator per loop, which is fine for judges' time limits but not free.
 - **Nested patterns read through chains:** `(user=(name=)) = r` binds `name = _ds.user.name`, with no temporary per level. A `field=(...)` value is a nested pattern only if the group holds a `field=` item; `(x=(a)) = r` stays a parenthesised target. In a `for` target the nested parens stay in the tuple target and the generator's element mirrors them.
 - **Records are generic NamedTuples,** so checkers infer exact field types without annotations. Each file generates its own classes, so records from two files are different types; equality still works.
@@ -76,34 +80,8 @@ paste `<name>.pyn.py` into the judge.
 - **The server answers `textDocument/codeAction` itself only when `only` is all `source.fixAll*` or all `source.organizeImports*`** (what `codeActionsOnSave` sends); other code-action requests still go to the checker. Organize imports is `--select I001`, as in the Ruff extension.
 - **Output files use portable record classes** (`class R(_NT):` with `object` fields, Python 3.6+), because judges' PyPy is 3.10 and rejects `class R[T0](...)`. The checker's translation keeps the 3.12 generic classes, since that's where field types come from. Both are 3 lines per record, so line numbers match.
 
-## Parked designs (agreed, not built)
+## Not yet built
 
-**Dicts:** in braces, `=` means a key written literally and `:` keeps its normal Python meaning (a computed key).
-
-```python
-{name=, age=26, 'first-name'=f}   # → {'name': name, 'age': 26, 'first-name': f}
-{name=, age=} = d                 # name = d['name']; age = d['age']
-{key: v} = d                      # v = d[key]
-```
-
-Parked because dict literals lose per-key types (`dict[str, str | int]`). Records are the form that
-keeps exact types.
-
-**Defaults with `??` ([PEP 505](https://peps.python.org/pep-0505/)):** inside a `field=…` entry, `x ?? d`
-means "x, or d if x is None". It reaches to the edges of its entry, so no operator-precedence handling is
-needed.
-
-```python
-(email= ?? "none") = user     # email = user.email if user.email is not None else "none"
-(email=e ?? "none") = user    # with rename
-(age= ?? 18)                  # building; narrows int | None → int
-fn(age= ?? 18)                # in a call
-```
-
-- **Triggers on `None` only, not a missing field.** `getattr(obj, f, d)` types as `Any | T` and hides typos.
-- **`(email?="none")` was rejected:** it leaves no place for a rename.
-
-**Other not-yet items:**
 - Ctrl+click on a field inside a pattern. It goes nowhere now; the natural target is where the record was built.
 - `byname build --out-dir`.
 
