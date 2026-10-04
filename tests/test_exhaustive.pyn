@@ -1,0 +1,680 @@
+# Every byname feature, read top to bottom. One rule for all of them: in `field=value` the left is the
+# field or parameter name and the right is your local; a bare `field=` means `field=field`.
+
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from textwrap import dedent
+from typing import overload
+
+import pytest
+
+from byname import to_code, transform
+
+# ============================================================================
+# 1. CALLS: pass locals by name
+# ============================================================================
+
+
+def greet(*, name: str, age: int, loud: bool = False) -> str:
+    s = f"{name} is {age}"
+    return s.upper() if loud else s
+
+
+def test_a_bare_keyword_passes_the_local_of_the_same_name():
+    name, age = "rahul", 26
+    assert greet(name=, age=) == "rahul is 26"
+
+
+def test_it_is_only_the_keyword_written_twice():
+    assert transform("greet(name=, age=)").body == "greet(name=name, age=age)"
+
+
+def test_shorthand_mixes_with_explicit_values():
+    name, age = "rahul", 26
+    assert greet(name=, age=age + 1) == "rahul is 27"
+    assert greet(name=, age=, loud=True) == "RAHUL IS 26"
+
+
+def test_shorthand_goes_after_positional_arguments_and_with_kwargs():
+    def tag(prefix: str, *, name: str, loud: bool = False) -> str:
+        return f"{prefix}:{name}" + "!" * loud
+
+    name = "rahul"
+    opts = {"loud": True}
+    assert tag("user", name=) == "user:rahul"
+    assert tag("user", name=, **opts) == "user:rahul!"
+
+
+def test_any_callable_takes_it_methods_and_builtins_too():
+    class Greeter:
+        def hello(self, *, name: str) -> str:
+            return f"hello {name}"
+
+    name, age = "rahul", 26
+    assert Greeter().hello(name=) == "hello rahul"
+    assert dict(name=, age=) == {"name": "rahul", "age": 26}  # noqa: C408 -- a builtin call is the point
+
+
+def test_order_never_matters_because_every_argument_is_named():
+    age, name = 26, "rahul"
+    assert greet(age=, name=) == greet(name=, age=) == "rahul is 26"
+
+
+# ============================================================================
+# 2. RECORDS: build a value from locals by name
+# ============================================================================
+
+
+def make(*, name: str, age: int):
+    greeting = f"hi {name}"
+    return (name=, age=, greeting=)
+
+
+def test_a_record_is_built_from_locals_by_name():
+    name, age = "rahul", 26
+    r = (name=, age=)
+    assert (r.name, r.age) == ("rahul", 26)
+
+
+def test_a_function_returns_its_locals_by_name():
+    r = make(name="rahul", age=26)
+    assert (r.name, r.age, r.greeting) == ("rahul", 26, "hi rahul")
+
+
+def test_it_is_a_call_to_a_class_named_after_its_fields():
+    assert transform("(name=, age=)").body == "_rec_name__age(name=name, age=age)"
+
+
+def test_fields_take_explicit_values_and_any_expression():
+    name = "rahul"
+    r = (name=name.upper(), score=10 * 9)
+    assert (r.name, r.score) == ("RAHUL", 90)
+
+
+def test_one_field_needs_no_trailing_comma():
+    name = "rahul"
+    assert (name=).name == "rahul"
+    assert (name) == "rahul"  # no `=`: plain parentheses
+    assert transform("(name=)").body == "_rec_name(name=name)"
+
+
+def test_a_trailing_comma_changes_nothing_but_the_formatting():
+    name = "rahul"
+    short = (name=)
+    split = (
+        name=,
+    )  # the trailing comma keeps the formatter from joining it
+    assert short.name == split.name == "rahul"
+    assert short._fields == split._fields == ("name",)
+
+
+def test_a_long_record_spans_lines():
+    name, age = "rahul", 26
+    r = (
+        name=,
+        age=,
+    )
+    assert r.age == 26
+
+
+def test_records_nest_and_go_anywhere_an_expression_can():
+    name, age = "rahul", 26
+    nested = (user=(name=, age=), ok=True)
+    rows = [(i=, square=i * i) for i in range(3)]
+    double = lambda x: (x=, twice=x * 2)
+    assert nested.user.name == "rahul"
+    assert repr(nested) == "(user=(name='rahul', age=26), ok=True)"
+    assert [r.square for r in rows] == [0, 1, 4]
+    assert repr(rows) == "[(i=0, square=0), (i=1, square=1), (i=2, square=4)]"
+    assert double(5).twice == 10
+    assert repr(double(5)) == str(double(5)) == "(x=5, twice=10)"
+    assert repr((name=, age=)) == str((name=, age=)) == "(name='rahul', age=26)"  # as a call argument
+
+
+# ============================================================================
+# 3. WHAT A RECORD IS: a NamedTuple, one class per field list
+# ============================================================================
+
+
+def test_a_record_is_a_named_tuple():
+    name, age = "rahul", 26
+    r = (name=, age=)
+    assert isinstance(r, tuple)
+    assert (len(r), r[0], r[1]) == (2, "rahul", 26)
+    first, second = r  # positional unpacking, in the order written
+    assert (first, second) == ("rahul", 26)
+
+
+def test_each_field_list_gets_one_class():
+    r = (name="rahul", age=26)
+    assert type(r).__name__ == "_rec_name__age"
+    assert type(r) is type((name="tasha", age=23))
+    assert type(r) is type((name=23, age="tasha"))  # value types live only in the checker: (name: int, age: str)
+    assert type(r) is not type((age=23, name="tasha"))  # another order, another class
+
+
+def test_a_record_is_immutable():
+    r = (name="rahul", age=26)
+    with pytest.raises(AttributeError):
+        r.age = 27  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def test_replace_copies_with_some_fields_changed():
+    r = (name="rahul", age=26)
+    older = r._replace(age=27)
+    assert (older.name, older.age) == ("rahul", 27)
+    assert r.age == 26
+
+
+def test_asdict_gives_the_fields_in_written_order():
+    assert (name="rahul", age=26)._asdict() == {"name": "rahul", "age": 26}
+
+
+def test_equality_compares_values_by_position_not_names():
+    assert (name="rahul", age=26) == (name="rahul", agee=26)
+    assert (name="rahul", age=26) == ("rahul", 26)
+    assert (name="rahul", age=26) != (age=26, name="rahul")
+
+
+def test_a_record_is_hashable_so_it_can_be_a_dict_key():
+    seen = {(name="rahul", age=26): "found"}
+    assert seen[(name="rahul", age=26)] == "found"
+
+
+# ============================================================================
+# 4. DESTRUCTURING: bind fields to locals by name
+# ============================================================================
+
+
+def test_destructuring_binds_fields_to_locals_by_name():
+    (name=, age=) = (name="rahul", age=26)
+    assert (name, age) == ("rahul", 26)
+
+
+def test_it_is_one_attribute_read_per_field():
+    assert transform("(name=, age=years) = r").body == "_ds = r; name = _ds.name; years = _ds.age"
+
+
+def test_fields_come_out_in_any_order_and_any_subset():
+    (age=, name=) = (name="rahul", age=26, greeting="hi rahul")
+    (greeting=) = (name="rahul", age=26, greeting="hi rahul")
+    assert (name, age, greeting) == ("rahul", 26, "hi rahul")
+
+
+def test_a_field_can_be_renamed_into_another_local():
+    (name=who, age=years) = (name="rahul", age=26)
+    assert (who, years) == ("rahul", 26)
+
+
+def test_one_field_can_go_into_two_locals():
+    (name=, name=alias) = (name="rahul", age=26)
+    assert name == alias == "rahul"
+
+
+def test_targets_can_be_attributes_and_subscripts():
+    class Box:
+        label = ""
+
+    box, ages = Box(), {}
+    (name=box.label, age=ages["rahul"]) = (name="rahul", age=26)
+    assert (box.label, ages) == ("rahul", {"rahul": 26})
+
+
+def test_renaming_both_ways_swaps_two_locals():
+    a, b = 1, 2
+    (a=b, b=a) = (a=, b=)
+    assert (a, b) == (2, 1)
+
+
+def test_a_long_pattern_spans_lines():
+    (
+        name=,
+        age=,
+    ) = (name="rahul", age=26)
+    assert (name, age) == ("rahul", 26)
+
+
+def test_any_object_with_attributes_destructures():
+    @dataclass
+    class User:
+        name: str
+        email: str
+
+    (real=re, imag=im) = 3 + 4j  # builtins
+    (email=) = User("rahul", "rahul@x.com")  # dataclasses
+    (sep=, curdir=) = os  # modules
+    assert (re, im, email, sep, curdir) == (3.0, 4.0, "rahul@x.com", "/", ".")
+
+
+def test_a_method_can_unpack_self_and_fill_many_attributes():
+    class Point:
+        def __init__(self, x: int, y: int):
+            (x=self.x, y=self.y) = (x=, y=)
+
+        def norm2(self) -> int:
+            (x=, y=) = self
+            return x * x + y * y
+
+    assert Point(3, 4).norm2() == 25
+
+
+# ============================================================================
+# 5. DESTRUCTURING IN LOOPS AND NESTED PATTERNS
+# ============================================================================
+
+
+def test_a_for_loop_destructures_each_record():
+    people = [(name="rahul", age=26), (name="tasha", age=23)]
+    seen = []
+    for (name=, age=years) in people:
+        seen.append(f"{name}:{years}")
+    assert seen == ["rahul:26", "tasha:23"]
+
+
+def test_the_loop_reads_fields_through_a_generator():
+    assert transform("for (name=, age=years) in people: pass").body == "for (name, years) in ((_ds.name, _ds.age) for _ds in people): pass"
+
+
+def test_comprehensions_destructure_the_same_way():
+    people = [(name="rahul", age=26), (name="tasha", age=23)]
+    assert [f"{name}:{age}" for (name=, age=) in people] == ["rahul:26", "tasha:23"]
+    assert {name: age for (name=, age=) in people} == {"rahul": 26, "tasha": 23}
+
+
+def test_a_nested_pattern_reads_through_the_outer_field():
+    (user=(name=, age=years), ok=) = (user=(name="rahul", age=26), ok=True)
+    assert (name, years, ok) == ("rahul", 26, True)
+
+
+def test_nesting_is_a_chain_of_attribute_reads():
+    assert transform("(user=(name=), ok=) = r").body == "_ds = r; name = _ds.user.name; ok = _ds.ok"
+
+
+def test_loops_take_nested_patterns_too():
+    rows = [(user=(name="rahul"), ok=True), (user=(name="tasha"), ok=False)]
+    assert [name for (user=(name=), ok=) in rows if ok] == ["rahul"]
+
+
+# ============================================================================
+# 6. RECORD TYPES: written the way hover shows them
+# ============================================================================
+
+
+def checker(src: str, tmp_path: Path) -> dict[int, str]:
+    # basedpyright's verdicts on `src` by line (errors and reveal_type notes); one line's messages split by a blank line
+    (tmp_path / "snippet.pyn").write_text(dedent(src))
+    run = [sys.executable, "-m", "byname", "tool", "basedpyright", "snippet.pyn"]
+    out = subprocess.run(run, cwd=tmp_path, capture_output=True, text=True, check=False).stdout
+    verdicts: dict[int, str] = {}
+    line = 0
+    for row in out.splitlines():
+        if m := re.match(r"\s*snippet\.pyn:(\d+):\d+ - \w+: (.*)", row):
+            line = int(m[1])
+            verdicts[line] = verdicts[line] + "\n\n" + m[2] if line in verdicts else m[2]
+        elif line and row.startswith("  "):  # a message's next lines (indented with non-breaking spaces)
+            verdicts[line] += "\n" + row.strip()
+    return verdicts
+
+
+type Person = (name: str, age: int)
+
+
+def test_a_record_type_is_written_the_way_hover_shows_it():
+    gil: Person = (age=30, name="gil")
+    assert (gil.name, gil.age) == ("gil", 30)
+    assert transform("type Person = (name: str, age: int)").body == "type Person = _typ_name__age[str, int]"
+
+
+def test_a_record_type_takes_any_field_order_but_exactly_its_fields(tmp_path):
+    verdicts = checker(
+        """\
+        type Person = (name: str, age: int)
+        a: Person = (age=30, name="gil")
+        b: Person = (name="gil", age=30, email="g@x")
+        c: Person = (name="gil",)
+        d: Person = (name="gil", age="thirty")
+        """,
+        tmp_path,
+    )
+    assert sorted(verdicts) == [3, 4, 5]  # line 2, another order, is fine
+    assert "extra field: email" in verdicts[3]
+    assert "missing field: age" in verdicts[4]
+    assert '"age" is an incompatible type' in verdicts[5]
+
+
+def test_an_open_type_takes_at_least_its_fields(tmp_path):
+    verdicts = checker(
+        """\
+        def age_of(p: (age: int, ...)) -> int:
+            return p.age
+        age_of((name="ivy", age=7, tall=True))
+        age_of((name="ivy",))
+        """,
+        tmp_path,
+    )
+    assert sorted(verdicts) == [4]
+    assert '"age" is not present' in verdicts[4]
+
+
+def test_through_a_record_type_positional_order_is_unknown(tmp_path):
+    verdicts = checker(
+        """\
+        type Person = (name: str, age: int)
+        def find() -> Person:
+            return (age=30, name="gil")
+        first, second = find()
+        one, two = (age=30, name="gil")
+        reveal_type(first)
+        reveal_type(one)
+        """,
+        tmp_path,
+    )
+    assert verdicts[6] == 'Type of "first" is "str | int"'  # unpack a typed record by name instead
+    assert verdicts[7] == 'Type of "one" is "int"'  # an inferred record keeps its written order
+
+
+def depth(n: int):  # hover: def depth(n: int) -> Unknown
+    if n == 0:
+        return (d=0)
+    (d=) = depth(n - 1)
+    return (d=d + 1)
+
+
+def depth_typed(n: int) -> (d: int):  # hover: def depth_typed(n: int) -> (d: int)
+    if n == 0:
+        return (d=0)
+    (d=) = depth_typed(n - 1)
+    return (d=d + 1)
+
+
+def test_a_recursive_function_writes_its_record_type():
+    # hover the `.d`s: depth(3).d is `int | Unknown`, depth_typed(3).d is `int`
+    assert depth(3).d == depth_typed(3).d == 3
+
+
+def test_the_checker_infers_a_written_record_type(tmp_path):
+    verdicts = checker(
+        """\
+        def depth(n: int):
+            if n == 0:
+                return (d=0)
+            (d=) = depth(n - 1)
+            return (d=d + 1)
+        def depth_typed(n: int) -> (d: int):
+            if n == 0:
+                return (d=0)
+            (d=) = depth_typed(n - 1)
+            return (d=d + 1)
+        reveal_type(depth)
+        reveal_type(depth_typed)
+        reveal_type(depth_typed(3).d)
+        """,
+        tmp_path,
+    )
+    assert verdicts == {
+        11: 'Type of "depth" is "(n: int) -> ((d: int) | (d: int | Unknown))"',  # inference can't see through the recursive call
+        12: 'Type of "depth_typed" is "(n: int) -> (d: int)"',
+        13: 'Type of "depth_typed(3).d" is "int"',
+    }
+
+
+# ============================================================================
+# 7. PARAMETER PATTERNS: destructure a parameter, like TS `{ name, age }: Person`
+# ============================================================================
+
+
+def intro((name=, age=): Person, loud: bool = False) -> str:
+    if loud:
+        return f"{name.upper()}, {age}!"
+    return f"{name}, {age}"
+
+
+def intro_untyped((name=, age=), loud: bool = False) -> str:  # hover: name and age are Unknown
+    if loud:
+        return f"{name.upper()}, {age}!"
+    return f"{name}, {age}"
+
+
+def test_a_parameter_destructures_the_record_passed_in():
+    assert intro((name="gil", age=30)) == intro_untyped((name="gil", age=30)) == "gil, 30"
+    assert intro((age=7, name="ivy"), loud=True) == intro_untyped((age=7, name="ivy"), loud=True) == "IVY, 7!"
+
+
+def test_it_is_a_plain_parameter_plus_one_unpacking_line():
+    src = "def intro((name=, age=): Person):\n    return name\n"
+    assert transform(src).body == "def intro(_byname_p0: Person):\n    _ds = _byname_p0; name = _ds.name; age = _ds.age\n    return name\n"
+
+
+def label((id=, user=(name=who))) -> str:
+    return f"{id}:{who}"
+
+
+def label_typed((id=, user=(name=who)): (id: int, user: (name: str))) -> str:
+    return f"{id}:{who.title()}"
+
+
+def test_patterns_nest_rename_and_take_an_inline_type():
+    assert label((id=7, user=(name="kim"))) == "7:kim"  # no type: id and who are untyped
+    assert label_typed((id=7, user=(name="kim"))) == "7:Kim"  # who is a str
+
+
+def welcome(*, user=(name=, age=): Person, note: str = "") -> str:
+    return f"{name} ({age}) {note}".strip()
+
+
+def welcome_untyped(*, user=(name=, age=), note: str = "") -> str:  # hover: name and age are Unknown
+    return f"{name} ({age}) {note}".strip()
+
+
+def test_a_named_pattern_is_a_real_parameter_passed_by_keyword():
+    assert welcome(user=(name="ann", age=30)) == welcome_untyped(user=(name="ann", age=30)) == "ann (30)"
+    assert transform("def welcome(*, user=(name=): Person): ...").body.startswith("def welcome(*, user: Person):")
+
+
+def welcome_or_guest(user=(name=): Person = (name="guest", age=0)) -> str:  # noqa: B008 -- see open_issues.md
+    return name
+
+
+def welcome_or_guest_untyped(user=(name=) = (name="guest", age=0)) -> str:  # noqa: B008 -- hover: name is str | Unknown, the default's type counts
+    return name
+
+
+def test_a_pattern_takes_a_default_after_its_type():
+    assert welcome_or_guest() == welcome_or_guest_untyped() == "guest"
+    assert welcome_or_guest((name="bo", age=1)) == welcome_or_guest_untyped((name="bo", age=1)) == "bo"
+
+
+def test_a_misspelled_field_in_a_pattern_is_an_error_on_the_pattern(tmp_path):
+    verdicts = checker(
+        """\
+        type Person = (name: str, age: int)
+        def greet((nme=, age=): Person) -> str:
+            return f"{nme} {age}"
+        """,
+        tmp_path,
+    )
+    assert sorted(verdicts) == [2]
+    assert 'Cannot access attribute "nme"' in verdicts[2]
+
+
+# ============================================================================
+# 8. SPREADS: `**record`, by field name, like `**dict`
+# ============================================================================
+
+
+def card(name: str, age: int, surname: str, city: str) -> str:
+    return f"{name} {surname}, {age}, {city}"
+
+
+def test_a_record_spreads_into_a_call_by_field_name():
+    person, place = (name="ann", age=30), (surname="lee", city="oslo")
+    assert card(**person, **place) == "ann lee, 30, oslo"
+
+
+def test_a_record_spreads_into_a_dict():
+    person, place = (name="ann", age=30), (surname="lee", city="oslo")
+    assert {**person, **place} == {"name": "ann", "age": 30, "surname": "lee", "city": "oslo"}
+
+
+def test_a_record_built_from_spreads_takes_the_later_field_in_the_first_position():
+    defaults = (lr=1e-2, eval_iters=100)
+    cfg = (**defaults, batch_size=32, lr=3e-3)
+    assert repr(cfg) == "(lr=0.003, eval_iters=100, batch_size=32)"
+
+
+def test_a_spread_of_known_records_is_typed_without_an_annotation(tmp_path):
+    verdicts = checker(
+        """\
+        defaults = (lr=1e-2, eval_iters=100)
+        cfg = (**defaults, batch_size=32)
+        reveal_type(cfg)
+        cfg.btach_size
+        """,
+        tmp_path,
+    )
+    assert verdicts[3] == 'Type of "cfg" is "(lr: float, eval_iters: int, batch_size: int)"'
+    assert verdicts[4].startswith('Cannot access attribute "btach_size"')
+
+
+type Contact = (name: str, age: int, surname: str, city: str)
+
+
+def mail(to: Contact) -> str:
+    return f"{to.name} {to.surname}, {to.city}"
+
+
+def test_a_spread_is_checked_against_the_type_expected_where_it_stands(tmp_path):
+    person, place = (name="ann", age=30), (surname="lee", city="oslo")
+    c: Contact = (**person, **place)  # noqa: B008 -- see open_issues.md
+    assert mail((**person, **place)) == mail(c) == "ann lee, oslo"  # noqa: B008 -- see open_issues.md
+    verdicts = checker(
+        """\
+        type Contact = (name: str, age: int, surname: str, city: str)
+        def mail(to: Contact) -> str: ...
+        person = (name="ann", age=30)
+        def contact_of_person() -> Contact:
+            return (**person,)
+        c: Contact = (**person, city="oslo")
+        mail((**person, surname="lee", city="oslo", zip=1))
+        """,
+        tmp_path,
+    )
+    assert sorted(verdicts) == [5, 6, 7]
+    assert "missing fields: city, surname" in verdicts[5]  # against the return type
+    assert "missing field: surname" in verdicts[6]  # against the annotation
+    assert "extra field: zip" in verdicts[7]  # against the parameter
+
+
+def test_an_inline_record_type_names_the_type_of_a_spread():
+    person, place = (name="ann", age=30), (surname="lee", city="oslo")
+    c = (name: str, age: int, surname: str, city: str)(**person, **place)
+    assert c.city == "oslo"
+
+
+# ============================================================================
+# 9. WHAT BYNAME REJECTS, AND WHY
+# ============================================================================
+
+
+def test_a_field_cannot_start_with_an_underscore():
+    with pytest.raises(SyntaxError, match="record field '_private' cannot start with '_'"):
+        transform("r = (_private=1)\n")  # NamedTuple's rule: `_` names are its own (_replace, _asdict)
+
+
+def test_keys_is_reserved_because_spreads_need_it():
+    with pytest.raises(SyntaxError, match="records have a keys\\(\\) method, which lets `\\*\\*record` work"):
+        transform("r = (keys=1)\n")
+
+
+def test_a_field_appears_once():
+    with pytest.raises(SyntaxError, match="duplicate record field in \\('a', 'a'\\)"):
+        transform("r = (a=1, a=2)\n")
+
+
+def test_a_pattern_reads_by_name_never_by_position():
+    with pytest.raises(SyntaxError, match="pattern item 'a' needs '=': write a= or a=target"):
+        transform("(a, b=) = r\n")
+
+
+def test_a_spread_record_takes_only_spreads_and_named_fields():
+    with pytest.raises(SyntaxError, match="takes `\\*\\*record` and `name=value` items"):
+        transform("r = (**u, 1)\n")
+
+
+def test_shorthand_is_for_call_sites_not_def_signatures():
+    with pytest.raises(SyntaxError, match="expected default value expression"):
+        to_code("def f(name=): ...\n", "x.pyn")  # it would mean "default to the outer name"
+
+
+def test_destructuring_reads_attributes_so_a_dict_does_not_destructure(tmp_path):
+    src = '(name=) = {"name": "rahul"}\n'
+    assert checker(src, tmp_path) == {1: 'Cannot access attribute "name" for class "dict[str, str]"\nAttribute "name" is unknown (reportAttributeAccessIssue)'}
+    with pytest.raises(AttributeError, match="'dict' object has no attribute 'name'"):
+        exec(to_code(src, "x.pyn"), {})  # noqa: S102 -- running the rejected line
+
+
+# ============================================================================
+# 10. ALL TOGETHER, OVERLOADS, AND `*record`
+# ============================================================================
+
+
+def area(*, w: float, h: float):
+    a = w * h
+    perimeter = 2 * (w + h)
+    return (a=, perimeter=)
+
+
+def test_call_by_name_return_a_record_destructure_it():
+    w, h = 3.0, 4.0
+    (a=, perimeter=p) = area(w=, h=)
+    assert (a, p) == (12.0, 14.0)
+
+
+@overload
+def lookup(key: int) -> int: ...
+@overload
+def lookup(key: Contact) -> str: ...
+def lookup(key: int | Contact) -> int | str:
+    return key if isinstance(key, int) else key.name
+
+
+def test_a_spread_record_picks_the_overload_that_takes_a_record(tmp_path):
+    person, place = (name="ann", age=30), (surname="lee", city="oslo")
+    assert lookup((**person, **place)) == "ann"  # noqa: B008 -- see open_issues.md
+    assert lookup(7) == 7
+    verdicts = checker(
+        """\
+        from typing import overload
+        type Contact = (name: str, age: int, surname: str, city: str)
+        @overload
+        def lookup(key: int) -> int: ...
+        @overload
+        def lookup(key: Contact) -> str: ...
+        def lookup(key: int | Contact) -> int | str: ...
+        person, place = (name="ann", age=30), (surname="lee", city="oslo")
+        reveal_type(lookup((**person, **place)))
+        """,
+        tmp_path,
+    )
+    assert verdicts[9].endswith('is "str"')  # the Contact overload; the quoted call is generated code, see open_issues.md
+
+
+def pair(name: str, age: int) -> str:
+    return f"{name}:{age}"
+
+
+def test_star_spreads_a_record_by_position(tmp_path):
+    assert pair(*(name="ann", age=30)) == "ann:30"  # `*` is by position, `**` by name
+    verdicts = checker(
+        """\
+        def pair(name: str, age: int) -> str: ...
+        pair(*(age=30, name="ann"))
+        """,
+        tmp_path,
+    )
+    assert 'Argument of type "int" cannot be assigned to parameter "name"' in verdicts[2]
+    assert 'Argument of type "str" cannot be assigned to parameter "age"' in verdicts[2]

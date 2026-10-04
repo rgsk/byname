@@ -2,5 +2,10 @@
     // Testing panel + run buttons in the gutter, for test_*.py and test_*.pyn (byname's pytest plugin)
     "python.testing.pytestEnabled": true,
     "python.testing.unittestEnabled": false,
-    "python.testing.pytestArgs": ["tests"]
+    "python.testing.pytestArgs": [
+        "tests",
+        // don't swallow print() from passing tests -- the test explorer only
+        // ever shows what pytest itself writes out
+        "-rP"
+    ]
 }
