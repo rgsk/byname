@@ -92,6 +92,19 @@ CTX_PRELUDE = (  # checker only: T is the type expected where the record is buil
     "from typing_extensions import TypeVar as _TV\n"
     "_byname_T = _TV('_byname_T', default=_A)\n"
     "def _byname_ctx(f: _Cl[[_byname_T], object], /) -> _byname_T: ...  # pyright: ignore\n"
+    # a call argument: a record type (or None) expected, or else _byname_AnyRec, which a non-record
+    # overload `f(x: int)` rejects, so the checker moves on to the overload that takes a record. mypy uses
+    # the default whenever there is one, so it gets _byname_ctx: mypy reads `MYPY` as true, pyright as False
+    "MYPY = False\n"
+    "if MYPY:\n"
+    "    _byname_arg = _byname_ctx\n"
+    "else:\n"
+    "    class _byname_AnyRec(tuple[_A, ...]):\n"
+    "        def _asdict(self) -> dict[str, _A]: ...  # pyright: ignore\n"
+    "        def keys(self) -> tuple[str, ...]: ...  # pyright: ignore\n"
+    "        def __getattr__(self, name: str, /) -> _A: ...\n"
+    "    _byname_R = _TV('_byname_R', bound=_byname_HasDict[_A] | None, default=_byname_AnyRec)\n"
+    "    def _byname_arg(f: _Cl[[_byname_R], object], /) -> _byname_R: ...  # pyright: ignore\n"
 )
 BUILD_PORTABLE = (  # what runs in output files: no typing
     "from typing import cast as _cast\n"
@@ -253,8 +266,11 @@ def transform(
 
     # matching bracket for every opener (and back)
     pair: dict[int, int] = {}
+    parent: dict[int, int] = {}  # token -> innermost enclosing opener
     stack: list[int] = []
     for i, t in enumerate(toks):
+        if stack:
+            parent[i] = stack[-1]
         if t.type == tokenize.OP and t.string in "([{":
             stack.append(i)
         elif t.type == tokenize.OP and t.string in ")]}":
@@ -351,6 +367,16 @@ def transform(
         except SyntaxError:
             return " ".join(body.split())
 
+    def is_argument(i: int, close: int) -> bool:
+        """The group `toks[i..close]` is a whole argument of a call, `f(x)` or `f(a, k=x)`."""
+        o = parent.get(i)
+        if o is None or toks[o].string != "(" or o == 0 or toks[close + 1].string not in (",", ")"):
+            return False
+        if not (is_name(toks[o - 1]) or toks[o - 1].string in (")", "]")):
+            return False
+        before = i - 2 if toks[i - 1].string == "=" and is_name(toks[i - 2]) else i
+        return toks[before - 1].string in ("(", ",")
+
     def build(i: int, close: int, its: list[list[int]], target: str | None = None, inline_at: int | None = None) -> None:
         """A record built from spreads and fields, `(**u, age=27)`, as `_byname_rec({**u, 'age': 27})`.
         target: the inline record type `(name: str)(**u)` (source text) to check it against."""
@@ -378,7 +404,8 @@ def transform(
             raise err(f"duplicate record field in {tuple(names)}", toks[i])
         g0, g1 = span(i, close)
         if target is None and checker:  # checked against the type expected where it stands, if any
-            pre, post = "_byname_ctx(lambda _byname_t: _byname_check(lambda: _byname_t)({", "}))"
+            ctx = "_byname_arg" if is_argument(i, close) else "_byname_ctx"
+            pre, post = f"{ctx}(lambda _byname_t: _byname_check(lambda: _byname_t)({{", "}))"
         elif target is None:
             pre, post = "_byname_rec({", "})"
         else:

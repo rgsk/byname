@@ -98,7 +98,8 @@ CODE_KEYS = {"newText", "insertText", "filterText", "sortText", "uri", "targetUr
 def pretty(text: str) -> str:
     """Display form of record types: _rec_name__age[str, int] -> (name: str, age: int), and of the
     TypedDict a record's `_asdict()` returns: _dct_name__age[str, int] -> {name: str, age: int}, and of
-    explicit record types: _typ_... -> (name: str, age: int), _opn_... -> (name: str, age: int, ...)."""
+    explicit record types: _typ_... -> (name: str, age: int), _opn_... -> (name: str, age: int, ...),
+    and of a spread record whose fields aren't known: _byname_AnyRec -> (...)."""
     out, i = [], 0
     while m := REC_RE.search(text, i):
         out.append(text[i : m.start()])
@@ -124,7 +125,7 @@ def pretty(text: str) -> str:
             out.append(lp + ", ".join(fields) + rp)
         i = j
     out.append(text[i:])
-    return "".join(out)
+    return "".join(out).replace("_byname_AnyRec", "(...)")  # a spread record whose fields aren't known
 
 
 def explain_fields(msg: str) -> str:
@@ -166,7 +167,7 @@ def explain_fields(msg: str) -> str:
 
 def is_generated_name(name) -> bool:
     return isinstance(name, str) and (
-        name in (DS, REPR, FIELDSET, STAR, "_NT", "_cast", "_Cl", "_Mp", "_ntf", "_t", "_TD", "_PR", "_L", "_S", "_Fi", "_It", "_ov", "_A", "_Itb") or name.startswith((*GENERATED_PREFIXES, "_byname_"))
+        name in (DS, REPR, FIELDSET, STAR, "_NT", "_cast", "_Cl", "_Mp", "_ntf", "_t", "_TD", "_PR", "_L", "_S", "_Fi", "_It", "_ov", "_A", "_Itb", "_TV", "MYPY") or name.startswith((*GENERATED_PREFIXES, "_byname_"))
     )
 
 

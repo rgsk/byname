@@ -135,6 +135,31 @@ def test_spread_mistakes_are_named(project):
     assert "_byname" not in out and "_dct_" not in out
 
 
+def test_spread_record_picks_the_overload_that_takes_a_record(project):
+    # a spread record isn't whatever type an overload wants: `int` rejects it, so the Person overload is used
+    (project / "ov.pyn").write_text(
+        "from typing import overload, Any\n"
+        "type Person = (name: str, age: int)\n"
+        "@overload\n"
+        "def lookup(key: int) -> int: ...\n"
+        "@overload\n"
+        "def lookup(key: Person) -> str: ...\n"
+        "def lookup(key: Any) -> Any: ...\n"
+        "u = (name='r',)\n"
+        "reveal_type(lookup((**u, age=1)))\n"
+        "lookup((**u,))\n"                     # missing age
+        "x = (**u, age=1)\n"
+        "def fn(p: Person) -> None: ...\n"
+        "fn(x)\n"                               # no type expected for x: Any, as before
+        "reveal_type(print((**u, age=1)))\n"
+    )
+    out, rc = tool(project, "basedpyright", "ov.pyn")
+    line9 = next(ln for ln in out.splitlines() if "ov.pyn:9:13" in ln)
+    assert line9.endswith('is "str"')
+    assert "ov.pyn:10:8 - error" in out and "missing field: age" in out
+    assert "ov.pyn:13" not in out and "1 error," in out
+
+
 def test_mypy_line_numbers_map_back(project):
     # mypy reports lines only; records are Any to it, so only the plain type error shows
     out, rc = tool(project, "mypy", "main.pyn")

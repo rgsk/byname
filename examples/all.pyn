@@ -5,6 +5,7 @@
 # local value. A bare `field=` means `field=field`.
 
 from dataclasses import dataclass
+from typing import overload
 
 name = "Rahul"
 age = 26
@@ -208,6 +209,26 @@ def mail(to: Contact) -> str:
 
 
 assert mail((**first, **last)) == "Ann Lee, Oslo"  # checked against mail's parameter: no type to write
+
+
+def send(times: int, to: Contact, loud: bool = False) -> str:
+    return f"{to.name} x{times}" + "!" * loud
+
+
+assert send(2, (**first, **last)) == "Ann x2"  # any position: checked against `to`
+assert send(2, to=(**first, **last), loud=True) == "Ann x2!"  # by keyword too
+
+
+@overload
+def lookup(key: int) -> int: ...
+@overload
+def lookup(key: Contact) -> str: ...
+def lookup(key: int | Contact) -> int | str:
+    return key if isinstance(key, int) else key.name
+
+
+assert lookup((**first, **last)) == "Ann"  # overloads: the Contact one, so this is a str
+assert lookup(7) == 7
 
 
 # ============================================================================

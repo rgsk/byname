@@ -486,6 +486,15 @@ def test_spread_records_are_checked_against_the_expected_type():
     assert "_byname_ctx" not in r.prelude + r.body
 
 
+def test_spread_records_as_call_arguments_fall_back_to_a_record():
+    # a whole call argument gets _byname_arg (unknown type: a record, so a non-record overload rejects it);
+    # anywhere else _byname_ctx (unknown type: Any)
+    src = "f((**u))\nf(1, k=(**u))\no.m(a, (**u), b)\nx = (**u)\nf([(**u)])\nf((**u).a)\nt = ((**u), 1)\n"
+    lines = transform(src, checker=True).body.splitlines()
+    assert [ln.count("_byname_arg(") for ln in lines] == [1, 1, 1, 0, 0, 0, 0]
+    assert [ln.count("_byname_ctx(") for ln in lines] == [0, 0, 0, 1, 1, 1, 1]
+
+
 def test_spread_record_errors():
     with pytest.raises(SyntaxError, match="duplicate record field"):
         transform("x = (**u, a=1, a=2)\n")
