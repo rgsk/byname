@@ -299,17 +299,19 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
                 raise err("missing iterable after 'in'", toks[close + 1])
             marks: list[Mark] = []
 
-            def element(node: list, chain: list[int], text: str, marks: list[Mark]) -> str:
-                text += "(" if len(node) > 1 else ""
+            def element(open_i: int, node: list, chain: list[int], text: str, marks: list[Mark]) -> str:
+                # the same shape as the target: `(a=,)` stays a 1-tuple, `(a=)` a bare value
+                single = len(node) == 1 and toks[pair[open_i] - 1].string != ","
+                text += "" if single else "("
                 for k, (it, kind, val) in enumerate(node):
                     text += ", " if k else ""
                     if kind == "nested":
-                        text = element(val, [*chain, it[0]], text, marks)
+                        text = element(it[2], val, [*chain, it[0]], text, marks)
                     else:
                         text = access([*chain, it[0]], text, marks)
-                return text + (")" if len(node) > 1 else "")
+                return text + ("" if single else ",)" if len(node) == 1 else ")")
 
-            text = element(tree, [], " (", marks) + f" {'async ' if is_async else ''}for {DS} in"
+            text = element(i, tree, [], " (", marks) + f" {'async ' if is_async else ''}for {DS} in"
             at = off(toks[close + 1].end)
             edits.append(Edit(at, at, text, group, marks))
             if comma:  # `for x in a, b:` is a tuple; a generator needs it parenthesised

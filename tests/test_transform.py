@@ -206,6 +206,16 @@ def test_for_target_single_field_needs_no_tuple():
     assert transform("for (x=) in pts: print(x)\n").body == "for (x) in (_ds.x for _ds in pts): print(x)\n"
 
 
+def test_for_target_trailing_comma_keeps_the_tuple_shape():
+    # `(age=,)` leaves the target `(age,)`, a 1-tuple, so each element must be one too
+    src = "for (age=,) in rows: pass\nfor (u=(age=,)) in rows: pass\n"
+    body = "for (age,) in ((_ds.age,) for _ds in rows): pass\nfor ((age,)) in ((_ds.u.age,) for _ds in rows): pass\n"
+    assert transform(src).body == body
+    ns = {}
+    exec(compile_pyn("out = []\nfor (age=,) in [(age=1), (age=2)]:\n    out.append(age)\n"), ns)
+    assert ns["out"] == [1, 2]
+
+
 def test_for_target_runs():
     src = (
         "rows = [(name='a', age=1), (name='b', age=2)]\n"
