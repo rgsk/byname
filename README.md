@@ -116,6 +116,18 @@ for (x=, y=) in pts: ...               # for-loop targets
 (id=, user=(name=, age=a)) = r         # nested: name = r.user.name
 ```
 
+**In parameters,** like TypeScript's `function f({ name, age }: User)`:
+
+```python
+type User = (name: str, age: int)
+
+def greet((name=, age=): User, loud: bool = False) -> str:
+    ...                                # name: str, age: int; a typo like (nme=) is an error on the pattern
+def f((id=, user=(name=n))): ...       # nested, renamed, or with no type
+```
+
+The parameter has no name, so it can't be passed by keyword (`greet(p=…)`). Hovers show it as `(...)`.
+
 **Not planned:**
 - **Dict keys:** destructuring reads attributes, not keys. Dict syntax would buy nothing over records,
   and dicts lose per-key types (`dict[str, str | int]`).

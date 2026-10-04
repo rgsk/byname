@@ -574,3 +574,70 @@ def test_field_spans_cover_every_field_name():
     r = transform(src)
     assert [src[s:e] for s, e in r.fields] == ["h", "d", "h", "d", "h", "d"]
     assert all(src[s - 1] == "(" or src[s - 2] == "," for s, _ in r.fields)
+
+
+PARAMS = '''type User = (name: str, age: int)
+
+
+def f((name=, age=): User):
+    if age > 1:
+        return name + "!"
+    return name
+
+
+def g(self, (name=n, addr=(city=)): (name: str, addr: (city: str)), k: int = 0) -> str:
+    """doc"""
+    return f"{n} {city} {k}"
+
+
+def h((name=, age=)): return name
+
+
+def two((name=): User, (age=) = (age=3)):
+    return (name, age)
+
+
+def bad((nme=): User):
+    return nme
+'''
+
+
+def test_parameter_patterns_destructure_arguments():
+    ns = {}
+    calls = "u = (name='r', age=5)\nout = f(u), h(u), g(0, (name='a', addr=(city='b'))), two(u), two(u, (age=9))\n"
+    exec(compile_pyn(PARAMS + calls), ns)
+    assert ns["out"] == ("r!", "r", "a b 0", ("r", 3), ("r", 9))
+    assert ns["g"].__doc__ == "doc"  # the unpacking goes after a docstring
+
+
+def test_parameter_patterns_translation():
+    body = transform(PARAMS).body
+    # a line of its own before the body, so it may start with `if`/`for`/`try`; before a one-line body
+    assert "def f(_byname_p0: User):\n    _ds = _byname_p0; name = _ds.name; age = _ds.age\n    if age > 1:" in body
+    assert '    """doc"""\n    _ds = _byname_p1; n = _ds.name; city = _ds.addr.city\n' in body
+    assert "def h(_byname_p2): _ds = _byname_p2; name = _ds.name; age = _ds.age; return name" in body
+    assert "def two(_byname_p3: User, _byname_p4 = _rec_age(age=3)):\n    _ds = _byname_p3; name = _ds.name; _ds = _byname_p4; age = _ds.age\n" in body
+    assert transform("def f[T]((a=): T): return a\n").body == "def f[T](_byname_p0: T): _ds = _byname_p0; a = _ds.a; return a\n"
+
+
+def test_parameter_patterns_keep_line_numbers():
+    # the generated lines count as the `def` line: tracebacks point into the .pyn as written
+    ns = {}
+    src = PARAMS + "bad((name='r', age=1))\n"
+    with pytest.raises(AttributeError) as e:
+        exec(to_code(src, "p.pyn"), ns)
+    lines = [fr.lineno for fr in e.traceback if fr.frame.code.path == "p.pyn"]
+    assert [ln + 1 for ln in lines] == [src.splitlines().index("bad((name='r', age=1))") + 1, src.splitlines().index("def bad((nme=): User):") + 1]
+    code = to_code("def f((a=)):\n    x = 1\n    raise ValueError(a)\n\n\nf((a=1))\n", "q.pyn")
+    with pytest.raises(ValueError) as e:
+        exec(code, {})
+    assert [fr.lineno + 1 for fr in e.traceback if fr.frame.code.path == "q.pyn"] == [6, 3]
+
+
+def test_parameter_pattern_runs_on_old_pythons():
+    from byname.output import render
+
+    out = render(PARAMS.replace("type User = ", "User = ") + "print(f((name='r', age=5)), two((name='t', age=1)))\n", Path("p.pyn"))
+    ast.parse(out, feature_version=(3, 8))
+    p = subprocess.run([sys.executable, "-c", out], capture_output=True, text=True, check=True)
+    assert p.stdout == "r! ('t', 3)\n"

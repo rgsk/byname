@@ -2,7 +2,7 @@
   "name": "byname",
   "displayName": "byname (.pyn)",
   "description": "Language support for .pyn files: bind-by-name Python, type-checked through basedpyright.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "rgsk",
   "private": true,
   "license": "MIT",
@@ -36,6 +36,11 @@
         "language": "pyn",
         "scopeName": "source.pyn",
         "path": "./syntaxes/pyn.tmLanguage.json"
+      },
+      {
+        "scopeName": "pyn.param-patterns",
+        "path": "./syntaxes/pyn-params.injection.json",
+        "injectTo": ["source.pyn"]
       }
     ],
     "configuration": {

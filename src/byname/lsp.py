@@ -91,6 +91,7 @@ TARGET_RE = re.compile(r'is incompatible with protocol "_typ_(\w+?)\[')
 LITERAL_RE = re.compile(r"Literal\['([\w,]*)'\]")
 DICT_MISSING_RE = re.compile(r'"(\w+)" is required in "_dct_')
 DICT_EXTRA_RE = re.compile(r'"(\w+)" is an undefined item in type "_dct_')
+PARAM_RE = re.compile(r"\b_byname_p\d+\b")
 RULE_RE = re.compile(r"\s*\((report\w+)\)\s*$")
 CODE_KEYS = {"newText", "insertText", "filterText", "sortText", "uri", "targetUri", "data"}
 
@@ -99,7 +100,8 @@ def pretty(text: str) -> str:
     """Display form of record types: _rec_name__age[str, int] -> (name: str, age: int), and of the
     TypedDict a record's `_asdict()` returns: _dct_name__age[str, int] -> {name: str, age: int}, and of
     explicit record types: _typ_... -> (name: str, age: int), _opn_... -> (name: str, age: int, ...),
-    and of a spread record whose fields aren't known: _byname_AnyRec -> (...)."""
+    and of a spread record whose fields aren't known: _byname_AnyRec -> (...), and of a parameter pattern's
+    parameter: _byname_p0 -> (...)."""
     out, i = [], 0
     while m := REC_RE.search(text, i):
         out.append(text[i : m.start()])
@@ -125,7 +127,8 @@ def pretty(text: str) -> str:
             out.append(lp + ", ".join(fields) + rp)
         i = j
     out.append(text[i:])
-    return "".join(out).replace("_byname_AnyRec", "(...)")  # a spread record whose fields aren't known
+    out_s = "".join(out).replace("_byname_AnyRec", "(...)")  # a spread record whose fields aren't known
+    return PARAM_RE.sub("(...)", out_s)  # a parameter pattern's parameter: `f((...): User)`
 
 
 def explain_fields(msg: str) -> str:
@@ -331,7 +334,7 @@ class Proxy:
                 return obj
             if key == "message":
                 obj = explain_fields(obj)
-            return pretty(obj) if any(g in obj for g in GENERATED_PREFIXES) else obj
+            return pretty(obj) if any(g in obj for g in (*GENERATED_PREFIXES, "_byname_")) else obj
         if not isinstance(obj, dict):
             return obj
         if is_range(obj):

@@ -4,6 +4,7 @@
     (x=, y=1)         -> __P(x=__p, y=1)
     (x=, y=t) = r     -> __P[x:__p, y:t] = r       (a subscript is a valid assignment target)
     -> (x: int)       -> -> __T[x: int]            (record type)
+    def f((x=): T)    -> def f(__D: (__P[x:__p], T))   (parameter pattern; `(__P[x:__p],)` with no type)
 
 Stand-ins are a few characters wider than the real syntax, so a line right at the length limit
 can wrap one step early.
@@ -33,7 +34,7 @@ import tokenize
 from pathlib import Path
 
 from .tools import resolve
-from .transform import PAT, SHORT, TYP, transform
+from .transform import PARAM, PAT, SHORT, TYP, transform
 
 
 class FormatError(Exception):
@@ -41,8 +42,8 @@ class FormatError(Exception):
 
 
 def encode(src: str) -> str:
-    if SHORT in src or PAT in src or TYP in src:
-        raise FormatError(f"source already uses the stand-in names {SHORT}/{PAT}/{TYP}")
+    if SHORT in src or PAT in src or TYP in src or PARAM in src:
+        raise FormatError(f"source already uses the stand-in names {SHORT}/{PAT}/{TYP}/{PARAM}")
     r = transform(src)
     out = src
     for start, end, text in reversed(r.standins):
@@ -62,6 +63,7 @@ def decode(code: str) -> str:
     sig = [i for i, t in enumerate(toks) if t.type not in (tokenize.COMMENT, tokenize.NL)]
     pos = {i: k for k, i in enumerate(sig)}  # token index -> index in sig
     edits: list[tuple[int, int, str]] = []
+    dedents: list[tuple[int, int, int]] = []  # (after line, through line, columns)
     pair: dict[int, int] = {}
     stack: list[int] = []
     for i in sig:
@@ -75,6 +77,24 @@ def decode(code: str) -> str:
 
     for i in sig:
         t = toks[i]
+        if t.string == PARAM and toks[nxt(i)].string == ":" and toks[nxt(nxt(i))].string == "(":
+            # parameter pattern: `__D: (__P[...], T)` -> `(...): T`, `__D: (__P[...],)` -> `(...)`
+            o = nxt(nxt(i))
+            c, pat = pair[o], nxt(o)
+            end = pair[nxt(pat)]  # the pattern's `]`; its insides are decoded below
+            edits.append((off(t.start), off(toks[pat].start), ""))
+            comma = nxt(end)
+            ann = nxt(comma) if toks[comma].string == "," else c
+            if ann != c:  # `, T` -> `: T`, then drop T's trailing comma and the `)`
+                edits.append((off(toks[end].end), off(toks[ann].start), ": "))
+                last = sig[pos[c] - 1]
+                last = sig[pos[last] - 1] if toks[last].string == "," else last
+                edits.append((off(toks[last].end), off(toks[c].end), ""))
+            else:
+                edits.append((off(toks[end].end), off(toks[c].end), ""))
+            if toks[pat].start[0] > t.start[0]:  # ruff split the tuple: its lines lose its indent
+                dedents.append((t.start[0], toks[c].start[0], toks[pat].start[1] - t.start[1]))
+            continue
         # x=__p / x:__p -> drop the value (colon handled with its pattern); __P( -> ( for records
         if t.string == SHORT or (t.string == PAT and toks[nxt(i)].string == "("):
             edits.append((off(t.start), off(t.end), ""))
@@ -93,6 +113,11 @@ def decode(code: str) -> str:
                     after = nxt(j)
                     edits.append((prev_end, off(toks[after].start), sep))
                 j = nxt(j)
+    for a, b, n in dedents:  # lines whose start no edit already removes
+        for line in range(a + 1, b + 1):
+            at = starts[line - 1]
+            if not any(s <= at < e for s, e, _ in edits) and code[at : at + n].strip() == "":
+                edits.append((at, at + n, ""))
     edits.sort()
     out = code
     for start, end, text in reversed(edits):

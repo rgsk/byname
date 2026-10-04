@@ -179,6 +179,29 @@ def oldest(people: list[Person]) -> Person:
 assert oldest([someone, (name="Hal", age=40)]).name == "Hal"
 
 
+def intro((name=, age=): Person, loud: bool = False) -> str:  # destructure a parameter, like TS `{ name, age }: Person`
+    if loud:  # the body can start with anything
+        return f"{name.upper()}, {age}!"
+    return f"{name}, {age}"
+
+
+assert intro(someone) == "Gil, 30" and intro((name="Ivy", age=7), loud=True) == "IVY, 7!"
+
+
+def label((id=, user=(name=n))) -> str:  # nested and renamed; no annotation: untyped
+    return f"{id}:{n}"
+
+
+assert label((id=7, user=(name="Kim"))) == "7:Kim"
+
+
+def label_typed((id=, user=(name=n)): (id: int, user: (name: str))) -> str:  # the same, typed inline: n is a str
+    return f"{id}:{n.title()}"
+
+
+assert label_typed((id=7, user=(name="kim"))) == "7:Kim"
+
+
 def age_of(p: (age: int, ...)) -> int:  # open: any object with at least an int `age`
     return p.age
 

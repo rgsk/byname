@@ -346,6 +346,25 @@ def test_completion_in_for_and_nested_slots(lsp):
     assert {i["label"] for i in items} == {"name", "greeting"}
 
 
+def test_completion_in_parameter_patterns(lsp):
+    # `def f((name=, |): T)` offers T's other fields, annotated inline or with an alias
+    c, root, uri = lsp
+    _, items = complete(c, uri, MAIN + "def f((name=, |): (name: str, age: int, city: str)): pass\n")
+    assert {i["label"] for i in items} == {"age", "city"}
+    _, items = complete(c, uri, MAIN + "type U = (name: str, age: int)\ndef f(n: int, (ag|): U): pass\n")
+    assert [i["label"] for i in items] == ["age"]
+
+
+def test_parameter_pattern_shows_as_a_pattern(lsp):
+    # the generated parameter name doesn't leak into hovers: `(...)`
+    c, root, uri = lsp
+    text = MAIN + "type U = (name: str, age: int)\ndef greet((name=, age=): U) -> str:\n    return name\ngreet\n"
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 300}, "contentChanges": [{"text": text}]}})
+    res = c.request("textDocument/hover", {"textDocument": {"uri": uri}, "position": pos(text, "greet\n")})
+    value = res["contents"]["value"]
+    assert "def greet((...): U) -> str" in value
+
+
 def test_replace_completes_and_checks_fields(lsp):
     # `_replace(` offers the record's fields; a stale `**cfg._asdict()` is an error in the editor
     c, root, uri = lsp

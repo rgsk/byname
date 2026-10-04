@@ -41,6 +41,23 @@ def test_spreads_format(tmp_path):
     assert format_pyn(want, cwd=tmp_path) == want
 
 
+def test_parameter_patterns_format(tmp_path):
+    # `(a=): T` stands in as `__D: (__P[a:__p], T)`: a valid parameter
+    src = "def f( (name= ,age = a) :User ,n:int=0)->int:\n    return a\ndef h((name=,age=)): return name\n"
+    want = "def f((name=, age=a): User, n: int = 0) -> int:\n    return a\n\n\ndef h((name=, age=)):\n    return name\n"
+    assert format_pyn(src, cwd=tmp_path) == want
+    assert format_pyn(want, cwd=tmp_path) == want
+    # split over lines: the stand-in's tuple indent is taken back out
+    (tmp_path / "ruff.toml").write_text("line-length = 40\n")
+    src = "def f((first_name=, nested=(city=, zip_code=)): User, other: int = 0):\n    pass\n"
+    want = (
+        "def f(\n    (\n        first_name=,\n        nested=(\n            city=, zip_code=\n"
+        "        ),\n    ): User,\n    other: int = 0,\n):\n    pass\n"
+    )
+    assert format_pyn(src, cwd=tmp_path) == want
+    assert format_pyn(want, cwd=tmp_path) == want
+
+
 def test_decode_eats_slice_spacing():
     # ruff writes complex slices as `a : b`; that must come back as `a=b`
     assert decode('__P[name:__p, age : d["age"]] = r\n') == '(name=, age=d["age"]) = r\n'
