@@ -5,6 +5,7 @@
     (x=, y=t) = r     -> __P[x:__p, y:t] = r       (a subscript is a valid assignment target)
     -> (x: int)       -> -> __T[x: int]            (record type)
     def f((x=): T)    -> def f(__D: (__P[x:__p], T))   (parameter pattern; `(__P[x:__p],)` with no type)
+    def f(u=(x=): T)  -> def f(u: (__D, __P[x:__p], T))  (named parameter pattern)
 
 Stand-ins are a few characters wider than the real syntax, so a line right at the length limit
 can wrap one step early.
@@ -77,12 +78,19 @@ def decode(code: str) -> str:
 
     for i in sig:
         t = toks[i]
-        if t.string == PARAM and toks[nxt(i)].string == ":" and toks[nxt(nxt(i))].string == "(":
-            # parameter pattern: `__D: (__P[...], T)` -> `(...): T`, `__D: (__P[...],)` -> `(...)`
+        unnamed = t.string == PARAM and toks[nxt(i)].string == ":" and toks[nxt(nxt(i))].string == "("
+        named = (
+            t.type == tokenize.NAME and toks[nxt(i)].string == ":" and toks[nxt(nxt(i))].string == "("
+            and toks[nxt(nxt(nxt(i)))].string == PARAM
+        )
+        if unnamed or named:
+            # parameter pattern: `__D: (__P[...], T)` -> `(...): T`, `__D: (__P[...],)` -> `(...)`;
+            # named: `user: (__D, __P[...], T)` -> `user=(...): T`
             o = nxt(nxt(i))
-            c, pat = pair[o], nxt(o)
+            c = pair[o]
+            pat = nxt(nxt(nxt(o))) if named else nxt(o)
             end = pair[nxt(pat)]  # the pattern's `]`; its insides are decoded below
-            edits.append((off(t.start), off(toks[pat].start), ""))
+            edits.append((off(t.end) if named else off(t.start), off(toks[pat].start), "=" if named else ""))
             comma = nxt(end)
             ann = nxt(comma) if toks[comma].string == "," else c
             if ann != c:  # `, T` -> `: T`, then drop T's trailing comma and the `)`

@@ -58,6 +58,14 @@ def test_parameter_patterns_format(tmp_path):
     assert format_pyn(want, cwd=tmp_path) == want
 
 
+def test_named_parameter_patterns_format(tmp_path):
+    # `user=(a=): T` stands in as `user: (__D, __P[a:__p], T)`
+    src = "def f(*,user=( name= ,age=):Args):\n    pass\ndef g(k=(name=)=(name='u')): pass\n"
+    want = "def f(*, user=(name=, age=): Args):\n    pass\n\n\ndef g(k=(name=) = (name=\"u\")):\n    pass\n"
+    assert format_pyn(src, cwd=tmp_path) == want
+    assert format_pyn(want, cwd=tmp_path) == want
+
+
 def test_decode_eats_slice_spacing():
     # ruff writes complex slices as `a : b`; that must come back as `a=b`
     assert decode('__P[name:__p, age : d["age"]] = r\n') == '(name=, age=d["age"]) = r\n'

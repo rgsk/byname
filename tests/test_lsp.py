@@ -353,6 +353,8 @@ def test_completion_in_parameter_patterns(lsp):
     assert {i["label"] for i in items} == {"age", "city"}
     _, items = complete(c, uri, MAIN + "type U = (name: str, age: int)\ndef f(n: int, (ag|): U): pass\n")
     assert [i["label"] for i in items] == ["age"]
+    _, items = complete(c, uri, MAIN + "type U = (name: str, age: int)\ndef f(*, user=(name=, |): U): pass\n")
+    assert [i["label"] for i in items] == ["age"]
 
 
 def test_parameter_pattern_shows_as_a_pattern(lsp):

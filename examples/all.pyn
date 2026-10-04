@@ -202,6 +202,20 @@ def label_typed((id=, user=(name=n)): (id: int, user: (name: str))) -> str:  # t
 assert label_typed((id=7, user=(name="kim"))) == "7:Kim"
 
 
+def welcome(*, user=(name=, age=): Person, note: str = "") -> str:  # named: `user` is a real parameter
+    return f"{name} ({age}) {note}".strip()
+
+
+assert welcome(user=(name="Ann", age=30)) == "Ann (30)"  # so it can be passed by keyword
+
+
+def welcome_or_guest(user=(name=): Person = (name="guest", age=0)) -> str:  # with a default
+    return name
+
+
+assert welcome_or_guest() == "guest" and welcome_or_guest((name="Bo", age=1)) == "Bo"
+
+
 def age_of(p: (age: int, ...)) -> int:  # open: any object with at least an int `age`
     return p.age
 

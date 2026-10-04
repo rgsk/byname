@@ -641,3 +641,42 @@ def test_parameter_pattern_runs_on_old_pythons():
     ast.parse(out, feature_version=(3, 8))
     p = subprocess.run([sys.executable, "-c", out], capture_output=True, text=True, check=True)
     assert p.stdout == "r! ('t', 3)\n"
+
+
+NAMED = """type User = (name: str, age: int)
+
+
+def fn(*, user=(name=, age=): User):
+    return (name, age, user.age)
+
+
+def h(user=(name=): User = (name="rahul", age=1)): return name
+
+
+def k(user=(name=n) = (name="untyped")): return n
+
+
+def rec(user=(name="x", age=30)): return user.age
+"""
+
+
+def test_named_parameter_patterns():
+    # `user=(...)`: a parameter called `user`, destructured; it can be passed by keyword
+    ns = {}
+    exec(compile_pyn(NAMED + "out = fn(user=(name='r', age=5)), h(), h(user=(name='z', age=2)), k(), rec()\n"), ns)
+    assert ns["out"] == (("r", 5, 5), "rahul", "z", "untyped", 30)
+    body = transform(NAMED).body
+    assert "def fn(*, user: User):\n    _ds = user; name = _ds.name; age = _ds.age\n" in body
+    assert 'def h(user: User = _rec_name__age(name="rahul", age=1)): _ds = user; name = _ds.name; return name' in body
+    assert 'def k(user = _rec_name(name="untyped")): _ds = user; n = _ds.name; return n' in body
+    # values that can't be pattern targets: a default record, as in Python
+    assert 'def rec(user=_rec_name__age(name="x", age=30)): return user.age' in body
+
+
+def test_no_shorthand_in_def_signatures():
+    # in a signature `name=` would mean the outer `name`: a group of pattern items is a pattern, and a
+    # record default mixing `name=` with values is an error
+    with pytest.raises(SyntaxError, match=r"name= in a def signature: give the value"):
+        transform("def f(user=(name=, age=30)): pass\n")
+    with pytest.raises(SyntaxError, match=r"city= in a def signature"):
+        transform("def f(user=(id=1, addr=(city=))): pass\n")

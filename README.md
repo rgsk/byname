@@ -124,17 +124,24 @@ type User = (name: str, age: int)
 def greet((name=, age=): User, loud: bool = False) -> str:
     ...                                # name: str, age: int; a typo like (nme=) is an error on the pattern
 def f((id=, user=(name=n))): ...       # nested, renamed, or with no type
+def f((name=, age=): User = (name="anon", age=0)): ...   # a default goes after the type
+
+def send(*, user=(name=, age=): User): ...     # named: `user` can be passed by keyword, send(user=…)
+def send(user=(name=): User = (name="anon", age=0)): ...
 ```
 
-The parameter has no name, so it can't be passed by keyword (`greet(p=…)`). Hovers show it as `(...)`.
+`user=(name=)` reads like the nested pattern `(user=(name=)) = x`: the thing called `user`, destructured.
+An unnamed pattern can't be passed by keyword; hovers show it as `(...)`. In a signature a group of
+pattern items is always a pattern, so a default record needs values: `user=(name="x")`, not `(name=)`.
 
 **Not planned:**
 - **Dict keys:** destructuring reads attributes, not keys. Dict syntax would buy nothing over records,
   and dicts lose per-key types (`dict[str, str | int]`).
 - **Positional items in a pattern,** like `(a, b=) = r`. Fields are read by name so field order never
   matters; positional items would bring that fragility back.
-- **Shorthand in `def` signatures,** like `def f(name=)`. There it would mean "default to the outer
-  `name`", and a function should almost never take outer variables by the same name.
+- **Shorthand in `def` signatures,** like `def f(name=)` or a default `user=(name=, age=30)`. There it
+  would mean "default to the outer `name`", and a function should almost never take outer variables by
+  the same name. A `user=(...)` made only of pattern items is a named parameter pattern (above).
 - **Syntax that isn't binding by name,** like defaults with `(email= ?? "none") = user`. Python has no
   `??` ([PEP 505](https://peps.python.org/pep-0505/) is deferred), so byname leaves it to plain Python,
   `email = user.email if user.email is not None else "none"`, rather than invent an operator that a
