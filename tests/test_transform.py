@@ -150,6 +150,49 @@ def test_body_keeps_line_count():
 
 
 
+
+# --- nested patterns ----------------------------------------------------------
+
+
+def test_nested_pattern_reads_through_the_outer_field():
+    src = "(id=, user=(name=n, age=)) = r\n"
+    assert transform(src).body == "_ds = r; id = _ds.id; n = _ds.user.name; age = _ds.user.age\n"
+    assert transform(src).prelude == ""  # the inner group is a pattern, not a record literal
+
+
+def test_nested_pattern_runs_at_any_depth():
+    src = (
+        "r = (id=1, user=(name='Rahul', home=(city='Pune',)))\n"
+        "(id=, user=(name=, home=(city=c))) = r\n"
+    )
+    ns = {}
+    exec(compile_pyn(src), ns)
+    assert (ns["id"], ns["name"], ns["c"]) == (1, "Rahul", "Pune")
+
+
+def test_parenthesised_name_is_still_a_target():
+    # `(a)` holds no `field=`, so it's just a parenthesised local
+    assert transform("(x=(a)) = r\n").body == "_ds = r; (a) = _ds.x\n"
+
+
+def test_nested_pattern_in_for_target():
+    src = "for (id=, user=(name=, age=a)) in rows: pass\n"
+    body = "for (id, (name, a)) in ((_ds.id, (_ds.user.name, _ds.user.age)) for _ds in rows): pass\n"
+    assert transform(src).body == body
+    ns = {}
+    exec(compile_pyn("rows = [(id=1, user=(name='x', age=2))]\nfor (user=(age=)) in rows: pass\n"), ns)
+    assert ns["age"] == 2
+
+
+def test_nested_half_typed_item_reads_through_the_chain():
+    r = transform("(user=(name=, ag)) = r\n", tolerant=True)
+    assert r.body == "_ds = r; name = _ds.user.name; _ds.user.ag\n"
+
+
+def test_nested_field_spans_cover_inner_names():
+    src = "(user=(name=)) = r\n"
+    assert [src[a:b] for a, b in transform(src).fields] == ["user", "name"]
+
 # --- for-loop targets ---------------------------------------------------------
 
 
@@ -213,8 +256,8 @@ def test_plain_for_tuple_untouched():
 
 
 def test_destructure_target_must_be_assignable():
-    # `1` and `f()` can't be assigned to; nested patterns aren't supported yet
-    for src in ["(a=1) = f()\n", "(a=g()) = f()\n", "(a=(b=)) = f()\n"]:
+    # `1` and `f()` can't be assigned to, at any depth
+    for src in ["(a=1) = f()\n", "(a=g()) = f()\n", "(x=(a=1)) = f()\n"]:
         with pytest.raises(SyntaxError, match="cannot bind field 'a'"):
             transform(src)
 
@@ -245,6 +288,7 @@ def test_tolerant_mode_turns_half_typed_item_into_attribute_access():
         ("(age=, gr|) = r\n", ("gr", ["age"])),                     # bare name being typed
         ("(gre|eting=g) = r\n", ("greeting", [])),                  # renaming the field of an item
         ("for (age=, |) in rows:\n", ("", ["age"])),                # for-loop target
+        ("(id=, user=(name=, |)) = r\n", ("", ["name"])),           # nested group
     ],
 )
 def test_pattern_slot_finds_field_positions(src, expected):
@@ -263,6 +307,7 @@ def test_pattern_slot_finds_field_positions(src, expected):
         "(a=, |)\n",         # a record literal, not a pattern
         "x = (a=, |) = r\n", # not at statement start
         "for (a=, b=x|) in r:\n",  # target side, in a for
+        "(a=d[(|)]) = r\n",          # a bracket in a target, not a nested pattern
     ],
 )
 def test_pattern_slot_ignores_non_field_positions(src):

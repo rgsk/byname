@@ -316,6 +316,17 @@ def test_completion_on_first_pattern_item(lsp):
     assert snippet(text, items[0]["textEdit"]["range"]) == "gree"
 
 
+def test_completion_in_for_and_nested_slots(lsp):
+    # same field completion in `for (...) in xs` targets and inside a nested group
+    c, root, uri = lsp
+    _, items = complete(c, uri, MAIN + "for (name=, |) in [res]: pass\n")
+    assert {i["label"] for i in items} == {"age", "greeting"}
+    _, items = complete(c, uri, MAIN + "(x=(gree|)) = (x=res)\n")
+    assert [i["label"] for i in items] == ["greeting"]
+    _, items = complete(c, uri, MAIN + "for (x=(age=, |)) in [(x=res)]: pass\n")
+    assert {i["label"] for i in items} == {"name", "greeting"}
+
+
 def test_comma_trigger_only_inside_patterns(lsp):
     # `,` pops completion in a pattern; in an ordinary call it returns nothing instead of noise
     c, root, uri = lsp

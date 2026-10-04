@@ -7,6 +7,7 @@ Everything is built on the `name=` shorthand from PEP 736 (rejected):
     (name=, age=) = expr      destructure  -> _ds = expr; name = _ds.name; age = _ds.age
     (name=n) = expr           rename       -> _ds = expr; n = _ds.name
     for (name=, age=) in xs:  loop         -> for (name, age) in ((_ds.name, _ds.age) for _ds in xs):
+    (user=(name=)) = expr     nested       -> _ds = expr; name = _ds.user.name
 
 Left of `=` is always the field, right is always the local, in all three forms.
 
@@ -152,8 +153,65 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
                 edits.append(Edit(at, at, toks[it[0]].string, span(it[0]), kind="shorthand"))
                 standins.append((at, at, SHORT))
 
+    consumed: set[int] = set()  # `(` of nested pattern groups, handled with their outer pattern
+
+    def pattern_items(open_i: int) -> tuple[list[list[int]], list[bool]] | None:
+        """A group's items if they read as pattern items: `field=...`, plus (half-typed) bare names."""
+        its = items(open_i)
+        kw = [is_kw(it) for it in its]
+        bare = [len(it) == 1 and is_name(toks[it[0]]) for it in its]
+        if not (its and any(kw) and all(k or b for k, b in zip(kw, bare))):
+            return None
+        return its, bare
+
+    def pattern(open_i: int) -> list[tuple[list[int], str, object]]:
+        """Parse a pattern group into (item, kind, value) entries, kind one of: short (`f=`),
+        target (`f=t`, value the target text), nested (`f=(...)`, value its entries), bare (half-typed).
+        Records the group's stand-ins and field spans as it goes."""
+        its, bare = pattern_items(open_i)  # type: ignore[misc]
+        node: list[tuple[list[int], str, object]] = []
+        for it, b in zip(its, bare):
+            f = toks[it[0]]
+            if b:
+                if not tolerant:
+                    raise err(f"pattern item {f.string!r} needs '=': write {f.string}= or {f.string}=target", f)
+                problems.append((*span(it[0]), f"pattern item {f.string!r} needs '='"))
+                node.append((it, "bare", None))
+                continue
+            field_spans.append(span(it[0]))
+            if is_short(it):
+                node.append((it, "short", None))
+                standins.append((*span(it[1]), ":" + SHORT))
+                continue
+            standins.append((*span(it[1]), ":"))
+            v = it[2]
+            if toks[v].string == "(" and pair[v] == it[-1] and pattern_items(v) is not None:
+                consumed.add(v)
+                node.append((it, "nested", pattern(v)))
+                continue
+            text = src[off(toks[v].start) : off(toks[it[-1]].end)]
+            if not is_target(text):
+                raise err(f"cannot bind field {f.string!r} to {text!r}", toks[v])
+            node.append((it, "target", text))
+        # stand-in: __P[a:__p, b:target, c:__P[d:__p]] = expr / for __P[...] in xs (a subscript is a valid target)
+        standins.append((off(toks[open_i].start), off(toks[open_i].end), PAT + "["))
+        standins.append((off(toks[pair[open_i]].start), off(toks[pair[open_i]].end), "]"))
+        return node
+
+    def access(chain: list[int], text: str, marks: list[Mark]) -> str:
+        """Append `_ds.a.b` for field tokens `chain`, each name marked back to where it was written."""
+        text += DS
+        for k in chain:
+            f = toks[k].string
+            text += "."
+            marks.append(Mark(len(text), len(text) + len(f), *span(k)))
+            text += f
+        return text
+
     for i, t in enumerate(toks):
         if not (t.type == tokenize.OP and t.string == "("):
+            continue
+        if i in consumed:
             continue
         prev = toks[i - 1] if i else None
         prev2 = toks[i - 2] if i > 1 else None
@@ -197,48 +255,30 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
         is_for = prev is not None and prev.string == "for" and toks[close + 1].string == "in"
         kw = [is_kw(it) for it in its]
         bare = [len(it) == 1 and is_name(toks[it[0]]) for it in its]
-        if not all(kw):
-            # a pattern with some `field=` items and some bare names: half-typed, or a mistake
-            if not ((is_pattern or is_for) and any(kw) and all(k or b for k, b in zip(kw, bare))):
-                continue  # ordinary parenthesised expression / tuple / genexp
-            name = toks[its[bare.index(True)][0]]
-            if not tolerant:
-                raise err(f"pattern item {name.string!r} needs '=': write {name.string}= or {name.string}=target", name)
+        # a pattern with some `field=` items and some bare names: half-typed, or a mistake (pattern() says so)
+        if not all(kw) and not ((is_pattern or is_for) and any(kw) and all(k or b for k, b in zip(kw, bare))):
+            continue  # ordinary parenthesised expression / tuple / genexp
 
         fields = tuple(toks[it[0]].string for it in its)
         if is_pattern or is_for:
-            # (field=) binds local `field`; (field=target) binds `target`; bare `field` (tolerant) binds nothing
-            targets = []
-            for it, b in zip(its, bare):
-                if b:
-                    problems.append((*span(it[0]), f"pattern item {toks[it[0]].string!r} needs '='"))
-                    targets.append(None)
-                    continue
-                if is_short(it):
-                    targets.append(toks[it[0]].string)
-                    continue
-                text = src[off(toks[it[2]].start) : off(toks[it[-1]].end)]
-                if not is_target(text):
-                    raise err(f"cannot bind field {toks[it[0]].string!r} to {text!r}", toks[it[2]])
-                targets.append(text)
-            # stand-in: __P[a:__p, b:target] = expr / for __P[...] in xs (a subscript is a valid target)
+            tree = pattern(i)
             group = span(i, close)
-            standins.append((group[0], group[0] + 1, PAT + "["))
-            standins.append((group[1] - 1, group[1], "]"))
-            for it in its:
-                if len(it) >= 2 and toks[it[1]].string == "=":
-                    standins.append((*span(it[1]), ":" + (SHORT if is_short(it) else "")))
-            field_spans.extend(span(it[0]) for it, b in zip(its, bare) if not b)
         if is_for:
             # for (a=, b=t) in xs:  ->  for (a, t) in ((_ds.a, _ds.b) for _ds in xs):
-            # one line, so line numbers hold; the generator keeps field types and scopes `_ds`
-            for it, b in zip(its, bare):
-                if b:  # half-typed (tolerant): reads the field, binds nothing
-                    edits.append(Edit(*span(it[0]), "_", span(it[0])))
-                elif is_short(it):
-                    edits.append(Edit(*span(it[1]), "", span(it[0])))
-                else:
-                    edits.append(Edit(off(toks[it[0]].start), off(toks[it[2]].start), "", span(it[0])))
+            # one line, so line numbers hold; the generator keeps field types and scopes `_ds`.
+            # Nested groups stay in the target, so the element mirrors them: (a=, b=(c=)) -> (a, (c))
+            def unwrap(node: list) -> None:  # drop `field=` from the target, leaving locals
+                for it, kind, val in node:
+                    if kind == "bare":  # half-typed (tolerant): reads the field, binds nothing
+                        edits.append(Edit(*span(it[0]), "_", span(it[0])))
+                    elif kind == "short":
+                        edits.append(Edit(*span(it[1]), "", span(it[0])))
+                    else:
+                        edits.append(Edit(off(toks[it[0]].start), off(toks[it[2]].start), "", span(it[0])))
+                        if kind == "nested":
+                            unwrap(val)
+
+            unwrap(tree)
             # the iterable ends at the statement's `:`, or a comprehension's next clause or closing bracket
             pre = toks[i - 2] if i > 1 else None
             is_async = pre is not None and pre.string == "async"
@@ -257,15 +297,19 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
                 j = pair.get(j, j) + 1
             if j == first:
                 raise err("missing iterable after 'in'", toks[close + 1])
-            text, marks = " (", []
-            if len(its) > 1:
-                text += "("
-            for k, (it, f) in enumerate(zip(its, fields)):
-                text += ", " if k else ""
-                text += f"{DS}."
-                marks.append(Mark(len(text), len(text) + len(f), *span(it[0])))
-                text += f
-            text += (")" if len(its) > 1 else "") + f" {'async ' if is_async else ''}for {DS} in"
+            marks: list[Mark] = []
+
+            def element(node: list, chain: list[int], text: str, marks: list[Mark]) -> str:
+                text += "(" if len(node) > 1 else ""
+                for k, (it, kind, val) in enumerate(node):
+                    text += ", " if k else ""
+                    if kind == "nested":
+                        text = element(val, [*chain, it[0]], text, marks)
+                    else:
+                        text = access([*chain, it[0]], text, marks)
+                return text + (")" if len(node) > 1 else "")
+
+            text = element(tree, [], " (", marks) + f" {'async ' if is_async else ''}for {DS} in"
             at = off(toks[close + 1].end)
             edits.append(Edit(at, at, text, group, marks))
             if comma:  # `for x in a, b:` is a tuple; a generator needs it parenthesised
@@ -280,23 +324,29 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
             while toks[j].type not in (tokenize.NEWLINE, tokenize.ENDMARKER) and toks[j].string != ";":
                 j = pair.get(j, j) + 1
             binds, marks = "", []
-            for it, f, tg in zip(its, fields, targets):
-                binds += "; "
-                if tg is None:  # half-typed item: just the attribute access, for completion
-                    binds += f"{DS}."
-                    marks.append(Mark(len(binds), len(binds) + len(f), *span(it[0])))
-                    binds += f
-                    continue
-                ts = len(binds)
-                binds += tg
-                if is_short(it):  # target is implicit: insertion point right after `field=`
-                    at = off(toks[it[1]].end)
-                    marks.append(Mark(ts, len(binds), at, at, span(it[0])))
-                else:
-                    marks.append(Mark(ts, len(binds), *span(it[2], it[-1])))
-                binds += f" = {DS}."
-                marks.append(Mark(len(binds), len(binds) + len(f), *span(it[0])))
-                binds += f
+
+            def bind(node: list, chain: list[int], marks: list[Mark]) -> None:
+                # (field=) binds local `field`; (field=target) binds `target`; (field=(...)) reads deeper
+                nonlocal binds
+                for it, kind, val in node:
+                    if kind == "nested":
+                        bind(val, [*chain, it[0]], marks)
+                        continue
+                    binds += "; "
+                    if kind == "short":  # target is implicit: insertion point right after `field=`
+                        ts, at = len(binds), off(toks[it[1]].end)
+                        binds += toks[it[0]].string
+                        marks.append(Mark(ts, len(binds), at, at, span(it[0])))
+                        binds += " = "
+                    elif kind == "target":
+                        ts = len(binds)
+                        binds += val
+                        marks.append(Mark(ts, len(binds), *span(it[2], it[-1])))
+                        binds += " = "
+                    # bare (half-typed): just the attribute access, for completion
+                    binds = access([*chain, it[0]], binds, marks)
+
+            bind(tree, [], marks)
             stmt_end = off(toks[j - 1].end)
             edits.append(Edit(*group, DS, group))
             edits.append(Edit(stmt_end, stmt_end, binds, group, marks))
@@ -355,21 +405,9 @@ def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:
         elif t.type == tokenize.OP and t.string in ")]}" and stack:
             pair[stack.pop()] = i
 
-    for i, t in enumerate(toks):
-        if t.string != "(" or i not in pair:
-            continue
-        prev = toks[i - 1] if i else None
+    def group_slot(i: int) -> tuple[int, int, int, list[str]] | None:
         close = pair[i]
-        if close + 1 >= len(toks):
-            continue
-        if prev is not None and prev.string == "for":  # for (...) in xs
-            if toks[close + 1].string != "in":
-                continue
-        elif not (prev is None or prev.type in STMT_START or prev.string == ";") or toks[close + 1].string != "=":
-            continue
-        lo, hi = off(t.end), off(toks[close].start)
-        if not lo <= at <= hi:
-            continue
+        lo, hi = off(toks[i].end), off(toks[close].start)
         items, start, cur, j = [], lo, [], i + 1  # (start, end, token indices) per top-level item
         while j < close:
             if toks[j].string == ",":
@@ -379,7 +417,9 @@ def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:
                 cur.append(j)
                 if j in pair:
                     if off(toks[j].start) < at <= off(toks[pair[j]].start):
-                        return None  # inside a nested bracket
+                        # inside a nested bracket: a slot only if it's a nested pattern `field=(...)`
+                        is_nested = toks[j].string == "(" and len(cur) == 3 and toks[cur[1]].string == "="
+                        return group_slot(j) if is_nested else None
                     cur.extend(range(j + 1, pair[j] + 1))
                     j = pair[j]
             j += 1
@@ -395,11 +435,28 @@ def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:
             if on_name and (len(it) == 1 or toks[it[1]].string == "="):
                 return off(name.start), off(name.end), hi, [f for f in listed if f != name.string]
             return None
+        return None
+
+    for i, t in enumerate(toks):
+        if t.string != "(" or i not in pair:
+            continue
+        prev = toks[i - 1] if i else None
+        close = pair[i]
+        if close + 1 >= len(toks):
+            continue
+        if prev is not None and prev.string == "for":  # for (...) in xs
+            if toks[close + 1].string != "in":
+                continue
+        elif not (prev is None or prev.type in STMT_START or prev.string == ";") or toks[close + 1].string != "=":
+            continue
+        if not off(t.end) <= at <= off(toks[close].start):
+            continue
+        return group_slot(i)
     return None
 
 
 def is_target(text: str) -> bool:
-    """A plain assignment target: name, attribute or subscript (no nested patterns)."""
+    """A plain assignment target: name, attribute or subscript (nested patterns are handled before this)."""
     try:
         stmt = ast.parse(f"{text} = 0").body[0]
     except SyntaxError:

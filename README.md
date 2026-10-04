@@ -65,10 +65,10 @@ def dfs(node: TreeNode | None) -> (height: int, diameter: int):
 (a=b, b=a) = (a=, b=)                  # swap
 for (x=, y=) in pts: ...               # for-loop targets
 [x * y for (x=, y=) in pts]            # comprehension targets
+(id=, user=(name=, age=a)) = r         # nested: name = r.user.name
 ```
 
 **Not supported (yet):**
-- **Nested patterns:** `(user=(name=)) = r`.
 - **Dicts:** destructuring reads attributes, not keys.
 - **Positional items in a pattern:** `(a, b=) = r`.
 - **Shorthand in `def` signatures.**

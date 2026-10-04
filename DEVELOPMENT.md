@@ -61,6 +61,7 @@ paste `<name>.pyn.py` into the judge.
 - **No trailing comma required on a single-field record.** Unlike `(x)`, `(x=)` can't be read as grouping, so a comma would only be noise.
 - **Positional items in patterns are left an error.** Reading A, where a bare name means by-name, conflicts with Python's `(a, b) = r`, which is positional. Reading B, positional first and then keywords like a call, is consistent, but it brings back the field-order fragility that by-name avoids, and only records support it. If ever built, use B.
 - **`for (a=, b=t) in xs:` becomes `for (a, t) in ((_ds.a, _ds.b) for _ds in xs):`**, on one line so line numbers hold. A generator, not binds at the top of the body: the body's first statement may be compound (`a = …; if …:` is invalid), and the generator keeps exact field types and scopes `_ds`. The same rewrite covers comprehension `for` clauses. The iterable ends at the statement's `:`, or for a comprehension at the next `if`/`for`/`async` or the closing bracket. A bare tuple iterable (`in a, b`) is parenthesised; `async for` gets an async generator. Costs a generator per loop, which is fine for judges' time limits but not free.
+- **Nested patterns read through chains:** `(user=(name=)) = r` binds `name = _ds.user.name`, with no temporary per level. A `field=(...)` value is a nested pattern only if the group holds a `field=` item; `(x=(a)) = r` stays a parenthesised target. In a `for` target the nested parens stay in the tuple target and the generator's element mirrors them.
 - **Records are generic NamedTuples,** so checkers infer exact field types without annotations. Each file generates its own classes, so records from two files are different types; equality still works.
 - **Ctrl+click on shorthand `x=` goes to the local** (the implicit value); Go to Declaration goes to the parameter. A shortcut for Declaration was skipped as rarely needed.
 - **The editor uses a language-server proxy,** not a piggyback on Pylance, so the checker can be swapped (Pyrefly works) and it works outside VS Code. Pylance itself can't sit behind a proxy because it's closed-source.
@@ -103,7 +104,6 @@ fn(age= ?? 18)                # in a call
 - **`(email?="none")` was rejected:** it leaves no place for a rename.
 
 **Other not-yet items:**
-- Nested patterns.
 - Ctrl+click on a field inside a pattern. It goes nowhere now; the natural target is where the record was built.
 - `byname build --out-dir`.
 

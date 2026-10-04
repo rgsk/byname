@@ -162,6 +162,9 @@ for (x=, y=yy) in pts:  # in for-loop targets: each item destructured
     assert yy == x + 1
 assert [x * y for (x=, y=) in pts] == [2, 12]  # and in comprehensions
 
+(ok=, user=(name=n_, age=)) = nested  # nested: reads through nested.user
+assert (ok, n_, age) == (True, "Rahul", 26)
+
 
 # ============================================================================
 # 4. ALL THREE TOGETHER
@@ -182,7 +185,6 @@ assert (a, p_) == (12.0, 14.0)
 # ============================================================================
 # NOT SUPPORTED (yet) - each of these is a SyntaxError
 # ============================================================================
-# (user=(name=)) = nested            nested destructuring patterns
 # (name=) = {"name": "x"}             dicts: destructuring reads attributes, not keys
 # (_private=1)                        record fields can't start with "_" (NamedTuple rule)
 # def f(name=): ...                   shorthand is for call sites, not definitions
