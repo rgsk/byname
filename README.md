@@ -31,7 +31,7 @@ always your local. A bare `field=` means `field=field`.
 | destructure | `(name=, age=) = r` | `name = r.name; age = r.age` |
 | rename | `(name=who) = r` | `who = r.name` |
 | loop | `for (name=, age=) in rs:` | each item destructured, also in comprehensions |
-| record type | `def f() -> (name: str, age: int):` | the record's type, in any annotation |
+| record type | `def f() -> (name: str, age: int):` | a record with these fields, in any order; `(…, ...)` for at least these |
 
 Every form is a syntax error in plain Python, so byname never changes the meaning of valid Python code.
 
@@ -46,8 +46,27 @@ Every form is a syntax error in plain Python, so byname never changes the meanin
 - **Field names** can't start with `_`, and can't repeat.
 
 **Record types** are written the way hover shows them, `(name: str, age: int)`, anywhere an annotation
-goes. You rarely need one, since return types are inferred. The exception is a recursive function: checkers
-can't infer through the recursive call, so its fields come out `Unknown`. Annotate the return type to fix that:
+goes, including `type` aliases. A record type means exactly these fields, in any order:
+
+```python
+type User = (name: str, age: int)
+u: User = (age=26, name="Rahul")             # fine: field order doesn't matter
+x: User = (age=26, name="Rahul", po="x")     # error: extra field: po
+
+def birthday(p: (age: int, ...)) -> int:     # `...`: at least these fields; others are fine
+    return p.age + 1
+```
+
+Order only matters where you can see it: a record you build has its fields in the order you wrote, so
+`a, b = (age=26, name="R")` gives `a: int`. Through a record type the order isn't known, so `a, b = u`
+gives `str | int` for each. Destructure by name instead.
+
+You rarely need a record type, since return types are inferred. Two cases where you do:
+- **Recursive functions:** checkers can't infer through the recursive call, so its fields come out `Unknown`.
+- **Functions that take part of a config:** `def get_batch(cfg: (batch_size: int, block_size: int, ...))`
+  accepts any config with those fields, while `f(**cfg._asdict())` requires an exact match.
+
+Annotating a recursive function's return type:
 
 ```python
 def dfs(node: TreeNode | None) -> (height: int, diameter: int):

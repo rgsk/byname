@@ -33,7 +33,12 @@ PRELUDE = (
 # check on what comes out of it. Strict inference gives list[A | B]. A comment, not a config setting: the
 # checker runs in the user's project, and these aren't language-server settings.
 CHECKER_DIRECTIVE = "# pyright: strictListInference=true, strictDictionaryInference=true, strictSetInference=true\n"
-TYPED_PRELUDE = "from typing import TYPE_CHECKING as _TC, TypedDict as _TD\n"  # for the checker-only methods
+TYPED_PRELUDE = (  # checker-facing typing: typed methods, record types as Protocols
+    "import typing as _t\n"
+    "from typing import TypedDict as _TD, Protocol as _PR, Literal as _L, Self as _S, Final as _Fi\n"
+    "from collections.abc import Iterator as _It\n"
+)
+FIELDSET = "_byname_fieldset"  # a record's field names, sorted: what an exact record type matches on
 STMT_START = {tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT}
 
 
@@ -77,6 +82,48 @@ def dict_class(fields: tuple[str, ...]) -> str:
     return "_dct_" + "__".join(fields)
 
 
+def type_class(fields: tuple[str, ...], is_open: bool) -> str:
+    """An explicit record type: `(name: str, age: int)` is _typ_..., `(name: str, age: int, ...)` is _opn_..."""
+    return ("_opn_" if is_open else "_typ_") + "__".join(fields)
+
+
+def fieldset(fields: tuple[str, ...]) -> str:
+    return ",".join(sorted(fields))
+
+
+def dict_def(fields: tuple[str, ...]) -> str:
+    params = ", ".join(f"T{i}" for i in range(len(fields)))
+    body = "; ".join(f"{f}: T{i}" for i, f in enumerate(fields))
+    return f"class {dict_class(fields)}[{params}](_TD):\n    {body}\n"
+
+
+def type_def(fields: tuple[str, ...], is_open: bool, portable: bool = False) -> str:
+    """An explicit record type as a Protocol, so field order doesn't matter: inferred records keep their
+    written order, explicit types match any order. Exact types also require the same field set (FIELDSET),
+    so an extra field is an error; open types (`...`) accept any object with at least these fields."""
+    name = type_class(fields, is_open)
+    if portable:  # annotations are evaluated on old Pythons: a subscriptable stand-in is all they need
+        return f"class {name}: __class_getitem__ = classmethod(lambda cls, _: cls)\n"
+    params = ", ".join(f"T{i}" for i in range(len(fields)))
+    out = f"class {name}[{params}](_PR):\n"
+    # read-only fields, so records (immutable) match; Final rather than @property, so `p.age` is coloured
+    # like a record field (see remap_tokens). Checkers object to a type variable in Final: silenced.
+    for i, f in enumerate(fields):
+        out += f"    {f}: _Fi[T{i}]  # type: ignore  # pyright: ignore\n"
+    if is_open:
+        return out
+    each = " | ".join(f"T{i}" for i in range(len(fields)))  # positional access: order isn't guaranteed
+    kw = ", ".join(f"{f}: T{i} = ..." for i, f in enumerate(fields))
+    return out + (
+        f"    @property\n    def {FIELDSET}(self) -> _L[{fieldset(fields)!r}]: ...\n"
+        f"    def __iter__(self) -> _It[{each}]: ...\n"
+        f"    def __len__(self) -> int: ...\n"
+        f"    def __getitem__(self, i: int, /) -> {each}: ...\n"
+        f"    def _replace(self, *, {kw}) -> _S: ...\n"
+        f"    def _asdict(self) -> {dict_class(fields)}[{params}]: ...\n"
+    )
+
+
 def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
     """portable: plain `class R(_NT):` with `object` fields, which runs on Python 3.6+ (judges run PyPy 3.10).
     Otherwise a 3.12 generic class, so checkers infer each field's type."""
@@ -93,19 +140,22 @@ def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
     )
     if portable:
         return out
-    # checker-only: NamedTuple types `_replace(**kwargs: Any)` and `_asdict() -> dict[str, Any]`, so field
-    # typos and `f(**rec._asdict())` go unchecked. Typed versions fix that; they can't exist at runtime
-    # (NamedTuple refuses to let a class override them), hence `if _TC`. The checker objects to overriding
-    # NamedTuple's final methods; that's in generated code, so it's silenced.
+    # Checkers see their own version of the class (`if _t.TYPE_CHECKING`, a form both pyright and mypy
+    # recognise; an aliased `TYPE_CHECKING` isn't). NamedTuple types `_replace(**kwargs: Any)` and
+    # `_asdict() -> dict[str, Any]`, so field typos and `f(**rec._asdict())` went unchecked; the checker
+    # version declares typed ones, which can't exist at runtime (NamedTuple refuses to let a class override
+    # them). The checkers object to overriding NamedTuple's final methods; that's generated code, silenced.
+    # FIELDSET is what explicit record types match on (see type_def).
     kw = ", ".join(f"{f}: T{i} = ..." for i, f in enumerate(fields))
-    td = dict_class(fields)
     return (
-        f"class {td}[{params}](_TD):\n"
-        f"    {body}\n"
-        + out
-        + f"    if _TC:  # type: ignore\n"
-        f"        def _replace(self, *, {kw}) -> '{head}': ...  # pyright: ignore\n"
-        f"        def _asdict(self) -> {td}[{params}]: ...  # pyright: ignore\n"
+        "if _t.TYPE_CHECKING:\n"
+        f"    class {head}(_NT):\n"
+        f"        {body}\n"
+        f"        def _replace(self, *, {kw}) -> '{head}': ...  # type: ignore  # pyright: ignore\n"
+        f"        def _asdict(self) -> {dict_class(fields)}[{params}]: ...  # type: ignore  # pyright: ignore\n"
+        f"        @property\n        def {FIELDSET}(self) -> _L[{fieldset(fields)!r}]: ...\n"
+        "else:\n"
+        + "".join("    " + line + "\n" for line in out.splitlines())
     )
 
 
@@ -165,6 +215,7 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
 
     edits: list[Edit] = []
     records: dict[tuple[str, ...], None] = {}  # ordered set
+    types: dict[tuple[tuple[str, ...], bool], None] = {}  # explicit record types: (fields, is_open)
     problems: list[tuple[int, int, str]] = []
     standins: list[tuple[int, int, str]] = []
     field_spans: list[tuple[int, int]] = []  # every record field name: in records, patterns and record types
@@ -256,25 +307,31 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
             continue
         close = pair[i]
 
-        # record type, e.g. `-> (height: int, diameter: int)`: every item is `name: type`, never valid
-        # Python. Becomes the generic class, R[int, int]; separate small edits, so nested types work
-        if all(len(it) >= 3 and is_name(toks[it[0]]) and toks[it[1]].string == ":" for it in its):
-            fields = tuple(toks[it[0]].string for it in its)
-            for it in its:
+        # record type, e.g. `-> (height: int, diameter: int)`: every item is `name: type` (plus an optional
+        # trailing `...` for an open type), never valid Python. Becomes a Protocol, R[int, int]; separate small
+        # edits, so nested types work
+        is_open = len(its) > 1 and len(its[-1]) == 1 and toks[its[-1][0]].string == "..."
+        named = its[:-1] if is_open else its
+        if named and all(len(it) >= 3 and is_name(toks[it[0]]) and toks[it[1]].string == ":" for it in named):
+            fields = tuple(toks[it[0]].string for it in named)
+            for it in named:
                 name = toks[it[0]]
                 if name.string.startswith("_"):
                     raise err(f"record field {name.string!r} cannot start with '_'", name)
             if len(set(fields)) != len(fields):
                 raise err(f"duplicate record field in {fields}", t)
-            records[fields] = None
+            types[(fields, is_open)] = None
             group = span(i, close)
-            edits.append(Edit(group[0], group[0] + 1, record_class(fields) + "[", group))
+            edits.append(Edit(group[0], group[0] + 1, type_class(fields, is_open) + "[", group))
             edits.append(Edit(group[1] - 1, group[1], "]", group))
             standins.append((group[0], group[0] + 1, TYP + "["))
             standins.append((group[1] - 1, group[1], "]"))
-            for it in its:
+            for it in named:
                 edits.append(Edit(off(toks[it[0]].start), off(toks[it[2]].start), "", span(it[0])))
                 field_spans.append(span(it[0]))
+            if is_open:  # drop `, ...`: the Protocol's name says it's open
+                dots = its[-1][0]
+                edits.append(Edit(off(toks[named[-1][-1]].end), off(toks[dots].end), "", span(dots)))
             continue
         at_stmt_start = prev is None or prev.type in STMT_START or prev.string == ";"
         is_pattern = at_stmt_start and toks[close + 1].string == "="
@@ -400,8 +457,13 @@ def transform(src: str, path: str = "<pyn>", tolerant: bool = False, portable: b
         body = body[: e.start] + e.text + body[e.end :]
 
     prelude = ""
-    if records:  # only files with records: plain Python is left exactly as written
-        prelude = PRELUDE + ("" if portable else CHECKER_DIRECTIVE + TYPED_PRELUDE) + "".join(record_def(f, portable) for f in records)
+    if records or types:  # only files with records: plain Python is left exactly as written
+        prelude = PRELUDE
+        if not portable:
+            dicts = dict.fromkeys([*records, *(f for f, o in types if not o)])
+            prelude += CHECKER_DIRECTIVE + TYPED_PRELUDE + "".join(dict_def(f) for f in dicts)
+        prelude += "".join(record_def(f, portable) for f in records)
+        prelude += "".join(type_def(f, o, portable) for f, o in types)
     standins.sort()
     return Result(prelude, body, edits, problems, standins, sorted(field_spans))
 

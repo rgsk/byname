@@ -22,7 +22,7 @@ from urllib.request import url2pathname
 
 from .output import output_path, render
 from .srcmap import LineIndex, Translation
-from .transform import DS, REPR, pattern_slot
+from .transform import DS, FIELDSET, REPR, pattern_slot
 
 DEFAULT_CHECKER = ["basedpyright-langserver", "--stdio"]
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache"}
@@ -83,18 +83,25 @@ def uri_to_path(uri: str) -> Path:
     return Path(url2pathname(urlparse(uri).path))
 
 
-REC_RE = re.compile(r"_(rec|dct)_(\w+)")
+REC_RE = re.compile(r"_(rec|dct|typ|opn)_(\w+)")
+GENERATED_PREFIXES = ("_rec_", "_dct_", "_typ_", "_opn_")
+# an exact record type's field-set mismatch, as pyright reports it: "...Literal['a,b,c']" ... "...Literal['a,b']"
+FIELDSET_RE = re.compile(r"""Literal\['([\w,]*)'\]" is not assignable to type "(?:\(\) -> )?Literal\['([\w,]*)'\]""")
+TARGET_RE = re.compile(r'is incompatible with protocol "_typ_(\w+?)\[')
+LITERAL_RE = re.compile(r"Literal\['([\w,]*)'\]")
+RULE_RE = re.compile(r"\s*\((report\w+)\)\s*$")
 CODE_KEYS = {"newText", "insertText", "filterText", "sortText", "uri", "targetUri", "data"}
 
 
 def pretty(text: str) -> str:
     """Display form of record types: _rec_name__age[str, int] -> (name: str, age: int), and of the
-    TypedDict a record's `_asdict()` returns: _dct_name__age[str, int] -> {name: str, age: int}."""
+    TypedDict a record's `_asdict()` returns: _dct_name__age[str, int] -> {name: str, age: int}, and of
+    explicit record types: _typ_... -> (name: str, age: int), _opn_... -> (name: str, age: int, ...)."""
     out, i = [], 0
     while m := REC_RE.search(text, i):
         out.append(text[i : m.start()])
         fields = m.group(2).split("__")
-        lp, rp = ("{", "}") if m.group(1) == "dct" else ("(", ")")
+        lp, rp = ("{", "}") if m.group(1) == "dct" else ("(", ", ...)") if m.group(1) == "opn" else ("(", ")")
         j = m.end()
         if j < len(text) and text[j] == "[":
             args, depth, start = [], 0, j + 1
@@ -118,8 +125,35 @@ def pretty(text: str) -> str:
     return "".join(out)
 
 
+def explain_fields(msg: str) -> str:
+    """An exact record type rejected a record whose field set differs. pyright's message is a page about
+    FIELDSET, a generated property; keep the first line and say which fields are extra or missing."""
+    if FIELDSET not in msg or not (m := FIELDSET_RE.search(msg)):
+        return msg
+    got, want = set(filter(None, m[1].split(","))), set(filter(None, m[2].split(",")))
+    # Which side is which: between two record types pyright also compares them the other way round, and
+    # the innermost Literal line can be that reversed check. The first protocol line names the target.
+    if t := TARGET_RE.search(msg):
+        target = set(t[1].split("__"))
+        sets = [set(filter(None, x.split(","))) for x in LITERAL_RE.findall(msg)]
+        if target in sets and (others := [x for x in sets if x != target]):
+            got, want = others[0], target
+    lines = msg.split("\n")
+    indent = lines[1][: len(lines[1]) - len(lines[1].lstrip())] if len(lines) > 1 else "  "
+    out = [lines[0]]
+    if extra := sorted(got - want):
+        out.append(f"{indent}extra field{'s' if len(extra) > 1 else ''}: {', '.join(extra)}")
+    if missing := sorted(want - got):
+        out.append(f"{indent}missing field{'s' if len(missing) > 1 else ''}: {', '.join(missing)}")
+    if rule := RULE_RE.search(lines[-1]):  # the CLI puts the rule name at the end; keep it there
+        out[-1] += f" ({rule[1]})"
+    return "\n".join(out)
+
+
 def is_generated_name(name) -> bool:
-    return isinstance(name, str) and (name in (DS, REPR, "_NT", "_TC", "_TD") or name.startswith(("_rec_", "_dct_")))
+    return isinstance(name, str) and (
+        name in (DS, REPR, FIELDSET, "_NT", "_t", "_TD", "_PR", "_L", "_S", "_Fi", "_It") or name.startswith(GENERATED_PREFIXES)
+    )
 
 
 def is_range(v) -> bool:
@@ -167,6 +201,7 @@ class Proxy:
         self.temp_versions: set[int] = set()  # versions holding a completion-only temporary text
         self.own_triggers: set[str] = set()
         self.field_type: int | None = None  # semantic token type for record field names ("property")
+        self.final_field: tuple[int, int] | None = None  # (readonly, static) modifier bits
         self.output_on_save = False  # byname.outputOnSave: write <file>.pyn.py on every save
         self.strip_main = False  # byname.outputStripMain: drop `if __name__ == "__main__":` from it
         # byname.diagnosticsOnSave: hold diagnostics back while typing, show the saved text's ones
@@ -277,7 +312,11 @@ class Proxy:
             items = [self.to_editor(x, doc, display, key) for x in obj]
             return [x for x in items if x is not DROP]
         if isinstance(obj, str):
-            return obj if key in CODE_KEYS or ("_rec_" not in obj and "_dct_" not in obj) else pretty(obj)
+            if key in CODE_KEYS:
+                return obj
+            if key == "message":
+                obj = explain_fields(obj)
+            return pretty(obj) if any(g in obj for g in GENERATED_PREFIXES) else obj
         if not isinstance(obj, dict):
             return obj
         if is_range(obj):
@@ -609,13 +648,16 @@ class Proxy:
                         stp["full"] = True  # we remap whole token lists; no delta support
                         types = stp.get("legend", {}).get("tokenTypes", [])
                         self.field_type = types.index("property") if "property" in types else None
+                        mods = stp.get("legend", {}).get("tokenModifiers", [])
+                        if "readonly" in mods and "static" in mods:
+                            self.final_field = (1 << mods.index("readonly"), 1 << mods.index("static"))
                     caps.pop("notebookDocumentSync", None)
                     cp = caps.setdefault("completionProvider", {})
                     have = cp.setdefault("triggerCharacters", [])
                     self.own_triggers = {c for c in EXTRA_TRIGGERS if c not in have}
                     have.extend(sorted(self.own_triggers))
                 elif req.startswith("textDocument/semanticTokens"):
-                    msg = {**msg, "result": {"data": remap_tokens(msg["result"].get("data", []), doc, self.field_type)}}
+                    msg = {**msg, "result": {"data": remap_tokens(msg["result"].get("data", []), doc, self.field_type, self.final_field)}}
                 else:
                     result = self.to_editor(msg["result"], doc)
                     msg = {**msg, "result": None if result is DROP else result}
@@ -649,7 +691,7 @@ class Proxy:
                 continue
             if (r["start"]["line"], r["start"]["character"]) in flagged:
                 continue  # half-typed pattern item: our message says it; drop the checker's echo
-            d = {**d, "range": r, "message": pretty(d.get("message", ""))}
+            d = {**d, "range": r, "message": pretty(explain_fields(d.get("message", "")))}
             if "relatedInformation" in d:
                 d["relatedInformation"] = self.to_editor(d["relatedInformation"], None)
             out.append(d)
@@ -718,10 +760,15 @@ def still_shown(shown: list, new: list) -> list:
     return out
 
 
-def remap_tokens(data: list[int], doc: Doc | None, field_type: int | None = None) -> list[int]:
+def remap_tokens(
+    data: list[int], doc: Doc | None, field_type: int | None = None, final_field: tuple[int, int] | None = None
+) -> list[int]:
     """Semantic tokens come as 5-int groups, positions relative to the previous token.
     Decode, map each token to the source, drop those on generated text, re-encode.
-    field_type: the legend index to give record field names (the checker gives them none)."""
+    field_type: the legend index to give record field names (the checker gives them none).
+    final_field: (readonly, static) modifier bits. A field read through a record type (`p.age` where
+    `p: (age: int, ...)`) is a Final Protocol attribute, `readonly static`; a record's own field is just
+    `static`. Dropping `readonly` from that pair colours both alike."""
     if doc is None:
         return data
     tokens, line, col = [], 0, 0
@@ -734,6 +781,8 @@ def remap_tokens(data: list[int], doc: Doc | None, field_type: int | None = None
         if r is None or r["start"]["line"] != r["end"]["line"] or r["end"]["character"] <= r["start"]["character"]:
             continue
         s, e = r["start"], r["end"]
+        if final_field and typ == field_type and mods & (both := final_field[0] | final_field[1]) == both:
+            mods &= ~final_field[0]
         tokens.append((s["line"], s["character"], e["character"] - s["character"], typ, mods))
     if field_type is not None:
         for fs, fe in doc.tr.fields:

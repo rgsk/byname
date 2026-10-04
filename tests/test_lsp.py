@@ -243,6 +243,24 @@ def test_semantic_tokens_cover_only_source_text(lsp):
     assert "property" in seen["greeting"]  # record field names, which the checker leaves uncoloured
 
 
+def test_fields_read_through_record_types_look_like_record_fields(lsp):
+    # `p.age` through a record type reads a Final Protocol attribute (readonly static); a record's own
+    # field is static. Both must get the same token, or themes colour them differently
+    c, root, uri = lsp
+    text = "def f(p: (age: int, ...), q: (age: int, name: str)) -> int:\n    return p.age + q.age\nr = (age=1, name='x')\nprint(r.age)\n"
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 990}, "contentChanges": [{"text": text}]}})
+    legend = c.init["capabilities"]["semanticTokensProvider"]["legend"]
+    data = c.request("textDocument/semanticTokens/full", {"textDocument": {"uri": uri}})["data"]
+    lines, line, col, got = text.splitlines(), 0, 0, []
+    for i in range(0, len(data), 5):
+        dl, dc, length, typ, mods = data[i : i + 5]
+        line, col = line + dl, (col + dc if dl == 0 else dc)
+        if lines[line][col : col + length] == "age" and line in (1, 3):
+            got.append((legend["tokenTypes"][typ], mods))
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 991}, "contentChanges": [{"text": MAIN}]}})
+    assert len(got) == 3 and len(set(got)) == 1, got
+
+
 def lines_of(res) -> list[tuple[str, int]]:
     locs = res if isinstance(res, list) else [res]
     out = []
@@ -353,6 +371,21 @@ def test_mixed_record_list_is_checked_in_the_editor(lsp):
         c.diags.pop(uri, None)
         msgs = [d["message"] for d in c.wait_diags(uri)]
     assert any('No parameter named "nme"' in m for m in msgs)
+
+def test_explicit_record_type_errors_in_the_editor(lsp):
+    # any field order is fine for an explicit type; an extra field is named plainly, not as _byname_fieldset
+    c, root, uri = lsp
+    text = MAIN + "type U = (name: str, age: int)\nok: U = (age=1, name='x')\nbad: U = (age=1, name='x', po=2)\n"
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 970}, "contentChanges": [{"text": text}]}})
+    end, diags = time.time() + 60, []
+    while time.time() < end and not any("po" in d["message"] for d in diags):  # skip diagnostics for the previous text
+        c.diags.pop(uri, None)
+        diags = c.wait_diags(uri)
+    last = text.count("\n") - 1
+    mine = [d for d in diags if d["range"]["start"]["line"] in (last - 1, last)]
+    assert len(mine) == 1 and mine[0]["range"]["start"]["line"] == last
+    assert mine[0]["message"].endswith("extra field: po") and "_byname_fieldset" not in mine[0]["message"]
+
 
 def test_comma_trigger_only_inside_patterns(lsp):
     # `,` pops completion in a pattern; in an ordinary call it returns nothing instead of noise
@@ -517,3 +550,25 @@ def test_diagnostics_on_save_drops_fixed_errors_at_once(tmp_path):
     c.send({"method": "textDocument/didSave", "params": {"textDocument": {"uri": uri}}})
     assert any("other" in d["message"] for d in c.wait_diags(uri, timeout=10))
     c.close()
+
+
+def test_pretty_record_type_protocols():
+    assert pretty("p: _typ_name__age[str, int]") == "p: (name: str, age: int)"
+    assert pretty("p: _opn_age[int]") == "p: (age: int, ...)"
+
+
+def test_field_set_errors_say_which_fields():
+    from byname.lsp import explain_fields
+
+    raw = (
+        'Type "(age: int, name: str, po: str)" is not assignable to declared type "User"\n'
+        '  "(age: int, name: str, po: str)" is incompatible with protocol "(name: str, age: int)"\n'
+        '    "_byname_fieldset" is an incompatible type\n'
+        """      Type "() -> Literal['age,name,po']" is not assignable to type "() -> Literal['age,name']"\n"""
+        "        ... (reportAssignmentType)"
+    )
+    assert explain_fields(raw) == (
+        'Type "(age: int, name: str, po: str)" is not assignable to declared type "User"\n'
+        "  extra field: po (reportAssignmentType)"
+    )
+    assert explain_fields("unrelated\n  message") == "unrelated\n  message"

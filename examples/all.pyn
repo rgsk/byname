@@ -165,6 +165,25 @@ assert [x * y for (x=, y=) in pts] == [2, 12]  # and in comprehensions
 (ok=, user=(name=n_, age=)) = nested  # nested: reads through nested.user
 assert (ok, n_, age) == (True, "Rahul", 26)
 
+# record types: written the way hover shows them. Exact field set, any field order
+type Person = (name: str, age: int)
+someone: Person = (age=30, name="Gil")  # order differs from the type: fine
+assert someone.name == "Gil"
+
+
+def oldest(people: list[Person]) -> Person:
+    return max(people, key=lambda p: p.age)
+
+
+assert oldest([someone, (name="Hal", age=40)]).name == "Hal"
+
+
+def age_of(p: (age: int, ...)) -> int:  # open: any object with at least an int `age`
+    return p.age
+
+
+assert age_of((name="Ivy", age=7, extra=True)) == 7
+
 
 # ============================================================================
 # 4. ALL THREE TOGETHER

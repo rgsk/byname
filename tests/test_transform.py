@@ -39,8 +39,12 @@ def test_record_literal_becomes_generic_namedtuple():
     r = transform("def f():\n    return (name=, age=)\n")
     assert r.body == "def f():\n    return _rec_name__age(name=name, age=age)\n"
     lines = r.prelude.splitlines()
-    at = lines.index("class _rec_name__age[T0, T1](_NT):")
-    assert lines[at + 1 : at + 3] == ["    name: T0; age: T1", "    def __repr__(self) -> str: return _byname_repr(self)"]
+    at = lines.index("else:")  # the runtime class; checkers get their own version above it
+    assert lines[at + 1 : at + 4] == [
+        "    class _rec_name__age[T0, T1](_NT):",
+        "        name: T0; age: T1",
+        "        def __repr__(self) -> str: return _byname_repr(self)",
+    ]
 
 
 def test_record_with_explicit_values():
@@ -59,7 +63,7 @@ def test_record_prints_like_its_literal():
 
 def test_records_with_same_fields_share_one_class():
     r = transform("x = (a=, b=)\ny = (a=1, b=2)\n")
-    assert r.prelude.count("class _rec_") == 1
+    assert r.prelude.count("class _rec_") == 2  # one record class: the checkers' version and the runtime one
 
 
 def test_destructure_binds_fields_by_name():
@@ -403,15 +407,15 @@ def test_output_files_run_on_old_pythons():
     assert "class _rec_n__sq[T0, T1](_NT):" in to_python(src)
     with pytest.raises(SyntaxError):
         ast.parse(to_python(src), feature_version=(3, 8))
-    assert "_TC" not in out and "_dct_" not in out  # the checker-only typed methods stay out of output files
+    assert "TYPE_CHECKING" not in out and "_dct_" not in out  # the checker-only typed methods stay out of output files
 
 
 def test_replace_and_asdict_are_typed_for_the_checker_only():
     # NamedTuple types them `(**kwargs: Any)` / `dict[str, Any]`; the checker gets per-field versions,
-    # behind `if _TC` because NamedTuple won't let a class override them at runtime
+    # in the checkers' version of the class: NamedTuple won't let a class override them at runtime
     r = transform("x = (name=, age=)\n")
-    assert "        def _replace(self, *, name: T0 = ..., age: T1 = ...) -> '_rec_name__age[T0, T1]': ...  # pyright: ignore" in r.prelude
-    assert "        def _asdict(self) -> _dct_name__age[T0, T1]: ...  # pyright: ignore" in r.prelude
+    assert "        def _replace(self, *, name: T0 = ..., age: T1 = ...) -> '_rec_name__age[T0, T1]': ...  # type: ignore  # pyright: ignore" in r.prelude
+    assert "        def _asdict(self) -> _dct_name__age[T0, T1]: ...  # type: ignore  # pyright: ignore" in r.prelude
     assert "class _dct_name__age[T0, T1](_TD):" in r.prelude
     ns = {}
     exec(compile_pyn("r = (name='a', age=1)\nr2 = r._replace(age=2)\nd = r._asdict()\n"), ns)
@@ -423,23 +427,43 @@ def test_record_type_annotation():
     # It lets a recursive function declare what it returns: checkers can't infer through recursion
     src = "def dfs(n: int) -> (h: int, d: int):\n    if n == 0:\n        return (h=0, d=0)\n    (h=, d=) = dfs(n - 1)\n    return (h=h + 1, d=d)\n"
     out = to_python(src)
-    assert "def dfs(n: int) -> _rec_h__d[int, int]:" in out
-    assert out.count("class _rec_h__d") == 1  # the same class as the record it describes
+    # a Protocol, not the record class: explicit types match records whatever their field order
+    assert "def dfs(n: int) -> _typ_h__d[int, int]:" in out
+    assert "class _typ_h__d[T0, T1](_PR):" in out
     # nested, and as a parameter / variable annotation
     out = to_python("def f(p: (x: (a: int, b: str))) -> None:\n    q: (y: int) = (y=1)\n")
-    assert "def f(p: _rec_x[_rec_a__b[int, str]]) -> None:" in out
-    assert "q: _rec_y[int] = _rec_y(y=1)" in out
+    assert "def f(p: _typ_x[_typ_a__b[int, str]]) -> None:" in out
+    assert "q: _typ_y[int] = _rec_y(y=1)" in out
+
+
+def test_open_record_type():
+    # a trailing `...`: any object with at least these fields; no field-set marker, no tuple access
+    out = to_python("def f(p: (age: int, ...)) -> int:\n    return p.age\n")
+    assert "def f(p: _opn_age[int]) -> int:" in out
+    assert "class _opn_age[T0](_PR):" in out
+    assert "_byname_fieldset" not in out.split("class _opn_age")[1]
+    assert to_python("x = (...)\n") == "x = (...)\n"  # just Ellipsis
+
+
+def test_records_carry_their_sorted_field_set():
+    # what an exact record type matches on: same names, any order
+    r = transform("x = (b=1, a=2)\n")
+    assert "        def _byname_fieldset(self) -> _L['a,b']: ..." in r.prelude
 
 
 def test_record_type_runs_on_old_pythons():
     # output files: the plain class ignores the subscript, so the annotation evaluates on PyPy 3.10 too
     from byname.output import render
 
-    src = "def f() -> (a: int):\n    return (a=1)\n\n\nprint(f(), f.__annotations__['return'].__name__)\n"
+    src = (
+        "def f() -> (a: int):\n    return (a=1)\n\n\ndef g(p: (a: int, ...)) -> int:\n    return p.a\n\n\n"
+        "print(f(), f.__annotations__['return'].__name__, g(f()))\n"
+    )
     out = render(src, Path("f.pyn"))
     ast.parse(out, feature_version=(3, 8))
+    assert "Protocol" not in out  # the plain stand-in classes only
     p = subprocess.run([sys.executable, "-c", out], capture_output=True, text=True, check=True)
-    assert p.stdout == "(a=1) _rec_a\n"
+    assert p.stdout == "(a=1) _typ_a 1\n"
 
 
 def test_record_type_errors():

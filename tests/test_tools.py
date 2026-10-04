@@ -57,6 +57,47 @@ def test_mixed_record_list_stays_typed(project):
     assert 'mixed.pyn:2:16 - error: No parameter named "nme"' in out
 
 
+def test_explicit_record_types_ignore_order_but_not_field_set(project):
+    # inferred records keep their written order; explicit types match any order, but exactly these fields
+    (project / "types.pyn").write_text(
+        "type User = (name: str, age: int)\n"
+        "u: User = (age=26, name='R')\n"            # order differs: fine
+        "x: User = (age=26, name='R', po='d')\n"    # extra field
+        "def f() -> User:\n"
+        "    return (age=1, name='R')\n"
+        "a, b = f()\n"
+        "reveal_type(a)\n"                          # order not guaranteed through an explicit type
+        "c, d = (age=1, name='R')\n"
+        "reveal_type(c)\n"                          # inferred: as written
+        "def g(p: (age: int, ...)) -> int:\n"
+        "    return p.age\n"
+        "g(u); g((name='R',))\n"                    # open type: at least `age`
+    )
+    out, rc = tool(project, "basedpyright", "types.pyn")
+    assert "types.pyn:2" not in out
+    assert 'types.pyn:3:11 - error: Type "(age: int, name: str, po: str)" is not assignable to declared type "User"' in out
+    assert "extra field: po (reportAssignmentType)" in out and "_byname_fieldset" not in out
+    assert 'types.pyn:7:13 - information: Type of "a" is "str | int"' in out
+    assert 'types.pyn:9:13 - information: Type of "c" is "int"' in out
+    assert "types.pyn:12:9 - error" in out and "types.pyn:12:1 " not in out
+
+
+def test_field_set_errors_between_record_types_point_the_right_way(project):
+    # between two record types pyright also compares them in reverse; extra vs missing must not flip
+    (project / "dirs.pyn").write_text(
+        "type User = (name: str, age: int)\n"
+        "def fuu() -> User:\n"
+        "    return (name='r', age=1)\n"
+        "v = fuu()\n"
+        "k: (name: str) = v\n"
+        "q: (name: str, age: int, x: int) = v\n"
+    )
+    out, rc = tool(project, "basedpyright", "dirs.pyn")
+    k, q = out.split("dirs.pyn:5:")[1], out.split("dirs.pyn:6:")[1]
+    assert "extra field: age" in k.split("dirs.pyn:")[0] and "missing" not in k.split("dirs.pyn:")[0]
+    assert "missing field: x" in q and "extra" not in q
+
+
 def test_mypy_line_numbers_map_back(project):
     # mypy reports lines only; records are Any to it, so only the plain type error shows
     out, rc = tool(project, "mypy", "main.pyn")

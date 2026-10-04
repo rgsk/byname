@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .lsp import pretty
+from .lsp import explain_fields, pretty
 from .srcmap import Translation, generated
 
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
@@ -111,6 +111,24 @@ def remap(line: str, root: Path, out: Path, cache: dict) -> tuple[str | None, bo
     return f"{m['pre']}{loc}{m['rest']}", True
 
 
+def condense(lines: list[str]) -> list[str]:
+    """Shorten record field-set errors (see explain_fields); each message is its location line plus the
+    more-indented lines under it."""
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if not LOCATION.match(lines[i]):
+            out.append(lines[i])
+            i += 1
+            continue
+        j, pre = i + 1, len(lines[i]) - len(lines[i].lstrip())
+        while j < len(lines) and lines[j].strip() and len(lines[j]) - len(lines[j].lstrip()) > pre:
+            j += 1
+        out.extend(explain_fields("\n".join(lines[i:j])).split("\n"))
+        i = j
+    return out
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         sys.exit("usage: byname tool <ruff|mypy|basedpyright|...> [args...] FILE.pyn")
@@ -131,7 +149,7 @@ def main(argv: list[str]) -> int:
     cache: dict = {}
     dropped = kept = 0
     lines = []
-    for line in (proc.stdout + proc.stderr).splitlines():
+    for line in condense((proc.stdout + proc.stderr).splitlines()):
         new, located = remap(line, root, out, cache)
         if new is None:
             dropped += 1
