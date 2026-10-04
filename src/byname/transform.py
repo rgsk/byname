@@ -60,9 +60,13 @@ STAR_PRELUDE = (
 # on them and valid Python is never rewritten. For the checker, `**x` goes through _byname_kw (a record
 # becomes its typed `_asdict()` TypedDict, a dict passes through), checker translation only, like STAR.
 # A spread record is built from a dict display, so a later field wins and keeps the first one's position,
-# like `{**a, **b}`. With a record type in reach (inline `(name: str)(**u)`, `p: T = (**u)`, `return (**u)`
-# under `-> T`), the dict is checked against T's `_asdict()` TypedDict (`cast(T, …)` makes the checker read
-# T as a type); elsewhere the result is Any.
+# like `{**a, **b}`. The checker sees `_byname_ctx(lambda t: _byname_check(lambda: t)({**u, 'age': 27}))`:
+# the lambda's parameter gets the type expected where the record stands (`fn(x)`, `fn(a=x)`, `p: T = x`,
+# `return x` under `-> T`, ...), and the dict is checked against that type's `_asdict()` TypedDict. Not a
+# generic `def f[T](d: Dict[T]) -> T`: pyright retries a call that fails with its expected type without it,
+# so the error would vanish; one inside a lambda's body doesn't fail the call. With no type expected (or an
+# overloaded callee) it's unchecked. Inline `(name: str)(**u)` checks against the type it names (`cast(T, …)`
+# makes the checker read T as a type).
 RESERVED = {"keys"}  # record methods that make `**rec` work
 HASDICT = (
     "from typing import overload as _ov, Any as _A, Protocol as _PR\n"
@@ -83,6 +87,11 @@ BUILD_PRELUDE = (
     "def _byname_check(t: _A, /) -> _A: return _byname_same  # pyright: ignore\n"
     "def _byname_same(d: _A, /) -> _A: return d\n"
     "_byname_anyv: _A = None\n"
+)
+CTX_PRELUDE = (  # checker only: T is the type expected where the record is built, see the comment above
+    "from typing_extensions import TypeVar as _TV\n"
+    "_byname_T = _TV('_byname_T', default=_A)\n"
+    "def _byname_ctx(f: _Cl[[_byname_T], object], /) -> _byname_T: ...  # pyright: ignore\n"
 )
 BUILD_PORTABLE = (  # what runs in output files: no typing
     "from typing import cast as _cast\n"
@@ -342,60 +351,9 @@ def transform(
         except SyntaxError:
             return " ".join(body.split())
 
-    def ends_stmt(j: int) -> bool:
-        return toks[j].type in (tokenize.NEWLINE, tokenize.ENDMARKER) or toks[j].string == ";"
-
-    def annotation_of(eq: int) -> str | None:
-        """The annotation of `target: T = ...` whose `=` is token `eq`, if it's an annotated assignment."""
-        j, colon = eq - 1, None
-        while j >= 0 and toks[j].type not in STMT_START and toks[j].string != ";":
-            j = rpair.get(j, j)
-            if toks[j].string == ":":
-                colon = j
-            j -= 1
-        if colon is None or colon + 1 >= eq:
-            return None
-        return src[off(toks[colon + 1].start) : off(toks[eq - 1].end)]
-
-    # function bodies and their `-> T`, for `return (**u, **r)`
-    def_spans: list[tuple[int, int, str | None]] = []
-    for d, dt in enumerate(toks):
-        if dt.type != tokenize.NAME or dt.string != "def" or d + 2 >= len(toks):
-            continue
-        o = d + 2
-        if toks[o].string == "[" and o in pair:  # def f[T](...)
-            o = pair[o] + 1
-        if toks[o].string != "(" or o not in pair:
-            continue
-        j, ann = pair[o] + 1, None
-        if toks[j].string == "->":
-            k = j + 1
-            while k < len(toks) and toks[k].string != ":" and not ends_stmt(k):
-                k = pair.get(k, k) + 1
-            ann = src[off(toks[j + 1].start) : off(toks[k - 1].end)]
-            j = k
-        if j + 1 >= len(toks):
-            continue
-        if toks[j + 1].type == tokenize.NEWLINE:
-            depth, e = 0, j + 2
-            for e in range(j + 2, len(toks)):
-                depth += {tokenize.INDENT: 1, tokenize.DEDENT: -1}.get(toks[e].type, 0)
-                if depth == 0:
-                    break
-            def_spans.append((j + 2, e, ann))
-        else:
-            e = j + 1
-            while not ends_stmt(e):
-                e += 1
-            def_spans.append((j + 1, e, ann))
-
-    def return_type(k: int) -> str | None:
-        inside = [(s, e, a) for s, e, a in def_spans if s <= k < e]
-        return max(inside)[2] if inside else None  # the innermost def
-
-    def build(i: int, close: int, its: list[list[int]], target: str | None, inline_at: int | None = None) -> None:
+    def build(i: int, close: int, its: list[list[int]], target: str | None = None, inline_at: int | None = None) -> None:
         """A record built from spreads and fields, `(**u, age=27)`, as `_byname_rec({**u, 'age': 27})`.
-        target: the record type to check it against (source text), if one is in reach."""
+        target: the inline record type `(name: str)(**u)` (source text) to check it against."""
         nonlocal builds
         builds = True
         names = []
@@ -419,7 +377,9 @@ def transform(
         if len(set(names)) != len(names):
             raise err(f"duplicate record field in {tuple(names)}", toks[i])
         g0, g1 = span(i, close)
-        if target is None:  # nothing to check against: Any
+        if target is None and checker:  # checked against the type expected where it stands, if any
+            pre, post = "_byname_ctx(lambda _byname_t: _byname_check(lambda: _byname_t)({", "}))"
+        elif target is None:
             pre, post = "_byname_rec({", "})"
         else:
             t = one_line(target)
@@ -551,12 +511,7 @@ def transform(
             continue
         # a record built from spreads: `(**u, **r, age=27)`
         if any(toks[it[0]].string == "**" for it in its):
-            target = None
-            if ends_stmt(close + 1) and prev is not None and prev.string == "=":
-                target = annotation_of(i - 1)  # `p: T = (**u)`
-            elif ends_stmt(close + 1) and prev is not None and prev.string == "return":
-                target = return_type(i)  # `return (**u)` under `-> T`
-            build(i, close, its, target)
+            build(i, close, its)
             continue
         at_stmt_start = prev is None or prev.type in STMT_START or prev.string == ";"
         is_pattern = at_stmt_start and toks[close + 1].string == "="
@@ -698,6 +653,7 @@ def transform(
             prelude += BUILD_PORTABLE + BUILD_REC.replace("{sig}", "def _byname_rec(d):")
         elif builds:
             prelude += BUILD_PRELUDE + BUILD_REC.replace("{sig}", "def _byname_rec(d: _Mp[str, _A], /) -> _A:")
+            prelude += CTX_PRELUDE if checker else ""
     if stars:
         prelude += STAR_PRELUDE
     standins.sort()

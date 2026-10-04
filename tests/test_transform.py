@@ -472,13 +472,18 @@ def test_spreads_leave_valid_python_alone_at_runtime():
     assert transform(src, checker=True).body == "f(**_byname_kw(kw))\nd = {**_byname_kw(a), **_byname_kw(b)}\n"
 
 
-def test_spread_records_are_checked_where_a_type_is_in_reach():
-    # inline type, annotated assignment, return under `-> T`: a cast to T; a bare build is just _byname_rec
-    r = transform(SPREADS)
-    assert "p: Person = _cast(Person, _byname_rec(_byname_check(lambda: _cast(Person, _byname_anyv))({**u, **r})))" in r.body
+def test_spread_records_are_checked_against_the_expected_type():
+    # for the checker, a build takes the type expected where it stands (argument, annotation, return), see
+    # CTX_PRELUDE; an inline type `(name: str)(**u)` is a cast. What runs is just _byname_rec
+    r = transform(SPREADS, checker=True)
+    ctx = "_byname_ctx(lambda _byname_t: _byname_check(lambda: _byname_t)({"
+    assert f"p: Person = {ctx}**_byname_kw(u), **_byname_kw(r)}}))" in r.body
+    assert f"    return {ctx}**_byname_kw(u)" in r.body
     assert "q = _cast(_typ_name__age__sex__surname[str, int, str, str], _byname_rec(_byname_check(" in r.body
-    assert "    return _cast(Person, _byname_rec(_byname_check(lambda: _cast(Person, _byname_anyv))({" in r.body
-    assert "both = _byname_rec({**u, **r})" in r.body
+    assert "def _byname_ctx(" in r.prelude
+    r = transform(SPREADS)
+    assert "p: Person = _byname_rec({**u, **r})" in r.body and "both = _byname_rec({**u, **r})" in r.body
+    assert "_byname_ctx" not in r.prelude + r.body
 
 
 def test_spread_record_errors():

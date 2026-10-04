@@ -203,6 +203,13 @@ c2 = (name: str, age: int, surname: str, city: str)(**first, **last)  # or name 
 assert c2 == c
 
 
+def mail(to: Contact) -> str:
+    return f"{to.name} {to.surname}, {to.city}"
+
+
+assert mail((**first, **last)) == "Ann Lee, Oslo"  # checked against mail's parameter: no type to write
+
+
 # ============================================================================
 # 4. ALL THREE TOGETHER
 # ============================================================================

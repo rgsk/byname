@@ -87,14 +87,18 @@ fn(**u, **r)                     # into a call: checked against fn's parameters
 (**u, age=27)                    # build a record: a later field wins, like {**a, **b}
 
 type Person = (name: str, age: int, sex: str, surname: str)
-p: Person = (**u, **r)           # checked against Person: missing / extra / wrong-typed fields are errors
+def greet(p: Person): ...
+greet((**u, **r))                # checked against greet's parameter: missing / extra / wrong-typed fields are errors
+greet(p=(**u, **r))              # by keyword too
+p: Person = (**u, **r)           # checked against Person
 def make() -> Person:
     return (**u, **r)            # checked against `-> Person`
 (name: str, age: int, sex: str, surname: str)(**u, **r)   # or name the type inline
 ```
 
-A record built from spreads with no type nearby, like `fn((**u, **r))`, works but isn't checked: the
-checker can't know its fields, so it's `Any`. Give it a type (`p: Person = …`, inline) to check it.
+A spread record is checked against the type expected where it stands, so you never have to name one.
+With no type expected, like `x = (**u, **r)`, it works but isn't checked: the checker can't know its
+fields, so it's `Any`. Passed to an overloaded function, it isn't checked either.
 A field can't be called `keys`: records have a `keys()` method, which is what lets `**` work.
 
 **Destructuring** is plain attribute access, so it works on any object, not only records:

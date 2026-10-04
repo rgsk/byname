@@ -121,10 +121,17 @@ def test_spread_mistakes_are_named(project):
         "q = (name: str, age: int, sex: str, surname: str)(**u, **r, surname='g', x=1)\n"
         "def mk() -> Person:\n"
         "    return (**u, **r)\n"
+        "def take(p: Person, n: int = 0): ...\n"
+        "take((**u, **r, surname='g'))\n"     # fine: no type written, the parameter's is used
+        "take((**u, **r))\n"                  # missing surname
+        "take(p=(**u, **r, surname=1))\n"     # by keyword: surname is an int
+        "x = (**u, **r)\n"                    # no type expected: unchecked
     )
     out, rc = tool(project, "basedpyright", "spread.pyn")
     assert 'spread.pyn:5:1 - error: Argument missing for parameter "surname"' in out
-    assert out.count("missing field: surname") == 2 and "extra field: x" in out
+    assert out.count("missing field: surname") == 3 and "extra field: x" in out
+    assert "spread.pyn:11" not in out and "spread.pyn:12:6" in out and "spread.pyn:14" not in out
+    assert 'spread.pyn:13:8 - error: Argument of type "{name: str, age: int, sex: str, surname: Literal[1]}"' in out
     assert "_byname" not in out and "_dct_" not in out
 
 
