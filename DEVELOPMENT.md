@@ -84,6 +84,30 @@ paste `<name>.pyn.py` into the judge.
 
 ## Not yet built
 
+**Open record types: `(name: str, age: int, ...)`** means "any object with at least these fields, with these types". The existing `(name: str, age: int)` stays exact. Same split as TypeScript (object types are open by default) and Flow (`{ name: string, ... }` is inexact). The trailing `...` follows Flow, Rust's `{ x, .. }` and Python's own `tuple[int, ...]`.
+
+```python
+class GPT(nn.Module):
+    def __init__(self, model: (vocab_size: int, n_layer: int, ...), train: (dropout: float, ...)): ...
+
+GPT(gpt_cfg, train_cfg)   # extra config fields are fine; a missing or mistyped one is flagged on its config
+```
+
+- **Why:** a function that reads a few fields of a big config has no good form today. `**cfg._asdict()` rejects the extra fields (and with two configs, `GPT(**a._asdict(), **b._asdict())`, any field `GPT` doesn't take fails), and spelling fields out is long. Pick per function: `**rec._asdict()` when it must handle every field (it catches "added `dropout`, `GPT` ignores it"); an open type when it reads a subset.
+- **How:** a generated `Protocol` per field set with read-only properties (record fields can't be assigned, and a writable Protocol attribute would reject them), generic like records; hover shows `(name: str, ...)`; output files get a plain class. Works on records, dataclasses, any object, like destructuring.
+- **One parameter per source config.** Merging configs into one typed object isn't possible: `{**a._asdict(), **b._asdict()}` is `dict[str, int | object | float]`, and a merged record type is an intersection, which Python's typing doesn't have. Nesting works: `(model=gpt_cfg, train=train_cfg)` against `(model: (...), train: (...), ...)`.
+
+**Then destructuring in parameters, on top of open types:** `def f((name=, age=): User)` with `User = (name: str, age: int, ...)`, TypeScript's `function f({ name, age }: User)`. The fields are written twice, as in TypeScript; an alias keeps it short.
+- **Translation:** `def f(_p0: User):` with `name = _p0.name; age = _p0.age; ` prefixed to the body's first line, to keep line numbers. Fine before a simple statement or a docstring (`"""doc"""; name = ...` keeps the docstring). It breaks when the body starts with a compound statement (`if`, `for`, `try`), since `a = 1; if x:` is invalid. Options: an error asking for a simple first statement, or a cleaner trick if one turns up. (Unlike `for` targets, Python has no destructuring slot here, since Python 3 dropped tuple parameters, PEP 3113, so it can't stay on the `def` line.)
+- **The parameter has no name,** so it can't be passed by keyword.
+
+**Ruled out along the way:**
+- **Partial cast `cast((age: int, ...), r)`**, meaning "same record, `age` now `int`": needs an intersection type. Use a full `cast((name: str, age: int), r)`; it's checker-only, like TypeScript's `as`.
+- **Record spread `(...a, ...b)`**: byname doesn't know either side's fields, and the merged type is an intersection.
+- **Narrowing a record by a field:** `isinstance(r.age, int)` narrows `r.age`, not `r`, so `r._replace(age=99)` on a mixed union still fails. Keep record lists to one type, or annotate them (`rs: list[(name: str, age: int)] = [...]`).
+- **`**` of a union of records:** with a mixed list, `fn(**rs[0]._asdict())` is flagged even when `fn` accepts both types, because basedpyright unpacks a union of TypedDicts as `object` values. Same remedy: one type per list.
+
+**Smaller items:**
 - Ctrl+click on a field inside a pattern. It goes nowhere now; the natural target is where the record was built.
 - `byname build --out-dir`.
 
