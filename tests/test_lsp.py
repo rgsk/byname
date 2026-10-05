@@ -224,6 +224,29 @@ def test_definition_of_destructured_local_covers_the_word(lsp):
     assert snippet(MAIN, rng) == "greeting"
 
 
+def test_pyn_mode_is_bynames_setting_not_the_editors():
+    # basedpyright's editor setting is for .py files (the BasedPyright extension sends "recommended" by
+    # default, a project may send "off"); .pyn gets byname.typeCheckingMode, "standard" unless set
+    from types import SimpleNamespace
+
+    from byname.lsp import Proxy
+
+    items = [{"section": "basedpyright"}, {"section": "basedpyright.analysis"}]
+    for ours in ("standard", "off", "strict"):
+        fake = SimpleNamespace(extra_paths=lambda: [], check_mode=ours)
+        for editor in ("recommended", "off", None):
+            sent = {"analysis": {"typeCheckingMode": editor}} if editor else None
+            out = Proxy.inject_config(fake, items, [sent, {"typeCheckingMode": editor}])
+            assert out[0]["analysis"]["typeCheckingMode"] == out[1]["typeCheckingMode"] == ours
+
+
+def test_only_our_command_is_advertised(lsp):
+    # VS Code registers each listed command; basedpyright's own would clash with the BasedPyright
+    # extension ("command 'basedpyright.createtypestub' already exists") when both are installed
+    c, root, uri = lsp
+    assert c.init["capabilities"]["executeCommandProvider"]["commands"] == ["byname.server.writeOutput"]
+
+
 def test_semantic_tokens_cover_only_source_text(lsp):
     # tokens are remapped from the hidden file; none may point at generated code like `_ds`
     c, root, uri = lsp

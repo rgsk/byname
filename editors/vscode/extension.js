@@ -30,6 +30,7 @@ async function start() {
         outputOnSave: cfg.get("outputOnSave"),
         outputStripMain: cfg.get("outputStripMain"),
         diagnosticsOnSave: cfg.get("diagnosticsOnSave"),
+        typeCheckingMode: cfg.get("typeCheckingMode"),
       },
     }
   );

@@ -237,6 +237,7 @@ The extension starts `<workspace>/.venv/bin/byname lsp`.
 | `byname.outputOnSave` | `false` | on save, write the translation next to the file as `<name>.pyn.py` |
 | `byname.outputStripMain` | `false` | leave the `if __name__ == "__main__":` block out of `<name>.pyn.py` |
 | `byname.diagnosticsOnSave` | `false` | new errors appear on save, not while typing; fixed ones disappear at once |
+| `byname.typeCheckingMode` | `"standard"` | basedpyright's mode for `.pyn` files; `.py` files keep `basedpyright.analysis.typeCheckingMode`, so the two can differ. A project pyright config overrides both |
 
 The command **"byname: Write Python Output"** writes `<name>.pyn.py` on demand.
 

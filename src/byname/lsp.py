@@ -298,6 +298,7 @@ class Proxy:
         self.callable_types: set[int] = set()  # "function", "method": beat the field colour (see remap_tokens)
         self.output_on_save = False  # byname.outputOnSave: write <file>.pyn.py on every save
         self.strip_main = False  # byname.outputStripMain: drop `if __name__ == "__main__":` from it
+        self.check_mode = "standard"  # byname.typeCheckingMode: the checker's mode for .pyn files
         # byname.diagnosticsOnSave: hold diagnostics back while typing, show the saved text's ones
         self.diags_on_save = False
         self.saved: dict[Path, int | None] = {}  # editor version of the last saved text, per open .pyn
@@ -485,6 +486,7 @@ class Proxy:
             self.output_on_save = bool(opts.get("outputOnSave"))
             self.strip_main = bool(opts.get("outputStripMain"))
             self.diags_on_save = bool(opts.get("diagnosticsOnSave"))
+            self.check_mode = opts.get("typeCheckingMode") or "standard"
             self.pending[mid] = ("initialize", None)
             self.server.send(msg)
             return
@@ -719,7 +721,9 @@ class Proxy:
             cfg = dict(cfg or {})
             cfg["extraPaths"] = list(cfg.get("extraPaths") or []) + self.extra_paths()
             if based:
-                cfg.setdefault("typeCheckingMode", "standard")  # pyright's default; "recommended" is noisy
+                # byname.typeCheckingMode, not the editor's basedpyright one: that's for .py files (and
+                # "recommended" by default with the BasedPyright extension); a project pyright config still wins
+                cfg["typeCheckingMode"] = self.check_mode
             return cfg
 
         out = list(result)
@@ -763,8 +767,9 @@ class Proxy:
                         **(cap if isinstance(cap, dict) else {}),
                         "codeActionKinds": [*kinds, *(k for k in (FIX_ALL_KIND, ORGANIZE_KIND) if k not in kinds)],
                     }
-                    ecp = caps.setdefault("executeCommandProvider", {"commands": []})
-                    ecp["commands"] = [*ecp.get("commands", []), WRITE_OUTPUT]
+                    # only ours: the client registers every listed command, and the checker's own
+                    # (basedpyright.restartserver, ...) would collide with its VS Code extension's
+                    caps.setdefault("executeCommandProvider", {})["commands"] = [WRITE_OUTPUT]
                     if stp := caps.get("semanticTokensProvider"):
                         stp["full"] = True  # we remap whole token lists; no delta support
                         types = stp.get("legend", {}).get("tokenTypes", [])
