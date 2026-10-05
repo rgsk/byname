@@ -101,24 +101,20 @@ BUILD_PRELUDE = (
     "_byname_anyv: _A = None\n"
 )
 CTX_PRELUDE = (  # checker only: T is the type expected where the record is built, see the comment above
-    "from typing_extensions import TypeVar as _TV\n"
+    # the checker reads typing_extensions from its bundled stubs; the package needn't be installed
+    "from typing_extensions import TypeVar as _TV  # pyright: ignore[reportMissingModuleSource]\n"
     "_byname_T = _TV('_byname_T', default=_A)\n"
     "def _byname_ctx(f: _Cl[[_byname_T], object], /) -> _byname_T: ...  # pyright: ignore\n"
     "def _byname_pick[V](x: object, v: V, /) -> V: ...  # pyright: ignore\n"  # x: the user's name, v: its narrowed copy
     # a call argument: a record type (or None) expected, or else _byname_AnyRec, which a non-record
-    # overload `f(x: int)` rejects, so the checker moves on to the overload that takes a record. mypy uses
-    # the default whenever there is one, so it gets _byname_ctx: mypy reads `MYPY` as true, pyright as False
-    "MYPY = False\n"
-    "if MYPY:\n"
-    "    _byname_arg = _byname_ctx\n"
-    "else:\n"
-    "    class _byname_AnyRec:\n"
-    "        def _asdict(self) -> dict[str, _A]: ...  # pyright: ignore\n"
-    "        def keys(self) -> tuple[str, ...]: ...  # pyright: ignore\n"
-    "        def __len__(self) -> int: ...  # pyright: ignore\n"
-    "        def __getattr__(self, name: str, /) -> _A: ...\n"
-    "    _byname_R = _TV('_byname_R', bound=_byname_HasDict[_A] | None, default=_byname_AnyRec)\n"
-    "    def _byname_arg(f: _Cl[[_byname_R], object], /) -> _byname_R: ...  # pyright: ignore\n"
+    # overload `f(x: int)` rejects, so the checker moves on to the overload that takes a record
+    "class _byname_AnyRec:\n"
+    "    def _asdict(self) -> dict[str, _A]: ...  # pyright: ignore\n"
+    "    def keys(self) -> tuple[str, ...]: ...  # pyright: ignore\n"
+    "    def __len__(self) -> int: ...  # pyright: ignore\n"
+    "    def __getattr__(self, name: str, /) -> _A: ...\n"
+    "_byname_R = _TV('_byname_R', bound=_byname_HasDict[_A] | None, default=_byname_AnyRec)\n"
+    "def _byname_arg(f: _Cl[[_byname_R], object], /) -> _byname_R: ...  # pyright: ignore\n"
 )
 BUILD_PORTABLE = (  # what runs in output files: no typing
     "from typing import cast as _cast\n"

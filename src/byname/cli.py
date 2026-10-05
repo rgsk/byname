@@ -2,7 +2,7 @@
 byname show [--no-main] FILE     print the plain-Python translation (--no-main: drop the
                                  `if __name__ == "__main__":` block, e.g. for LeetCode)
 byname lsp [-- checker cmd...]   language server (default checker: basedpyright-langserver --stdio)
-byname tool <cmd> [args...]      run ruff / mypy / basedpyright on .pyn files (positions mapped back)
+byname tool <cmd> [args...]      run ruff / basedpyright on .pyn files (positions mapped back)
 byname format [--check] FILE...  ruff format .pyn files in place
 byname fix [--check] FILE...     apply ruff's safe lint fixes to .pyn files in place (as source.fixAll on save)"""
 

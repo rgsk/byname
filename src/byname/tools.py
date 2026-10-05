@@ -1,4 +1,4 @@
-"""byname tool <cmd> [args...]: run a Python tool (ruff, mypy, basedpyright) on .pyn files, like nbqa.
+"""byname tool <cmd> [args...]: run a Python tool (ruff, basedpyright) on .pyn files, like nbqa.
 
 The project is mirrored into a cache dir: .pyn translated to .py, .py and config files symlinked,
 so imports and tool config work unchanged. The tool runs inside the mirror on the translated
@@ -17,8 +17,8 @@ from .lsp import explain_fields, pretty
 from .srcmap import Translation, generated
 
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
-CONFIGS = {"pyproject.toml", "setup.cfg", "mypy.ini", ".mypy.ini", "ruff.toml", ".ruff.toml", "pyrightconfig.json"}
-KEEP_IN_MIRROR = {".mypy_cache", ".ruff_cache"}  # tool caches survive between runs
+CONFIGS = {"pyproject.toml", "setup.cfg", "ruff.toml", ".ruff.toml", "pyrightconfig.json"}
+KEEP_IN_MIRROR = {".ruff_cache"}  # tool caches survive between runs
 LOCATION = re.compile(r"^(?P<pre>\s*)(?P<path>[^\s:]+\.py):(?P<line>\d+)(?::(?P<col>\d+))?(?P<rest>.*)$")
 SUMMARY = re.compile(r"^(Found \d+ errors?|\d+ errors?, \d+ warnings?|All checks passed|Success: no issues|\[\*\] \d+ fixable)")
 
@@ -131,7 +131,7 @@ def condense(lines: list[str]) -> list[str]:
 
 def main(argv: list[str]) -> int:
     if not argv:
-        sys.exit("usage: byname tool <ruff|mypy|basedpyright|...> [args...] FILE.pyn")
+        sys.exit("usage: byname tool <ruff|basedpyright|...> [args...] FILE.pyn")
     root = Path.cwd()
     out = mirror(root)
     cmd, args = argv[0], []

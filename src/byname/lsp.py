@@ -229,7 +229,7 @@ def explain_fields(msg: str) -> str:
 
 def is_generated_name(name) -> bool:
     return isinstance(name, str) and (
-        name in (DS, REPR, FIELDSET, ORDER, "_NT", "_cast", "_Cl", "_Mp", "_ntf", "_t", "_TD", "_PR", "_L", "_S", "_Fi", "_ov", "_A", "_TV", "MYPY") or name.startswith((*GENERATED_PREFIXES, "_byname_"))
+        name in (DS, REPR, FIELDSET, ORDER, "_NT", "_cast", "_Cl", "_Mp", "_ntf", "_t", "_TD", "_PR", "_L", "_S", "_Fi", "_ov", "_A", "_TV") or name.startswith((*GENERATED_PREFIXES, "_byname_"))
     )
 
 

@@ -106,7 +106,7 @@ With no type expected, like `x = (**u, **r)`, it still gets its exact type when 
 the file shows the fields of: bound once, to a record or a spread of such names, or annotated with a
 record type (a parameter's too). Then `x` is `(name: str, age: int, sex: str, surname: str)` and a typo
 like `x.surnme` is an error. Otherwise (a name bound twice, from a call, an import) it's `Any`. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
-`f((**u, **r))` (with basedpyright; mypy doesn't check spread records passed to overloads).
+`f((**u, **r))`.
 A field can't be called `keys`: records have a `keys()` method, which is what lets `**` work.
 
 **Destructuring** is plain attribute access, so it works on any object, not only records:
@@ -162,7 +162,7 @@ byname isn't on PyPI yet. Add it to a project from a local checkout:
 
 ```
 uv add --editable ../path/to/byname
-uv add --dev basedpyright ruff mypy        # editor checker, formatter, linters (optional)
+uv add --dev basedpyright ruff            # editor checker, formatter and linter (optional)
 ```
 
 ## Command line
@@ -173,7 +173,7 @@ uv add --dev basedpyright ruff mypy        # editor checker, formatter, linters 
 | `byname show [--no-main] file.pyn` | print the plain-Python translation (`--no-main` drops the `if __name__ == "__main__":` block) |
 | `byname format [--check] files…` | format `.pyn` files with Ruff |
 | `byname fix [--check] files…` | apply Ruff's safe lint fixes to `.pyn` files (what `source.fixAll` does on save) |
-| `byname tool <cmd> [args] file.pyn` | run Ruff, mypy or basedpyright on `.pyn` files, with positions mapped back |
+| `byname tool <cmd> [args] file.pyn` | run Ruff or basedpyright on `.pyn` files, with positions mapped back |
 | `byname lsp [-- checker cmd]` | language server (see below) |
 
 `import byname` installs an import hook. After that, `import foo` finds `foo.pyn`, and `.py` and `.pyn`
@@ -182,10 +182,10 @@ modules can import each other.
 ## Editor support (VS Code)
 
 ```
-editor <--LSP--> byname lsp <--LSP--> basedpyright (or another checker)
+editor <--LSP--> byname lsp <--LSP--> basedpyright
 ```
 
-`byname lsp` translates each `.pyn` to Python in memory, hands it to a real type checker, and maps every
+`byname lsp` translates each `.pyn` to Python in memory, hands it to basedpyright, and maps every
 position back. Hidden translations live in `~/.cache/byname/`, never in your project.
 
 **What you get in `.pyn` files:**
@@ -211,15 +211,14 @@ The extension starts `<workspace>/.venv/bin/byname lsp`.
 | Setting | Default | |
 |---|---|---|
 | `byname.serverCommand` | `[]` | command that starts the server, e.g. `["uv", "run", "byname", "lsp"]` |
-| `byname.checker` | `[]` | type checker behind byname, e.g. `["pyrefly", "lsp"]` (default: basedpyright) |
+| `byname.checker` | `[]` | checker command behind byname, e.g. `["pyright-langserver", "--stdio"]` (default: basedpyright) |
 | `byname.outputOnSave` | `false` | on save, write the translation next to the file as `<name>.pyn.py` |
 | `byname.outputStripMain` | `false` | leave the `if __name__ == "__main__":` block out of `<name>.pyn.py` |
 | `byname.diagnosticsOnSave` | `false` | new errors appear on save, not while typing; fixed ones disappear at once |
 
 The command **"byname: Write Python Output"** writes `<name>.pyn.py` on demand.
 
-**Choosing a checker:** see [Type checkers](#type-checkers). It must infer return types of functions
-without annotations, because that's where record types come from.
+**Type checker:** basedpyright only, see [Type checkers](#type-checkers).
 
 ## Lint, type-check, format
 
@@ -228,21 +227,15 @@ symlinked. It runs the tool there and maps `file:line:col` back. Your project's 
 
 ```
 byname tool ruff check --output-format=concise file.pyn
-byname tool mypy file.pyn
 byname tool basedpyright file.pyn
 ```
 
 ### Type checkers
 
-What runs never depends on the checker, so a weaker checker only means fewer mistakes are caught; it never
-breaks working code. byname's generated code is meant to raise no errors under any of them.
-
-| Checker | Support |
-|---|---|
-| basedpyright / pyright | **Supported.** Every feature is designed and tested against it, messages are rewritten in byname's terms (`extra field: po`, `records are read by name: (x=, y=)`), and the editor's quick fixes rely on it. |
-| mypy | **Best effort.** Existing workarounds stay, no new feature waits on it. It doesn't infer return types, so records mostly look like `Any` to it (it won't catch `(nope=) = res`), and it doesn't check records built from spreads passed to overloads. |
-| Pyrefly | **Untested, works well.** Checks records (field sets, any order, no positional reads), but leaves records built from spreads unchecked, and its messages aren't rewritten. |
-| ty | **Not yet usable:** it doesn't infer return types, so everything shows as `Unknown`. |
+**basedpyright (or pyright) is the only supported checker.** Every feature is designed and tested against
+it, messages are rewritten in byname's terms (`extra field: po`, `records are read by name: (x=, y=)`),
+and the editor's quick fixes rely on it. Other checkers (mypy, Pyrefly, ty, ...) are not supported.
+What runs never depends on the checker, so your code runs the same whichever one you use.
 
 `byname format` runs `ruff format`. It swaps byname syntax for short plain-Python stand-ins, formats,
 then swaps them back:
