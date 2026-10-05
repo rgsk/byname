@@ -919,10 +919,12 @@ def transform(
         if not portable:
             dicts = dict.fromkeys([*records, *(f for f, o in types if not o)])
             prelude += CHECKER_DIRECTIVE + TYPED_PRELUDE + "".join(dict_def(f) for f in dicts)
-        prelude += "".join(record_def(f, portable) for f in records)
         if not portable:  # in the checker, each record is its exact type (see record_def)
             types = {**types, **dict.fromkeys((f, False) for f in records)}
+        # types first: a record's checker function returns its type, and before Python 3.14 an annotation
+        # naming a class defined further down is an undefined name (every record would be Unknown)
         prelude += "".join(type_def(f, o, portable) for f, o in types)
+        prelude += "".join(record_def(f, portable) for f in records)
     if builds or kw_used:
         if not prelude:
             prelude = PRELUDE

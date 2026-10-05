@@ -151,6 +151,7 @@ there run through byname directly; no output files.
 ## Conventions
 
 - **Commits:** one-line subjects, no co-author trailer.
+- **Python versions in the checker:** byname's own venv is 3.14, where annotations may name classes defined further down; users' projects (llm: 3.12) aren't. 21f1394 emitted each record's checker function before the `_typ_` Protocol it returns, so on 3.12 every record was `Unknown` and the undefined names were hidden as generated-code diagnostics. Fixed 2026-10-05 (types first); `test_records_are_typed_on_python_before_3_14` pins `pythonVersion` 3.12.
 - **Tests:** `uv run pytest`. They're written to explain the behaviour, with real values in the asserts. `test_lsp.py`, `test_tools.py` and `test_fmt.py` drive the real basedpyright and Ruff, and skip if those aren't installed.
 - **Extension changes:** bump `version` in `editors/vscode/package.json`, rebuild with `vsce package …`, then `code --install-extension byname.vsix --force` and Reload Window. Server-only changes just need Reload Window, since `.venv` is an editable install.
 - **Measure before proposing:** several plausible mechanisms turned out false in practice, such as Ruff accepting call stand-ins.

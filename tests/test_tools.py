@@ -50,6 +50,15 @@ def test_basedpyright_errors_land_on_pyn_lines(project):
     assert ".cache" not in out and "_rec_" not in out  # no mirror paths, no generated names
 
 
+def test_records_are_typed_on_python_before_3_14(project):
+    # before 3.14 an annotation can't name a class defined further down: each record's type must come first
+    (project / "pyrightconfig.json").write_text('{"typeCheckingMode": "standard", "pythonVersion": "3.12"}')
+    (project / "old.pyn").write_text("def f(): return (x=1, y=2)\nreveal_type(f())\n")
+    out, rc = tool(project, "basedpyright", "old.pyn")
+    assert 'Type of "f()" is "(x: int, y: int)"' in out
+    assert "hid" not in out  # no undefined names in the generated header either
+
+
 def test_mixed_record_list_stays_typed(project):
     # without strict list inference a mixed list is list[Unknown] and the typo below passes silently
     (project / "mixed.pyn").write_text('rs = [(name="a", age="90"), (name="b", age=23)]\nrs[0]._replace(nme="x")\n')
