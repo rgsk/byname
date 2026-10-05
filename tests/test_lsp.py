@@ -366,6 +366,14 @@ def test_completion_in_for_and_nested_slots(lsp):
     assert {i["label"] for i in items} == {"name", "greeting"}
 
 
+def test_completion_on_a_class_instance_offers_methods(lsp):
+    # destructuring reads attributes, so methods and properties are slots too
+    c, root, uri = lsp
+    cls = "class Tok:\n    def __init__(self): self.vocab_size = 65\n    def encode(self, s: str) -> list[int]: return []\n    @property\n    def n(self) -> int: return 1\n"
+    _, items = complete(c, uri, MAIN + cls + "(|) = Tok()\n")
+    assert {i["label"] for i in items} == {"encode", "n", "vocab_size"}
+
+
 def test_completion_in_parameter_patterns(lsp):
     # `def f((name=, |): T)` offers T's other fields, annotated inline or with an alias
     c, root, uri = lsp

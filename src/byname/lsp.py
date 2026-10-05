@@ -31,7 +31,9 @@ WRITE_OUTPUT = "byname.server.writeOutput"  # executeCommand: write <file>.pyn.p
 PLACEHOLDER = "__byname_slot"  # stands in for an empty pattern item while completing
 EXTRA_TRIGGERS = ["(", ","]  # pop completion in pattern slots, like TS does after `{` / `,`
 FIX_ALL_KIND, ORGANIZE_KIND = "source.fixAll", "source.organizeImports"  # ruff code actions, served by us
-SKIP_KINDS = {2, 3}  # CompletionItemKind Method, Function: not fields
+METHOD = 2  # CompletionItemKind
+# methods records and tuples bring along (byname's `keys`, tuple's); a class's own methods stay
+MACHINERY = {"keys", "count", "index"}
 
 
 # --- JSON-RPC framing ---------------------------------------------------------
@@ -614,7 +616,7 @@ class Proxy:
         out = []
         for it in items:
             label = it.get("label", "")
-            if label.startswith("_") or label in listed or it.get("kind") in SKIP_KINDS:
+            if label.startswith("_") or label in listed or (label in MACHINERY and it.get("kind") == METHOD):
                 continue
             it = {k: v for k, v in it.items() if k not in ("textEdit", "additionalTextEdits", "data")}
             it["textEdit"] = {"range": rng, "newText": it.get("insertText") or label}
