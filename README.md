@@ -38,9 +38,10 @@ Every form is a syntax error in plain Python, so byname never changes the meanin
 **Records** are read by name, never by position, so field order never matters: reorder the fields where a
 record is built and nothing that reads it changes meaning.
 - **Access:** `.field` access, destructuring by name, `rec._asdict()` and `rec._replace(age=27)`. Reading
-  by position (`a, b = rec`, `rec[0]`, `for v in rec`, `f(*rec)`, `sorted(recs)`) is a checker error, and
-  the editor offers a quick fix: `x, y = get_batch()` becomes `(x=, y=) = get_batch()`. Want positions?
-  Return a tuple.
+  by position (`a, b = rec`, `rec[0]`, `for v in rec`, `f(*rec)`, `sorted(recs)`) is a checker error and
+  raises `TypeError` at runtime, and the editor offers a quick fix: `x, y = get_batch()` becomes
+  `(x=, y=) = get_batch()`. Want positions? Return a tuple. Like a dict, `"name" in rec` asks for a field
+  name and `{**rec}` gives a dict (`json.dumps({**rec})`; `json.dumps(rec)` raises).
 - **Copies are checked:** records are immutable, so change one with `rec = rec._replace(age=27)`. The editor
   completes and checks `_replace`'s field names and types, and checks `f(**rec._asdict())` against `f`'s
   parameters, so a field `f` doesn't take is flagged.

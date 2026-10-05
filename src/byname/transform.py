@@ -15,6 +15,7 @@ Records are read by name only: field order never matters. At runtime a record is
 stores its fields sorted by name (so equality and hashing ignore the written order) and shows them in the
 order written; checkers see a plain generic class with no tuple face, so pyright infers
 `fn() -> _rec_name__age[str, int]` with no annotations and rejects `a, b = rec`, `rec[0]` and `*rec`.
+At runtime those raise too, as does ordering (`sorted(recs)`); `"name" in rec` asks for a field name.
 Valid Python is never changed: each form is a SyntaxError today.
 The body keeps the input's line count; record classes go in a separate prelude.
 """
@@ -38,9 +39,21 @@ PRELUDE = (
     # records are mappings by field name at runtime, so `f(**rec)` and `{**rec}` work (see RESERVED)
     f"def _byname_keys(self): return self.{ORDER}\n"
     "def _byname_item(self, k):\n"
-    "    if not isinstance(k, str): return tuple.__getitem__(self, k)\n"
+    "    if not isinstance(k, str): _byname_positional(self)\n"
     f"    if k in self.{ORDER}: return getattr(self, k)\n"
     "    raise KeyError(k)\n"
+    f"def _byname_has(self, k): return k in self.{ORDER}\n"
+    # Records are read by name only, at runtime too: the tuple underneath stores the fields sorted by name, so
+    # iterating, indexing, ordering or concatenating would expose an order nobody wrote (`a, b = (name=, age=)`
+    # gave age, name). pickle, copy and _replace iterate in NamedTuple's own versions, hence their own here.
+    "def _byname_positional(self, *_):\n"
+    "    raise TypeError(f'{type(self).__name__} is read by name only: use .field, keys() or _asdict()')\n"
+    "def _byname_unordered(self, o): return NotImplemented\n"
+    "def _byname_args(self): return tuple.__getitem__(self, slice(None))\n"
+    "def _byname_replace(self, **kw):\n"
+    "    r = self._make([kw.pop(f, getattr(self, f)) for f in self._fields])\n"
+    "    if kw: raise ValueError(f'Got unexpected field names: {list(kw)!r}')\n"
+    "    return r\n"
     f"def _byname_asdict(self): return {{k: getattr(self, k) for k in self.{ORDER}}}\n"
     # Equal: the same field set with the same values, whatever order each was written in. Storage is sorted
     # by name, so that is tuple equality between two records with the same `_fields`. Never equal to a plain
@@ -58,6 +71,10 @@ PRELUDE = (
     "def _byname_setup(c, order):\n"
     f"    c.{ORDER}, c.__repr__, c.keys, c.__getitem__ = order, {REPR}, _byname_keys, _byname_item\n"
     "    c.__eq__, c.__ne__, c._asdict = _byname_eq, _byname_ne, _byname_asdict\n"
+    "    c.__contains__ = _byname_has\n"
+    "    c.__iter__ = c.__add__ = c.__mul__ = c.__rmul__ = _byname_positional\n"
+    "    c.__lt__ = c.__le__ = c.__gt__ = c.__ge__ = _byname_unordered\n"
+    "    c.__getnewargs__, c._replace = _byname_args, _byname_replace\n"
 )
 # basedpyright infers a mixed list like [(age="90"), (age=23)] as list[Unknown], which switches off every
 # check on what comes out of it. Strict inference gives list[A | B]. A comment, not a config setting: the
@@ -217,6 +234,7 @@ def type_def(fields: tuple[str, ...], is_open: bool, portable: bool = False) -> 
     return out + (  # no __iter__ / __getitem__: a record is read by name (see record_def)
         f"    @property\n    def {FIELDSET}(self) -> _L[{fieldset(fields)!r}]: ...\n"
         f"    def __len__(self) -> int: ...\n"
+        "    def __contains__(self, k: object, /) -> bool: ...\n"  # a field name
         "    def keys(self) -> tuple[str, ...]: ...\n"
         "    @property\n    def _fields(self) -> tuple[str, ...]: ...\n"
         f"    def _replace(self, *, {kw}) -> _S: ...\n"
@@ -230,8 +248,8 @@ def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
 
     The runtime class stores the fields sorted by name, so records with the same fields are equal and hash
     alike in any written order (see _byname_eq); _byname_setup gives it the written order for repr, keys()
-    and _asdict(). Positional access still works at runtime (it's a tuple, which libraries may rely on), in
-    the sorted order; the checkers' version rejects it."""
+    and _asdict(). Positional access and ordering raise at runtime (they would read the sorted order, which
+    nobody wrote); the checkers' version rejects them."""
     params = ", ".join(f"T{i}" for i in range(len(fields)))
     typevar = {f: f"T{i}" for i, f in enumerate(fields)}
     body = "; ".join(f"{f}: {'object' if portable else typevar[f]}" for f in sorted(fields))

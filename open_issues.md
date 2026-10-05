@@ -74,3 +74,12 @@ c, d = branches(True)   # two "not iterable" errors, one per order
 The inferred return type is a union of the two exact types, which are the same type structurally but print
 in their written orders, so the union isn't merged. One error (and one quick fix) would be enough; the
 proxy could drop a positional-read diagnostic at the same range as one it already kept.
+
+## `"name" in rec` doesn't narrow a union of records
+
+basedpyright narrows `"name" in td` on a union of TypedDicts (both branches, and for a local whose type is a
+literal), but only for TypedDicts: records are Protocols for the checker, so after `if "name" in user:` a
+`user: (name: str) | (age: int)` stays the union and `user.name` is an error. A `TypeIs` helper with one
+overload per field name narrows records in both branches (measured), but the translation can't tell whether
+the right side of `in` is a record, so it would rewrite every `in` (or every `"literal" in x`), and those lose
+basedpyright's own checks on `in` and TypedDict narrowing. Dropped for now.

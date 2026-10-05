@@ -631,3 +631,18 @@ def test_field_set_errors_say_which_fields():
         "  extra field: po (reportAssignmentType)"
     )
     assert explain_fields("unrelated\n  message") == "unrelated\n  message"
+
+
+def test_ordering_a_record_says_to_use_a_field():
+    from byname.lsp import explain_fields
+
+    raw = (
+        'Argument of type "list[_typ_name__age[str, int]]" cannot be assigned to parameter "iterable" of type '
+        '"Iterable[SupportsRichComparisonT@sorted]" in function "sorted"\n'
+        '  "list[_typ_name__age[str, int]]" is not assignable to "Iterable[SupportsRichComparisonT@sorted]"\n'
+        '    "_typ_name__age[str, int]" is incompatible with protocol "SupportsDunderLT[Any]" (reportArgumentType)'
+    )
+    hint = "  records have no order: compare or sort by a field (key=lambda r: r.name)"
+    assert explain_fields(raw) == raw.split("\n")[0] + "\n" + hint + " (reportArgumentType)"
+    raw = 'Operator "<" not supported for types "_typ_age[int]" and "_typ_age[int]" (reportOperatorIssue)'
+    assert explain_fields(raw) == raw.removesuffix(" (reportOperatorIssue)") + "\n" + hint.replace("r.name", "r.age") + " (reportOperatorIssue)"

@@ -1,7 +1,10 @@
 # Every byname feature, read top to bottom. One rule for all of them: in `field=value` the left is the
 # field or parameter name and the right is your local; a bare `field=` means `field=field`.
 
+import copy
+import json
 import os
+import pickle
 import re
 import subprocess
 import sys
@@ -160,21 +163,61 @@ def test_a_record_is_read_by_name_only(tmp_path):
     assert sorted(verdicts) == [4, 5, 6, 7, 8]  # line 9, by name, is the way
     assert verdicts[4].startswith('"(x: int, y: int)" is not iterable')
     assert verdicts[5].startswith('"__getitem__" method not defined on type "(x: int, y: int)"')
+    assert "records have no order: compare or sort by a field (key=lambda r: r.x)" in verdicts[8]
 
 
 def test_at_runtime_a_record_is_a_named_tuple_stored_by_name():
-    # a NamedTuple underneath (immutable, hashable, cheap, and libraries that take tuples still work), with
-    # its fields stored sorted by name and shown in the order written
+    # a NamedTuple underneath (immutable, hashable, cheap), with its fields stored sorted by name and shown in
+    # the order written
     r = (name="rahul", age=26)
     assert isinstance(r, tuple) and len(r) == 2
     assert r._fields == ("age", "name")
     assert tuple(r.keys()) == ("name", "age")  # what `**r` reads
     assert list(r._asdict()) == ["name", "age"]
-    # the checker rejects reading by position; at runtime it works, in the stored (sorted) order, not as written
-    first, second = r  # pyright: ignore[reportGeneralTypeIssues]
-    assert (first, second) == (26, "rahul")
-    assert r[0] == 26  # pyright: ignore[reportIndexIssue]
-    assert tuple(r) == tuple((age=26, name="rahul")) == (26, "rahul")  # pyright: ignore[reportArgumentType]
+
+
+def test_reading_by_position_raises_at_runtime_too():
+    # the stored order is sorted by name, so anything positional would read an order nobody wrote
+    r = (name="rahul", age=26)
+    with pytest.raises(TypeError, match="read by name only"):
+        _first, _second = r  # pyright: ignore[reportGeneralTypeIssues]
+    with pytest.raises(TypeError, match="read by name only"):
+        list(r)  # pyright: ignore[reportArgumentType]
+    with pytest.raises(TypeError, match="read by name only"):
+        _ = r[0]  # pyright: ignore[reportIndexIssue]
+    with pytest.raises(TypeError, match="read by name only"):
+        _ = r + ()  # pyright: ignore[reportOperatorIssue]
+
+
+def test_records_have_no_order():
+    with pytest.raises(TypeError, match="'<' not supported"):
+        sorted([(name="rahul", age=26), (name="tasha", age=22)])  # pyright: ignore[reportArgumentType]
+    assert min([(name="rahul", age=26), (name="tasha", age=22)], key=lambda u: u.age).name == "tasha"  # order by a field
+
+
+def test_in_asks_for_a_field_name_like_a_dict(tmp_path):
+    r = (name="rahul", age=26)
+    assert "name" in r
+    assert "rahul" not in r  # values aren't searched
+    # allowed, but it doesn't narrow a union of records the way it narrows TypedDicts (see open_issues.md)
+    assert checker('ok = "name" in (name="rahul")\n', tmp_path) == {}
+
+
+def test_mappings_and_json_go_through_the_field_names():
+    r = (name="rahul", age=26)
+    assert {**r} == {"name": "rahul", "age": 26}
+    # what `**r` reads, so they work at runtime; the checker rejects both (no `rec[...]`): use {**r}
+    assert r["name"] == "rahul"  # pyright: ignore[reportIndexIssue]
+    assert dict(r) == {**r}  # pyright: ignore[reportCallIssue, reportArgumentType]
+    assert json.dumps({**r}) == '{"name": "rahul", "age": 26}'
+    with pytest.raises(TypeError):
+        json.dumps(r)  # json writes any tuple as a list, and a record won't be read as one
+
+
+def test_pickle_and_copy_keep_a_record():
+    r = (name="rahul", age=26)
+    assert pickle.loads(pickle.dumps(r)) == copy.copy(r) == copy.deepcopy(r) == r
+    assert repr(copy.deepcopy(r)) == "(name='rahul', age=26)"
 
 
 def test_each_field_list_gets_one_class():
@@ -196,6 +239,8 @@ def test_replace_copies_with_some_fields_changed():
     older = r._replace(age=27)
     assert (older.name, older.age) == ("rahul", 27)
     assert r.age == 26
+    with pytest.raises(ValueError, match="agee"):
+        r._replace(agee=27)  # pyright: ignore[reportCallIssue]
 
 
 def test_asdict_gives_the_fields_in_written_order():

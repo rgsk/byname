@@ -98,6 +98,12 @@ PARAM_RE = re.compile(r"\b_byname_p\d+\b")
 # same field set are compared by type argument, and pyright names the type parameter rather than the field
 # a record read by position, which records don't allow (see record_def in transform.py)
 POSITIONAL_RE = re.compile(r'"_(?:typ|opn)_(\w+?)\[[^"]*" is not iterable|"__getitem__" method not defined on type "_(?:typ|opn)_(\w+?)\[')
+# a record ordered (`sorted(recs)`, `max(recs)`, `a < b`), which records don't allow: pyright's message is a page
+# about SupportsRichComparison
+UNORDERED_RE = re.compile(
+    r'"_(?:typ|opn)_(\w+?)\[[^"]*" is incompatible with protocol "SupportsDunder[LG]T'
+    r'|Operator "[<>]=?" not supported for types "_(?:typ|opn)_(\w+?)\['
+)
 # a target list read by position: `x, y` / `(x, _)` / `x,`
 TARGETS_RE = re.compile(r"\(?\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*,?\s*\)?")
 VARIANCE_RE = re.compile(r'Type parameter "T(\d+)@_(?:typ|opn)_(\w+?)" is \w+, but "(.*)" is not (?:the same as|a subtype of|assignable to) "(.*)"')
@@ -198,6 +204,13 @@ def explain_fields(msg: str) -> str:
         return "\n".join(out)
     if fields := positional_fields(msg):
         msg = add_line(msg, f"records are read by name: ({', '.join(f + '=' for f in fields)})")
+    if m := UNORDERED_RE.search(msg):
+        lines = msg.split("\n")
+        rule = RULE_RE.search(lines[-1])
+        head = lines[0][: rule.start()] if rule and len(lines) == 1 else lines[0]
+        field = (m[1] or m[2]).split("__")[0]
+        msg = add_line(head, f"records have no order: compare or sort by a field (key=lambda r: r.{field})")
+        return msg + (f" ({rule[1]})" if rule else "")
     msg = VARIANCE_RE.sub(lambda m: f'"{m[2].split("__")[int(m[1])]}" is an incompatible type: "{m[3]}" is not "{m[4]}"', msg)
     if FIELDSET not in msg:
         return msg

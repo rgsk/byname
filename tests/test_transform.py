@@ -349,6 +349,17 @@ def test_to_python_puts_prelude_after_future_imports():
     assert out.splitlines()[:3] == ['"""doc"""', "from __future__ import annotations", "from typing import NamedTuple as _NT"]
 
 
+def test_output_files_read_records_by_name_only_too():
+    # what judges run: the same runtime rules as `byname run`
+    ns = {}
+    exec(to_python("r = (name='a', age=1)\nk = 'name' in r\n", portable=True), ns)
+    assert ns["k"] is True
+    with pytest.raises(TypeError, match="read by name only"):
+        list(ns["r"])
+    with pytest.raises(TypeError, match="'<' not supported"):
+        sorted([ns["r"], ns["r"]])
+
+
 def test_import_hook_runs_pyn_modules(tmp_path):
     (tmp_path / "people.pyn").write_text(
         "def make(*, name: str, age: int):\n"
