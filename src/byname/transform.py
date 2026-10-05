@@ -48,7 +48,7 @@ PRELUDE = (
     # modules have their own record classes, hence `_fields`, not the class. Hashing stays tuple's.
     "def _byname_eq(self, o):\n"
     "    if type(o) is type(self): return tuple.__eq__(self, o)\n"
-    f"    if isinstance(o, tuple): return hasattr(o, {ORDER!r}) and self._fields == o._fields and tuple.__eq__(self, o)  # type: ignore  # pyright: ignore\n"
+    f"    if isinstance(o, tuple): return hasattr(o, {ORDER!r}) and self._fields == o._fields and tuple.__eq__(self, o)  # pyright: ignore\n"
     "    return NotImplemented\n"
     "def _byname_ne(self, o):\n"
     "    r = _byname_eq(self, o)\n"
@@ -103,8 +103,7 @@ BUILD_PRELUDE = (
 CTX_PRELUDE = (  # checker only: T is the type expected where the record is built, see the comment above
     # the checker reads typing_extensions from its bundled stubs; the package needn't be installed
     "from typing_extensions import TypeVar as _TV  # pyright: ignore[reportMissingModuleSource]\n"
-    "_byname_T = _TV('_byname_T', default=_A)\n"
-    "def _byname_ctx(f: _Cl[[_byname_T], object], /) -> _byname_T: ...  # pyright: ignore\n"
+    "def _byname_ctx[T](f: _Cl[[T], object], /) -> T: ...  # pyright: ignore\n"
     "def _byname_pick[V](x: object, v: V, /) -> V: ...  # pyright: ignore\n"  # x: the user's name, v: its narrowed copy
     # a call argument: a record type (or None) expected, or else _byname_AnyRec, which a non-record
     # overload `f(x: int)` rejects, so the checker moves on to the overload that takes a record
@@ -124,7 +123,7 @@ BUILD_PORTABLE = (  # what runs in output files: no typing
     "_byname_anyv = None\n"
 )
 BUILD_REC = (  # build a record from a dict: one class per field tuple, made on first use
-    "_byname_cls = {}  # type: ignore\n"
+    "_byname_cls = {}\n"
     "{sig}\n"
     "    k = tuple(d)\n"
     "    c = _byname_cls.get(k)\n"
@@ -211,7 +210,7 @@ def type_def(fields: tuple[str, ...], is_open: bool, portable: bool = False) -> 
     # read-only fields, so records (immutable) match; Final rather than @property, so `p.age` is coloured
     # like a record field (see remap_tokens). Checkers object to a type variable in Final: silenced.
     for i, f in enumerate(fields):
-        out += f"    {f}: _Fi[T{i}]  # type: ignore  # pyright: ignore\n"
+        out += f"    {f}: _Fi[T{i}]  # pyright: ignore\n"
     if is_open:
         return out
     kw = ", ".join(f"{f}: T{i} = ..." for i, f in enumerate(fields))
@@ -242,7 +241,7 @@ def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
     out = f"class {head}(_NT):\n    {body}\n_byname_setup({record_class(fields)}, {fields!r})\n"
     if portable:
         return out
-    # Checkers see their own version (`if _t.TYPE_CHECKING`, a form both pyright and mypy recognise; an
+    # Checkers see their own version (`if _t.TYPE_CHECKING`, a form pyright recognises; an
     # aliased `TYPE_CHECKING` isn't): a function returning the record's exact type, the Protocol a written
     # `(name: str, age: int)` is (see type_def). Protocols match by structure, so a record written in another
     # order is the same type (`xs.append((age=1, name="a"))` on a list of `(name=, age=)` records), and they
@@ -586,7 +585,7 @@ def transform(
         """Parse a pattern group into (item, kind, value) entries, kind one of: short (`f=`),
         target (`f=t`, value the target text), nested (`f=(...)`, value its entries), bare (half-typed).
         Records the group's stand-ins and field spans as it goes."""
-        its, bare = pattern_items(open_i)  # type: ignore[misc]
+        its, bare = pattern_items(open_i)
         node: list[tuple[list[int], str, object]] = []
         for it, b in zip(its, bare):
             f = toks[it[0]]
@@ -1062,9 +1061,9 @@ def _body_ast(r: Result, path: str) -> ast.Module:
 
         for node in ast.walk(tree):
             if isinstance(getattr(node, "lineno", None), int):
-                node.lineno = source_line(node.lineno)  # type: ignore[attr-defined]
+                node.lineno = source_line(node.lineno)
                 if isinstance(getattr(node, "end_lineno", None), int):
-                    node.end_lineno = source_line(node.end_lineno)  # type: ignore[attr-defined]
+                    node.end_lineno = source_line(node.end_lineno)
     return tree
 
 

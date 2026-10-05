@@ -477,7 +477,7 @@ def test_spread_records_are_checked_against_the_expected_type():
     )
     assert f"p: Person = {ctx}" in r.body and f"    return {ctx}" in r.body
     assert "q = _cast(_typ_name__age__sex__surname[str, int, str, str], _byname_rec(_byname_check(" in r.body
-    assert "def _byname_ctx(" in r.prelude
+    assert "def _byname_ctx[T](" in r.prelude
     r = transform(SPREADS)
     assert "p: Person = _byname_rec({**u, **r})" in r.body and "both = _byname_rec({**u, **r})" in r.body
     assert "_byname_ctx" not in r.prelude + r.body
