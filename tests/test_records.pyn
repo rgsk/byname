@@ -9,17 +9,17 @@ def make(*, name: str, age: int):
 def test_a_record_holds_locals_by_name():
     name, age = "rahul", 26
     r = make(name=, age=)
-    # compared as a dict: `==` on records compares values by position (see the next test), so it
-    # wouldn't catch a misspelled field name
+    assert r == (greeting="hi rahul", name="rahul", age=26)
     assert r._asdict() == {"name": "rahul", "age": 26, "greeting": "hi rahul"}
     assert repr(r) == "(name='rahul', age=26, greeting='hi rahul')"
 
 
-def test_equality_compares_values_by_position_not_names():
-    # records are NamedTuples: `==` and hash are the tuple's, so field names don't take part
-    assert (name="r", age=26) == (name="r", agee=26)
-    assert (a=1, b=2) == (1, 2)
-    assert (a=1, b=2) != (b=2, a=1)
+def test_equality_compares_fields_by_name_in_any_order():
+    # the same field set with the same values: equal, and hashed alike, whatever order each was written in
+    assert (a=1, b=2) == (b=2, a=1)
+    assert hash((a=1, b=2)) == hash((b=2, a=1))
+    assert (name="r", age=26) != (name="r", agee=26)  # another field set
+    assert (a=1, b=2) != (1, 2) and (1, 2) != (a=1, b=2)  # never equal to a plain tuple
 
 
 def test_destructuring_reads_fields_in_any_order_with_rename():
@@ -30,7 +30,7 @@ def test_destructuring_reads_fields_in_any_order_with_rename():
 def test_a_spread_takes_later_fields_and_keeps_the_first_position():
     defaults = (lr=1e-2, eval_iters=100)
     cfg = (**defaults, batch_size=32, lr=3e-3)
-    assert cfg._fields == ("lr", "eval_iters", "batch_size")
+    assert list(cfg._asdict()) == ["lr", "eval_iters", "batch_size"]  # the written order: repr, _asdict(), `**cfg`
     assert cfg.lr == 3e-3
 
 

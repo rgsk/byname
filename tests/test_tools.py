@@ -58,17 +58,17 @@ def test_mixed_record_list_stays_typed(project):
 
 
 def test_explicit_record_types_ignore_order_but_not_field_set(project):
-    # inferred records keep their written order; explicit types match any order, but exactly these fields
+    # explicit types match any order, but exactly these fields; a record is read by name, never by position
     (project / "types.pyn").write_text(
         "type User = (name: str, age: int)\n"
         "u: User = (age=26, name='R')\n"            # order differs: fine
         "x: User = (age=26, name='R', po='d')\n"    # extra field
         "def f() -> User:\n"
         "    return (age=1, name='R')\n"
-        "a, b = f()\n"
-        "reveal_type(a)\n"                          # order not guaranteed through an explicit type
+        "a, b = f()\n"                              # positional: an error, typed or not
+        "(name=) = f()\n"
         "c, d = (age=1, name='R')\n"
-        "reveal_type(c)\n"                          # inferred: as written
+        "reveal_type(name)\n"
         "def g(p: (age: int, ...)) -> int:\n"
         "    return p.age\n"
         "g(u); g((name='R',))\n"                    # open type: at least `age`
@@ -77,8 +77,10 @@ def test_explicit_record_types_ignore_order_but_not_field_set(project):
     assert "types.pyn:2" not in out
     assert 'types.pyn:3:11 - error: Type "(age: int, name: str, po: str)" is not assignable to declared type "User"' in out
     assert "extra field: po (reportAssignmentType)" in out and "_byname_fieldset" not in out
-    assert 'types.pyn:7:13 - information: Type of "a" is "str | int"' in out
-    assert 'types.pyn:9:13 - information: Type of "c" is "int"' in out
+    assert 'types.pyn:6:8 - error: "User" is not iterable' in out or 'types.pyn:6:8 - error: "(name: str, age: int)" is not iterable' in out
+    assert "types.pyn:7" not in out
+    assert 'types.pyn:8:8 - error: "(age: int, name: str)" is not iterable' in out
+    assert 'types.pyn:9:13 - information: Type of "name" is "str"' in out
     assert "types.pyn:12:9 - error" in out and "types.pyn:12:1 " not in out
 
 
@@ -112,16 +114,17 @@ def test_field_set_errors_on_long_records_name_the_fields(project):
     assert "_byname_fieldset" not in out
 
 
-def test_star_unpacking_a_record_into_a_call_is_typed(project):
+def test_a_record_spreads_into_a_call_by_name_only(project):
     (project / "star.pyn").write_text(
         "def fn(name: str, age: int) -> None: ...\n"
-        "fn(*(name='r', age=1))\n"   # fine
-        "fn(*(name=1, age=1))\n"     # name is an int
+        "fn(*(age=1, name='r'))\n"   # by position: an error
+        "fn(**(age=1, name='r'))\n"  # by name: fine
+        "fn(**(name=1, age=1))\n"    # name is an int
     )
     out, rc = tool(project, "basedpyright", "star.pyn")
-    assert "star.pyn:2" not in out
-    assert 'star.pyn:3:1 - error: Argument of type "int" cannot be assigned to parameter "name"' in out
-    assert "_byname_star" not in out
+    assert 'star.pyn:2:5 - error: "(age: int, name: str)" is not iterable' in out
+    assert "star.pyn:3" not in out
+    assert 'star.pyn:4:6 - error: Argument of type "int" cannot be assigned to parameter "name"' in out
 
 
 def test_spread_mistakes_are_named(project):

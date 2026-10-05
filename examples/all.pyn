@@ -68,10 +68,9 @@ multi = (
     age=,  # trailing comma, multi-line
 )
 
-# records are NamedTuples, so everything a NamedTuple does works:
-n, a, g = p  # positional unpacking (field order as written)
-assert tuple(p) == ("Rahul", 26, "hi Rahul")
-assert p == make(name="Rahul", age=26)  # equality by value
+# records are read by name, never by position (`n, a, g = p` is a checker error), so field order never matters:
+assert p == make(name="Rahul", age=26)  # equality by value: the same fields, the same values
+assert p == (greeting="hi Rahul", age=26, name="Rahul")  # in any order
 assert p._asdict() == {"name": "Rahul", "age": 26, "greeting": "hi Rahul"}
 older = p._replace(age=27)  # copy with a change
 assert older.age == 27 and p.age == 26

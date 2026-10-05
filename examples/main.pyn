@@ -11,4 +11,4 @@ def later():
 
 
 later()
-print(res.age, tuple(res))
+print(res.age, res)

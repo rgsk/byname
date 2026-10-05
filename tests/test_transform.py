@@ -42,9 +42,11 @@ def test_record_literal_becomes_generic_namedtuple():
     at = lines.index("else:")  # the runtime class; checkers get their own version above it
     assert lines[at + 1 : at + 4] == [
         "    class _rec_name__age[T0, T1](_NT):",
-        "        name: T0; age: T1",
-        "        def __repr__(self) -> str: return _byname_repr(self)",
+        "        age: T1; name: T0",  # stored sorted by name: equality and hashing ignore the written order
+        "    _byname_setup(_rec_name__age, ('name', 'age'))",  # shown in the written order
     ]
+    # checkers: a function returning the exact type, a Protocol, so field order doesn't matter there either
+    assert lines[at - 1] == "    def _rec_name__age[T0, T1](*, name: T0, age: T1) -> _typ_name__age[T0, T1]: ..."
 
 
 def test_record_with_explicit_values():
@@ -63,7 +65,7 @@ def test_record_prints_like_its_literal():
 
 def test_records_with_same_fields_share_one_class():
     r = transform("x = (a=, b=)\ny = (a=1, b=2)\n")
-    assert r.prelude.count("class _rec_") == 2  # one record class: the checkers' version and the runtime one
+    assert r.prelude.count("class _rec_") == r.prelude.count("def _rec_") == 1  # the runtime class, the checkers' version
 
 
 def test_destructure_binds_fields_by_name():
@@ -362,10 +364,10 @@ def test_import_hook_runs_pyn_modules(tmp_path):
         "name, age = 'Rahul', 26\n"
         "res = make(name=, age=)\n"
         "(greeting=, age=) = res\n"
-        "print(greeting, age, tuple(res))\n"
+        "print(greeting, age, res)\n"
     )
     out = subprocess.run([sys.executable, "main.py"], cwd=tmp_path, capture_output=True, text=True, check=True)
-    assert out.stdout == "hi Rahul 26 ('Rahul', 26, 'hi Rahul')\n"
+    assert out.stdout == "hi Rahul 26 (name='Rahul', age=26, greeting='hi Rahul')\n"
 
 
 def test_traceback_points_at_pyn_line(tmp_path):
@@ -412,24 +414,14 @@ def test_output_files_run_on_old_pythons():
 
 def test_replace_and_asdict_are_typed_for_the_checker_only():
     # NamedTuple types them `(**kwargs: Any)` / `dict[str, Any]`; the checker gets per-field versions,
-    # in the checkers' version of the class: NamedTuple won't let a class override them at runtime
+    # on the record's exact type (see record_def)
     r = transform("x = (name=, age=)\n")
-    assert "        def _replace(self, *, name: T0 = ..., age: T1 = ...) -> '_rec_name__age[T0, T1]': ...  # type: ignore  # pyright: ignore" in r.prelude
-    assert "        def _asdict(self) -> _dct_name__age[T0, T1]: ...  # type: ignore  # pyright: ignore" in r.prelude
+    assert "    def _replace(self, *, name: T0 = ..., age: T1 = ...) -> _S: ..." in r.prelude
+    assert "    def _asdict(self) -> _dct_name__age[T0, T1]: ..." in r.prelude
     assert "class _dct_name__age[T0, T1](_TD):" in r.prelude
     ns = {}
     exec(compile_pyn("r = (name='a', age=1)\nr2 = r._replace(age=2)\nd = r._asdict()\n"), ns)
-    assert ns["r2"] == ("a", 2) and ns["d"] == {"name": "a", "age": 1}
-
-
-def test_star_args_go_through_a_plain_tuple_for_the_checker_only():
-    # pyright checks `fn(*rec)` with each argument as `object` (generic tuple subclass); the checker's
-    # translation passes `*x` through an identity helper typed to return a plain tuple
-    src = "fn(*u, **kw)\nprint(*[1])\n"
-    r = transform(src, checker=True)
-    assert r.body == "fn(*_byname_star(u), **_byname_kw(kw))\nprint(*_byname_star([1]))\n"
-    assert "def _byname_star[*Ts](t: tuple[*Ts], /) -> tuple[*Ts]: ..." in r.prelude
-    assert transform(src).body == src and transform(src).prelude == ""  # what runs: untouched
+    assert repr(ns["r2"]) == "(name='a', age=2)" and ns["d"] == {"name": "a", "age": 1}
 
 
 SPREADS = """\
@@ -572,7 +564,8 @@ def test_open_record_type():
 def test_records_carry_their_sorted_field_set():
     # what an exact record type matches on: same names, any order
     r = transform("x = (b=1, a=2)\n")
-    assert "        def _byname_fieldset(self) -> _L['a,b']: ..." in r.prelude
+    assert "class _typ_b__a[T0, T1](_PR):" in r.prelude  # in the checker a record is its exact type (see record_def)
+    assert "    def _byname_fieldset(self) -> _L['a,b']: ..." in r.prelude
 
 
 def test_record_type_runs_on_old_pythons():

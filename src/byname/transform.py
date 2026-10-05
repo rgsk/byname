@@ -11,8 +11,11 @@ Everything is built on the `name=` shorthand from PEP 736 (rejected):
 
 Left of `=` is always the field, right is always the local, in all three forms.
 
-Records are generic NamedTuples, so pyright infers `fn() -> _rec_name__age[str, int]`
-with no annotations. Valid Python is never changed: each form is a SyntaxError today.
+Records are read by name only: field order never matters. At runtime a record is a NamedTuple that
+stores its fields sorted by name (so equality and hashing ignore the written order) and shows them in the
+order written; checkers see a plain generic class with no tuple face, so pyright infers
+`fn() -> _rec_name__age[str, int]` with no annotations and rejects `a, b = rec`, `rec[0]` and `*rec`.
+Valid Python is never changed: each form is a SyntaxError today.
 The body keeps the input's line count; record classes go in a separate prelude.
 """
 
@@ -28,15 +31,33 @@ SHORT, PAT, TYP = "__p", "__P", "__T"  # formatting stand-ins: `x=` -> `x=__p`, 
 PARAM = "__D"  # formatting stand-in for a parameter pattern: `(a=): T` -> `__D: (__P[a:__p], T)`
 PARAM_NAME = "_byname_p"  # + index: the parameter a parameter pattern stands for
 REPR = "_byname_repr"
+ORDER = "_byname_order"  # a record class's fields in the order written; `_fields` is the sorted storage order
 PRELUDE = (
     "from typing import NamedTuple as _NT\n"
-    f"def {REPR}(self) -> str: return '(' + ', '.join(f'{{k}}={{v!r}}' for k, v in zip(self._fields, self)) + ')'\n"
+    f"def {REPR}(self) -> str: return '(' + ', '.join(f'{{k}}={{getattr(self, k)!r}}' for k in self.{ORDER}) + ')'\n"
     # records are mappings by field name at runtime, so `f(**rec)` and `{**rec}` work (see RESERVED)
-    "def _byname_keys(self): return self._fields\n"
+    f"def _byname_keys(self): return self.{ORDER}\n"
     "def _byname_item(self, k):\n"
     "    if not isinstance(k, str): return tuple.__getitem__(self, k)\n"
-    "    if k in self._fields: return getattr(self, k)\n"
+    f"    if k in self.{ORDER}: return getattr(self, k)\n"
     "    raise KeyError(k)\n"
+    f"def _byname_asdict(self): return {{k: getattr(self, k) for k in self.{ORDER}}}\n"
+    # Equal: the same field set with the same values, whatever order each was written in. Storage is sorted
+    # by name, so that is tuple equality between two records with the same `_fields`. Never equal to a plain
+    # tuple (a record is a tuple subclass, so its reflected __eq__ runs first for `(1, 2) == rec` too). Other
+    # modules have their own record classes, hence `_fields`, not the class. Hashing stays tuple's.
+    "def _byname_eq(self, o):\n"
+    "    if type(o) is type(self): return tuple.__eq__(self, o)\n"
+    f"    if isinstance(o, tuple): return hasattr(o, {ORDER!r}) and self._fields == o._fields and tuple.__eq__(self, o)  # type: ignore  # pyright: ignore\n"
+    "    return NotImplemented\n"
+    "def _byname_ne(self, o):\n"
+    "    r = _byname_eq(self, o)\n"
+    "    return r if r is NotImplemented else not r\n"
+    # set after the class is made: NamedTuple refuses `_asdict` in a class body, and a class body defining
+    # __eq__ loses tuple's (C) __hash__
+    "def _byname_setup(c, order):\n"
+    f"    c.{ORDER}, c.__repr__, c.keys, c.__getitem__ = order, {REPR}, _byname_keys, _byname_item\n"
+    "    c.__eq__, c.__ne__, c._asdict = _byname_eq, _byname_ne, _byname_asdict\n"
 )
 # basedpyright infers a mixed list like [(age="90"), (age=23)] as list[Unknown], which switches off every
 # check on what comes out of it. Strict inference gives list[A | B]. A comment, not a config setting: the
@@ -45,23 +66,11 @@ CHECKER_DIRECTIVE = "# pyright: strictListInference=true, strictDictionaryInfere
 TYPED_PRELUDE = (  # checker-facing typing: typed methods, record types as Protocols
     "import typing as _t\n"
     "from typing import TypedDict as _TD, Protocol as _PR, Literal as _L, Self as _S, Final as _Fi\n"
-    "from collections.abc import Iterator as _It\n"
-)
-# pyright (1.1.414) loses a generic tuple subclass's type arguments when it's star-unpacked into a call:
-# `fn(*rec)` checks each argument as `object`. A plain tuple is fine, so in the checker's translation only,
-# every `*arg` in a call goes through this identity helper, typed to return a plain tuple.
-STAR = "_byname_star"
-STAR_PRELUDE = (
-    "from typing import overload as _ov, Any as _A\n"
-    "from collections.abc import Iterable as _Itb\n"
-    f"@_ov\ndef {STAR}[*Ts](t: tuple[*Ts], /) -> tuple[*Ts]: ...\n"
-    f"@_ov\ndef {STAR}[T](t: _Itb[T], /) -> _Itb[T]: ...\n"
-    f"def {STAR}(t: _A, /) -> _A: return t\n"
 )
 # Spreads: `**rec` in a call or dict display, and records built from spreads, `(**u, **r, age=27)`.
 # At runtime records are mappings by field name (`keys()` and `rec["name"]`), so Python's own `**` works
 # on them and valid Python is never rewritten. For the checker, `**x` goes through _byname_kw (a record
-# becomes its typed `_asdict()` TypedDict, a dict passes through), checker translation only, like STAR.
+# becomes its typed `_asdict()` TypedDict, a dict passes through), checker translation only.
 # A spread record is built from a dict display, so a later field wins and keeps the first one's position,
 # like `{**a, **b}`. The checker sees `_byname_ctx(lambda t: _byname_check(lambda: t)({**u, 'age': 27}))`:
 # the lambda's parameter gets the type expected where the record stands (`fn(x)`, `fn(a=x)`, `p: T = x`,
@@ -103,9 +112,10 @@ CTX_PRELUDE = (  # checker only: T is the type expected where the record is buil
     "if MYPY:\n"
     "    _byname_arg = _byname_ctx\n"
     "else:\n"
-    "    class _byname_AnyRec(tuple[_A, ...]):\n"
+    "    class _byname_AnyRec:\n"
     "        def _asdict(self) -> dict[str, _A]: ...  # pyright: ignore\n"
     "        def keys(self) -> tuple[str, ...]: ...  # pyright: ignore\n"
+    "        def __len__(self) -> int: ...  # pyright: ignore\n"
     "        def __getattr__(self, name: str, /) -> _A: ...\n"
     "    _byname_R = _TV('_byname_R', bound=_byname_HasDict[_A] | None, default=_byname_AnyRec)\n"
     "    def _byname_arg(f: _Cl[[_byname_R], object], /) -> _byname_R: ...  # pyright: ignore\n"
@@ -123,8 +133,8 @@ BUILD_REC = (  # build a record from a dict: one class per field tuple, made on 
     "    k = tuple(d)\n"
     "    c = _byname_cls.get(k)\n"
     "    if c is None:\n"
-    "        c = _byname_cls[k] = _ntf('_rec_' + '__'.join(k), k)\n"
-    f"        c.__repr__, c.keys, c.__getitem__ = {REPR}, _byname_keys, _byname_item  # type: ignore\n"
+    "        c = _byname_cls[k] = _ntf('_rec_' + '__'.join(k), sorted(k))\n"
+    "        _byname_setup(c, k)\n"
     "    return c(**d)\n"
 )
 FIELDSET = "_byname_fieldset"  # a record's field names, sorted: what an exact record type matches on
@@ -208,13 +218,12 @@ def type_def(fields: tuple[str, ...], is_open: bool, portable: bool = False) -> 
         out += f"    {f}: _Fi[T{i}]  # type: ignore  # pyright: ignore\n"
     if is_open:
         return out
-    each = " | ".join(f"T{i}" for i in range(len(fields)))  # positional access: order isn't guaranteed
     kw = ", ".join(f"{f}: T{i} = ..." for i, f in enumerate(fields))
-    return out + (
+    return out + (  # no __iter__ / __getitem__: a record is read by name (see record_def)
         f"    @property\n    def {FIELDSET}(self) -> _L[{fieldset(fields)!r}]: ...\n"
-        f"    def __iter__(self) -> _It[{each}]: ...\n"
         f"    def __len__(self) -> int: ...\n"
-        f"    def __getitem__(self, i: int, /) -> {each}: ...\n"
+        "    def keys(self) -> tuple[str, ...]: ...\n"
+        "    @property\n    def _fields(self) -> tuple[str, ...]: ...\n"
         f"    def _replace(self, *, {kw}) -> _S: ...\n"
         f"    def _asdict(self) -> {dict_class(fields)}[{params}]: ...\n"
     )
@@ -222,39 +231,34 @@ def type_def(fields: tuple[str, ...], is_open: bool, portable: bool = False) -> 
 
 def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
     """portable: plain `class R(_NT):` with `object` fields, which runs on Python 3.6+ (judges run PyPy 3.10).
-    Otherwise a 3.12 generic class, so checkers infer each field's type."""
+    Otherwise a 3.12 generic class, so checkers infer each field's type.
+
+    The runtime class stores the fields sorted by name, so records with the same fields are equal and hash
+    alike in any written order (see _byname_eq); _byname_setup gives it the written order for repr, keys()
+    and _asdict(). Positional access still works at runtime (it's a tuple, which libraries may rely on), in
+    the sorted order; the checkers' version rejects it."""
     params = ", ".join(f"T{i}" for i in range(len(fields)))
-    body = "; ".join(f"{f}: {'object' if portable else f'T{i}'}" for i, f in enumerate(fields))
+    typevar = {f: f"T{i}" for i, f in enumerate(fields)}
+    body = "; ".join(f"{f}: {'object' if portable else typevar[f]}" for f in sorted(fields))
     if portable:  # record types annotate as R[int, str]; the plain class ignores the subscript
         body += "; __class_getitem__ = classmethod(lambda cls, _: cls)"
     head = record_class(fields) if portable else f"{record_class(fields)}[{params}]"
-    # a real method, not `__repr__ = helper`: mypy rejects assignments in a NamedTuple body
-    out = (
-        f"class {head}(_NT):\n"
-        f"    {body}\n"
-        f"    def __repr__(self) -> str: return {REPR}(self)\n"
-        "    def keys(self): return _byname_keys(self)\n"
-        "    def __getitem__(self, k): return _byname_item(self, k)\n"
-    )
+    out = f"class {head}(_NT):\n    {body}\n_byname_setup({record_class(fields)}, {fields!r})\n"
     if portable:
         return out
-    # Checkers see their own version of the class (`if _t.TYPE_CHECKING`, a form both pyright and mypy
-    # recognise; an aliased `TYPE_CHECKING` isn't). NamedTuple types `_replace(**kwargs: Any)` and
-    # `_asdict() -> dict[str, Any]`, so field typos and `f(**rec._asdict())` went unchecked; the checker
-    # version declares typed ones, which can't exist at runtime (NamedTuple refuses to let a class override
-    # them). The checkers object to overriding NamedTuple's final methods; that's generated code, silenced.
-    # FIELDSET is what explicit record types match on (see type_def).
-    kw = ", ".join(f"{f}: T{i} = ..." for i, f in enumerate(fields))
-    return (
-        "if _t.TYPE_CHECKING:\n"
-        f"    class {head}(_NT):\n"
-        f"        {body}\n"
-        f"        def _replace(self, *, {kw}) -> '{head}': ...  # type: ignore  # pyright: ignore\n"
-        f"        def _asdict(self) -> {dict_class(fields)}[{params}]: ...  # type: ignore  # pyright: ignore\n"
-        f"        @property\n        def {FIELDSET}(self) -> _L[{fieldset(fields)!r}]: ...\n"
-        "else:\n"
-        + "".join("    " + line + "\n" for line in out.splitlines())
-    )
+    # Checkers see their own version (`if _t.TYPE_CHECKING`, a form both pyright and mypy recognise; an
+    # aliased `TYPE_CHECKING` isn't): a function returning the record's exact type, the Protocol a written
+    # `(name: str, age: int)` is (see type_def). Protocols match by structure, so a record written in another
+    # order is the same type (`xs.append((age=1, name="a"))` on a list of `(name=, age=)` records), and they
+    # have no tuple face: unpacking, indexing, iterating, `*rec` and ordering are errors. (A NamedTuple won't
+    # do: pyright reads its fields by position whatever its __iter__ says.)
+    init = ", ".join(f"{f}: T{i}" for i, f in enumerate(fields))
+    checker = f"def {head}(*, {init}) -> {type_class(fields, False)}[{params}]: ...\n"
+
+    def indent(text: str) -> str:
+        return "".join("    " + line + "\n" for line in text.splitlines())
+
+    return "if _t.TYPE_CHECKING:\n" + indent(checker) + "else:\n" + indent(out)
 
 
 def known_fields(body: str) -> dict[str, tuple[str, ...]]:
@@ -355,7 +359,7 @@ def transform(
 ) -> Result:
     """tolerant (editor only): a half-typed pattern item like `na` in `(name=, na) = r` becomes
     `_ds.na` instead of an error, so the checker can complete field names there.
-    checker: the translation only type checkers see; works around their bugs (see STAR). Never run.
+    checker: the translation only type checkers see; works around their bugs (see KW_PRELUDE). Never run.
     known: names with fields known from the file (known_fields); set by the checker translation's second pass."""
     toks = [
         t
@@ -422,18 +426,6 @@ def transform(
 
     def span(a: int, b: int | None = None) -> tuple[int, int]:
         return off(toks[a].start), off(toks[a if b is None else b].end)
-
-    stars = False
-
-    def wrap_stars(its: list[list[int]]) -> None:
-        # `*x` -> `*_byname_star(x)` (checker only, see STAR); `**x` is left alone
-        nonlocal stars
-        for it in its:
-            if len(it) >= 2 and toks[it[0]].string == "*":
-                a, b = off(toks[it[1]].start), off(toks[it[-1]].end)
-                edits.append(Edit(a, a, STAR + "(", span(it[1], it[-1])))
-                edits.append(Edit(b, b, ")", span(it[1], it[-1])))
-                stars = True
 
     def expand_shorthand(its: list[list[int]]) -> None:
         for it in its:
@@ -785,8 +777,6 @@ def transform(
         if is_call:
             expand_shorthand(its)
             wrap_kw(its)
-            if checker:
-                wrap_stars(its)
             continue
 
         if not its:
@@ -935,6 +925,8 @@ def transform(
             dicts = dict.fromkeys([*records, *(f for f, o in types if not o)])
             prelude += CHECKER_DIRECTIVE + TYPED_PRELUDE + "".join(dict_def(f) for f in dicts)
         prelude += "".join(record_def(f, portable) for f in records)
+        if not portable:  # in the checker, each record is its exact type (see record_def)
+            types = {**types, **dict.fromkeys((f, False) for f in records)}
         prelude += "".join(type_def(f, o, portable) for f, o in types)
     if builds or kw_used:
         if not prelude:
@@ -946,8 +938,6 @@ def transform(
         elif builds:
             prelude += BUILD_PRELUDE + BUILD_REC.replace("{sig}", "def _byname_rec(d: _Mp[str, _A], /) -> _A:")
             prelude += CTX_PRELUDE if checker else ""
-    if stars:
-        prelude += STAR_PRELUDE
     standins.sort()
     return Result(prelude, body, edits, problems, standins, sorted(field_spans), sorted(inserted))
 

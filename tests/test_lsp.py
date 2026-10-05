@@ -476,6 +476,26 @@ def test_fix_all_on_save(lsp):
     c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 902}, "contentChanges": [{"text": MAIN}]}})
 
 
+def test_reading_a_record_by_position_offers_reading_it_by_name(lsp):
+    # the error says how, and a quick fix rewrites the targets by field, matched in the order written
+    c, root, uri = lsp
+    text = MAIN + "def batch():\n    return (x=1, y=2)\nx, y = batch()\nfor a, _ in [batch()]: pass\n"
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 990}, "contentChanges": [{"text": text}]}})
+    last = text.count("\n") - 1
+    end, mine = time.time() + 60, []
+    while time.time() < end and len(mine) < 2:  # skip diagnostics for the previous text
+        c.diags.pop(uri, None)
+        mine = [d for d in c.wait_diags(uri) if d["range"]["start"]["line"] in (last - 1, last)]
+    assert all("records are read by name: (x=, y=)" in d["message"] for d in mine)
+    fixes = []
+    for d in sorted(mine, key=lambda d: d["range"]["start"]["line"]):
+        actions = c.request("textDocument/codeAction", {"textDocument": {"uri": uri}, "range": d["range"], "context": {"diagnostics": [d]}})
+        fixes += [(a["title"], a["edit"]["changes"][uri][0]) for a in actions if a.get("kind") == "quickfix" and a["title"].startswith("Read by name")]
+    assert [t for t, _ in fixes] == ["Read by name: (x=, y=)", "Read by name: (x=a)"]
+    assert [snippet(text, e["range"]) for _, e in fixes] == ["x, y", "a, _"]
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 991}, "contentChanges": [{"text": MAIN}]}})
+
+
 SOLUTION = """\
 def solve(*, x: int):
     return (x=, double=x * 2)

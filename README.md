@@ -35,12 +35,17 @@ always your local. A bare `field=` means `field=field`.
 
 Every form is a syntax error in plain Python, so byname never changes the meaning of valid Python code.
 
-**Records** are generic NamedTuples:
-- **Access:** `.field` access, positional unpacking (`a, b = rec`), `rec._asdict()` and `rec._replace(age=27)`.
+**Records** are read by name, never by position, so field order never matters: reorder the fields where a
+record is built and nothing that reads it changes meaning.
+- **Access:** `.field` access, destructuring by name, `rec._asdict()` and `rec._replace(age=27)`. Reading
+  by position (`a, b = rec`, `rec[0]`, `for v in rec`, `f(*rec)`, `sorted(recs)`) is a checker error, and
+  the editor offers a quick fix: `x, y = get_batch()` becomes `(x=, y=) = get_batch()`. Want positions?
+  Return a tuple.
 - **Copies are checked:** records are immutable, so change one with `rec = rec._replace(age=27)`. The editor
   completes and checks `_replace`'s field names and types, and checks `f(**rec._asdict())` against `f`'s
   parameters, so a field `f` doesn't take is flagged.
-- **Equality** is by value.
+- **Equality** is by name and value: the same fields with the same values, in any written order, are equal
+  and hash alike, so `(x=1, y=2) == (y=2, x=1)`. A record never equals a plain tuple.
 - **They print the way you write them:** `(name='Rahul', age=26)`.
 - **Form:** one field needs no trailing comma (`(name=)`). Records can nest, and can appear anywhere an expression can, including comprehensions and lambdas.
 - **Field names** can't start with `_`, and can't repeat.
@@ -57,9 +62,9 @@ def birthday(p: (age: int, ...)) -> int:     # `...`: at least these fields; oth
     return p.age + 1
 ```
 
-Order only matters where you can see it: a record you build has its fields in the order you wrote, so
-`a, b = (age=26, name="R")` gives `a: int`. Through a record type the order isn't known, so `a, b = u`
-gives `str | int` for each. Destructure by name instead.
+The written order is only for display: hover, printing, `_asdict()` and `**rec` show the fields as you
+wrote them. To a checker, records with the same fields are the same type whatever the order, so
+`rs.append((age=1, name="a"))` on a list of `(name=, age=)` records is fine.
 
 You rarely need a record type, since return types are inferred. Two cases where you do:
 - **Recursive functions:** checkers can't infer through the recursive call, so its fields come out `Unknown`.
@@ -213,10 +218,8 @@ The extension starts `<workspace>/.venv/bin/byname lsp`.
 
 The command **"byname: Write Python Output"** writes `<name>.pyn.py` on demand.
 
-**Choosing a checker:** it must infer return types of functions without annotations, because that's
-where record types come from. pyright, basedpyright and Pyrefly do. ty doesn't yet (everything shows as
-`Unknown`). basedpyright is the one byname is tested against; Pyrefly leaves records built from spreads
-unchecked.
+**Choosing a checker:** see [Type checkers](#type-checkers). It must infer return types of functions
+without annotations, because that's where record types come from.
 
 ## Lint, type-check, format
 
@@ -229,9 +232,17 @@ byname tool mypy file.pyn
 byname tool basedpyright file.pyn
 ```
 
-basedpyright is the checker byname supports. Pyrefly checks everything but records built from
-spreads. mypy doesn't infer return types, so records mostly look like `Any` to it (it won't catch
-`(nope=) = res`), and it wrongly rejects nested record types like `(user: (name: str))`.
+### Type checkers
+
+What runs never depends on the checker, so a weaker checker only means fewer mistakes are caught; it never
+breaks working code. byname's generated code is meant to raise no errors under any of them.
+
+| Checker | Support |
+|---|---|
+| basedpyright / pyright | **Supported.** Every feature is designed and tested against it, messages are rewritten in byname's terms (`extra field: po`, `records are read by name: (x=, y=)`), and the editor's quick fixes rely on it. |
+| mypy | **Best effort.** Existing workarounds stay, no new feature waits on it. It doesn't infer return types, so records mostly look like `Any` to it (it won't catch `(nope=) = res`), and it doesn't check records built from spreads passed to overloads. |
+| Pyrefly | **Untested, works well.** Checks records (field sets, any order, no positional reads), but leaves records built from spreads unchecked, and its messages aren't rewritten. |
+| ty | **Not yet usable:** it doesn't infer return types, so everything shows as `Unknown`. |
 
 `byname format` runs `ruff format`. It swaps byname syntax for short plain-Python stand-ins, formats,
 then swaps them back:
@@ -279,22 +290,25 @@ from typing import NamedTuple as _NT
 ```
 
 The generated header uses plain `NamedTuple` classes, so output files run on Python 3.6+ (judges often run
-PyPy 3.10). The checker's hidden translation uses Python 3.12 generic classes instead, for field types.
+PyPy 3.10). The checker's hidden translation types records as Python 3.12 generic Protocols instead, for field types.
 
 ## How it works
 
 ```python
 def make(*, name: str, age: int):          from typing import NamedTuple as _NT
     return (name=, age=)          ──▶      class _rec_name__age[T0, T1](_NT):
-                                               name: T0; age: T1
-res = make(name=, age=)                    def make(*, name: str, age: int):
+                                               age: T1; name: T0
+res = make(name=, age=)                    _byname_setup(_rec_name__age, ('name', 'age'))
+                                           def make(*, name: str, age: int):
 (name=, age=) = res                            return _rec_name__age(name=name, age=age)
                                            res = make(name=name, age=age)
                                            _ds = res; name = _ds.name; age = _ds.age
 ```
 
-Each record shape becomes a generic NamedTuple, so the checker infers
-`make() -> _rec_name__age[str, int]` without annotations. The translation keeps every line on the same
+At runtime each record shape is a NamedTuple that stores its fields sorted by name (so equality and hashing
+ignore the written order) and shows them in the order written. The checker sees a generic Protocol instead,
+the same type `(name: str, age: int)` is, so it infers `make() -> (name: str, age: int)` without annotations
+and has no positional access to offer. The translation keeps every line on the same
 line number. The generated classes go in a header that's spliced in, which is why tracebacks and editor
 positions line up with your `.pyn`.
 

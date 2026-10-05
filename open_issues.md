@@ -45,3 +45,32 @@ probably). `pretty()` in `lsp.py` already rewrites `_rec_…[...]` class names i
 would need to turn the whole `_byname_arg(lambda …)` / `_byname_ctx(lambda …)` call back into
 `(**person, **place)`, e.g. by mapping the quoted span back to source text. Seen in
 `test_exhaustive.pyn` section 10, which asserts only the end of the message for now.
+
+## A record doesn't widen to a wider field type
+
+```python
+def f(p: (a: int | str)) -> None: ...
+x = (a=1)
+f(x)        # error: "(a: int)" is not assignable to "(a: int | str)"
+f((a=1))    # fine: the literal is inferred against the expected type
+```
+
+Records are generic Protocols in the checker, and `_replace(self, *, a: T0 = ...)` takes the field types as
+parameters, so pyright infers the type parameters invariant. It was the same before records became
+Protocols (the NamedTuple version failed the same way), so not a regression. Likely fix: covariant type
+parameters (old-style `TypeVar(..., covariant=True)`, silencing the "covariant in a parameter" complaint
+on `_replace`), since records are immutable; check that `_replace`'s field checking survives it.
+
+## A function returning records in two orders reports positional reads twice
+
+```python
+def branches(flag: bool):
+    if flag:
+        return (x=1, y="s")
+    return (y="t", x=2)
+c, d = branches(True)   # two "not iterable" errors, one per order
+```
+
+The inferred return type is a union of the two exact types, which are the same type structurally but print
+in their written orders, so the union isn't merged. One error (and one quick fix) would be enough; the
+proxy could drop a positional-read diagnostic at the same range as one it already kept.

@@ -22,7 +22,7 @@ from urllib.request import url2pathname
 
 from .output import output_path, render
 from .srcmap import LineIndex, Translation
-from .transform import DS, FIELDSET, REPR, STAR, pattern_slot
+from .transform import DS, FIELDSET, ORDER, REPR, pattern_slot
 
 DEFAULT_CHECKER = ["basedpyright-langserver", "--stdio"]
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache"}
@@ -94,6 +94,13 @@ LITERAL_RE = re.compile(r"Literal\['([\w,]*)'\]")
 DICT_MISSING_RE = re.compile(r'"(\w+)" is required in "_dct_')
 DICT_EXTRA_RE = re.compile(r'"(\w+)" is an undefined item in type "_dct_')
 PARAM_RE = re.compile(r"\b_byname_p\d+\b")
+# a record's field type mismatch: records are their exact type in the checker (see record_def), so two of the
+# same field set are compared by type argument, and pyright names the type parameter rather than the field
+# a record read by position, which records don't allow (see record_def in transform.py)
+POSITIONAL_RE = re.compile(r'"_(?:typ|opn)_(\w+?)\[[^"]*" is not iterable|"__getitem__" method not defined on type "_(?:typ|opn)_(\w+?)\[')
+# a target list read by position: `x, y` / `(x, _)` / `x,`
+TARGETS_RE = re.compile(r"\(?\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*,?\s*\)?")
+VARIANCE_RE = re.compile(r'Type parameter "T(\d+)@_(?:typ|opn)_(\w+?)" is \w+, but "(.*)" is not (?:the same as|a subtype of|assignable to) "(.*)"')
 RULE_RE = re.compile(r"\s*\((report\w+)\)\s*$")
 CODE_KEYS = {"newText", "insertText", "filterText", "sortText", "uri", "targetUri", "data"}
 
@@ -133,6 +140,47 @@ def pretty(text: str) -> str:
     return PARAM_RE.sub("(...)", out_s)  # a parameter pattern's parameter: `f((...): User)`
 
 
+def positional_fields(msg: str) -> list[str] | None:
+    """The fields, in the order written, of a record the checker refused to read by position."""
+    m = POSITIONAL_RE.search(msg)
+    return (m[1] or m[2]).split("__") if m else None
+
+
+def add_line(msg: str, text: str) -> str:
+    """Put `text` on a line of its own after the message's first, keeping the CLI's rule name at the end."""
+    lines = msg.split("\n")
+    indent = lines[1][: len(lines[1]) - len(lines[1].lstrip())] if len(lines) > 1 else "  "
+    if len(lines) > 1:
+        return "\n".join([lines[0], indent + text, *lines[1:]])
+    rule = RULE_RE.search(msg)
+    head = msg[: rule.start()] if rule else msg
+    return f"{head}\n{indent}{text}" + (f" ({rule[1]})" if rule else "")
+
+
+def by_name_edit(src: str, start: int, end: int, fields: list[str]) -> tuple[int, int, str] | None:
+    """Quick fix for a record read by position: `x, y = rec` (the error is on `rec`) or `for x, y in recs`
+    (on `x, y`) -> the same names bound by field, `(x=, y=)`, matched in the order the fields were written,
+    which is what the positional read meant. `_` drops its field. (a, b, text): replace src[a:b] with text."""
+    line_start = src.rfind("\n", 0, start) + 1
+    before = src[line_start:start]
+    if re.search(r"\bfor\s+$", before):
+        a, b = start, end
+    elif m := re.fullmatch(r"\s*([^=]*?)\s*=\s*", before):
+        a, b = line_start + m.start(1), line_start + m.end(1)
+    else:
+        return None
+    t = TARGETS_RE.fullmatch(src[a:b])
+    if t is None:
+        return None
+    names = [n.strip() for n in t[1].split(",")]
+    if len(names) != len(fields):
+        return None
+    items = [f if n == f else f"{f}={n}" for f, n in zip(fields, names) if n != "_"]
+    if not items:
+        return None
+    return a, b, "(" + ", ".join(f"{i}=" if "=" not in i else i for i in items) + ")"
+
+
 def explain_fields(msg: str) -> str:
     """An exact record type rejected a record whose field set differs. pyright's message is a page about
     FIELDSET, a generated property; keep the first line and say which fields are extra or missing.
@@ -148,6 +196,9 @@ def explain_fields(msg: str) -> str:
         if rule := RULE_RE.search(lines[-1]):
             out[-1] += f" ({rule[1]})"
         return "\n".join(out)
+    if fields := positional_fields(msg):
+        msg = add_line(msg, f"records are read by name: ({', '.join(f + '=' for f in fields)})")
+    msg = VARIANCE_RE.sub(lambda m: f'"{m[2].split("__")[int(m[1])]}" is an incompatible type: "{m[3]}" is not "{m[4]}"', msg)
     if FIELDSET not in msg:
         return msg
     # pyright cuts literals over 50 characters to `…`, so prefer the class names, which it doesn't cut
@@ -178,7 +229,7 @@ def explain_fields(msg: str) -> str:
 
 def is_generated_name(name) -> bool:
     return isinstance(name, str) and (
-        name in (DS, REPR, FIELDSET, STAR, "_NT", "_cast", "_Cl", "_Mp", "_ntf", "_t", "_TD", "_PR", "_L", "_S", "_Fi", "_It", "_ov", "_A", "_Itb", "_TV", "MYPY") or name.startswith((*GENERATED_PREFIXES, "_byname_"))
+        name in (DS, REPR, FIELDSET, ORDER, "_NT", "_cast", "_Cl", "_Mp", "_ntf", "_t", "_TD", "_PR", "_L", "_S", "_Fi", "_ov", "_A", "_TV", "MYPY") or name.startswith((*GENERATED_PREFIXES, "_byname_"))
     )
 
 
@@ -221,6 +272,7 @@ class Proxy:
         self.shadow_root: Path | None = None
         self.docs: dict[Path, list[Doc]] = {}  # open .pyn by path; recent versions, newest last
         self.pending: dict = {}  # editor request id -> (method, Doc)
+        self.own_actions: dict = {}  # codeAction request id -> byname's quick fixes, added to the checker's
         self.server_requests: dict = {}  # checker request id -> configuration items
         self.last_completion: Doc | None = None
         self.counter = 0  # checker-side document versions
@@ -484,6 +536,8 @@ class Proxy:
         if method == "textDocument/codeAction" and (kind := source_kind(params)):
             self.client.send(self.fix(mid, path, doc, kind))
             return
+        if method == "textDocument/codeAction" and mid is not None and (actions := self.by_name_actions(params, doc)):
+            self.own_actions[mid] = actions
         mapped = self.to_checker(params, doc)
         # on shorthand `x=`: definition -> the local x (value half); declaration -> the parameter/field
         if method == "textDocument/definition" and (vp := doc.tr.value_position(params["position"])):
@@ -585,6 +639,27 @@ class Proxy:
         edit = {"changes": {doc.uri: [{"range": whole, "newText": out}]}}
         return {"jsonrpc": "2.0", "id": mid, "result": [{"title": title, "kind": kind + ".byname", "edit": edit}]}
 
+    def by_name_actions(self, params: dict, doc: Doc) -> list[dict]:
+        """Quick fixes for records read by position (diagnostics carrying `bynameFields`): read them by name."""
+        out = []
+        lines = doc.tr.src_lines
+        for d in params.get("context", {}).get("diagnostics", []):
+            fields = (d.get("data") or {}).get("bynameFields") if isinstance(d.get("data"), dict) else None
+            if not fields:
+                continue
+            r = d["range"]
+            start = lines.offset(r["start"]["line"], r["start"]["character"])
+            end = lines.offset(r["end"]["line"], r["end"]["character"])
+            if (fix := by_name_edit(doc.tr.source, start, end, fields)) is None:
+                continue
+            a, b, text = fix
+            edit = {"range": {"start": lines.position(a), "end": lines.position(b)}, "newText": text}
+            out.append({
+                "title": f"Read by name: {text}", "kind": "quickfix", "diagnostics": [d], "isPreferred": True,
+                "edit": {"changes": {doc.uri: [edit]}},
+            })
+        return out
+
     def write_output(self, path: Path, doc: Doc) -> str | None:
         """Write <file>.pyn.py next to the .pyn. Returns an error message, or None on success.
         A .pyn that doesn't translate leaves the previous output alone."""
@@ -655,6 +730,10 @@ class Proxy:
                 path, doc, rng, listed = method_doc[1]
                 self.client.send({**msg, "result": self.finish_slot(msg.get("result"), path, doc, rng, listed)})
                 return
+            if (own := self.own_actions.pop(mid, None)) and "result" in msg:
+                result = self.to_editor(msg["result"], method_doc[1]) if msg["result"] else []
+                self.client.send({**msg, "result": [*(result if isinstance(result, list) else []), *own]})
+                return
             if method_doc and "result" in msg and msg["result"] is not None:
                 req, doc = method_doc
                 if req == "initialize":
@@ -717,7 +796,10 @@ class Proxy:
                 continue
             if (r["start"]["line"], r["start"]["character"]) in flagged:
                 continue  # half-typed pattern item: our message says it; drop the checker's echo
+            fields = positional_fields(d.get("message", ""))
             d = {**d, "range": r, "message": pretty(explain_fields(d.get("message", "")))}
+            if fields and "data" not in d:
+                d["data"] = {"bynameFields": fields}  # for the quick fix (by_name_actions)
             if "relatedInformation" in d:
                 d["relatedInformation"] = self.to_editor(d["relatedInformation"], None)
             out.append(d)

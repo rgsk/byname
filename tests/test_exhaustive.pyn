@@ -136,17 +136,45 @@ def test_records_nest_and_go_anywhere_an_expression_can():
 
 
 # ============================================================================
-# 3. WHAT A RECORD IS: a NamedTuple, one class per field list
+# 3. WHAT A RECORD IS: fields read by name, never by position
 # ============================================================================
 
 
-def test_a_record_is_a_named_tuple():
-    name, age = "rahul", 26
-    r = (name=, age=)
-    assert isinstance(r, tuple)
-    assert (len(r), r[0], r[1]) == (2, "rahul", 26)
-    first, second = r  # positional unpacking, in the order written
-    assert (first, second) == ("rahul", 26)
+def test_a_record_is_read_by_name_only(tmp_path):
+    # field order never matters, so nothing reads a record by position: reorder a record's fields where
+    # it's built and no reader changes meaning. Want positions? Return a tuple.
+    verdicts = checker(
+        """\
+        def get_batch():
+            return (x=1, y=2)
+        r = get_batch()
+        x, y = r
+        r[0]
+        for v in r: pass
+        print(*r)
+        sorted([r, r])
+        (x=, y=) = r
+        """,
+        tmp_path,
+    )
+    assert sorted(verdicts) == [4, 5, 6, 7, 8]  # line 9, by name, is the way
+    assert verdicts[4].startswith('"(x: int, y: int)" is not iterable')
+    assert verdicts[5].startswith('"__getitem__" method not defined on type "(x: int, y: int)"')
+
+
+def test_at_runtime_a_record_is_a_named_tuple_stored_by_name():
+    # a NamedTuple underneath (immutable, hashable, cheap, and libraries that take tuples still work), with
+    # its fields stored sorted by name and shown in the order written
+    r = (name="rahul", age=26)
+    assert isinstance(r, tuple) and len(r) == 2
+    assert r._fields == ("age", "name")
+    assert tuple(r.keys()) == ("name", "age")  # what `**r` reads
+    assert list(r._asdict()) == ["name", "age"]
+    # the checker rejects reading by position; at runtime it works, in the stored (sorted) order, not as written
+    first, second = r  # pyright: ignore[reportGeneralTypeIssues]
+    assert (first, second) == (26, "rahul")
+    assert r[0] == 26  # pyright: ignore[reportIndexIssue]
+    assert tuple(r) == tuple((age=26, name="rahul")) == (26, "rahul")  # pyright: ignore[reportArgumentType]
 
 
 def test_each_field_list_gets_one_class():
@@ -174,15 +202,17 @@ def test_asdict_gives_the_fields_in_written_order():
     assert (name="rahul", age=26)._asdict() == {"name": "rahul", "age": 26}
 
 
-def test_equality_compares_values_by_position_not_names():
-    assert (name="rahul", age=26) == (name="rahul", agee=26)
-    assert (name="rahul", age=26) == ("rahul", 26)
-    assert (name="rahul", age=26) != (age=26, name="rahul")
+def test_equality_compares_fields_by_name_in_any_order():
+    assert (name="rahul", age=26) == (age=26, name="rahul")
+    assert (name="rahul", age=26) != (name="rahul", agee=26)  # another field set
+    assert (name="rahul", age=26) != ("rahul", 26)  # never equal to a plain tuple
+    assert ("rahul", 26) != (name="rahul", age=26)
 
 
 def test_a_record_is_hashable_so_it_can_be_a_dict_key():
     seen = {(name="rahul", age=26): "found"}
     assert seen[(name="rahul", age=26)] == "found"
+    assert seen[(age=26, name="rahul")] == "found"  # equal records hash alike
 
 
 # ============================================================================
@@ -360,21 +390,18 @@ def test_an_open_type_takes_at_least_its_fields(tmp_path):
     assert '"age" is not present' in verdicts[4]
 
 
-def test_through_a_record_type_positional_order_is_unknown(tmp_path):
+def test_a_record_type_is_read_by_name_too(tmp_path):
     verdicts = checker(
         """\
-        type Person = (name: str, age: int)
-        def find() -> Person:
-            return (age=30, name="gil")
-        first, second = find()
-        one, two = (age=30, name="gil")
-        reveal_type(first)
-        reveal_type(one)
+        def get_batch() -> (x: int, y: int):
+            return (y=2, x=1)
+        x, y = get_batch()
+        (x=, y=) = get_batch()
         """,
         tmp_path,
     )
-    assert verdicts[6] == 'Type of "first" is "str | int"'  # unpack a typed record by name instead
-    assert verdicts[7] == 'Type of "one" is "int"'  # an inferred record keeps its written order
+    assert sorted(verdicts) == [3]  # positionally, x would be 2 here: the type allows either order
+    assert verdicts[3].startswith('"(x: int, y: int)" is not iterable')
 
 
 def depth(n: int):  # hover: def depth(n: int) -> Unknown
@@ -667,14 +694,15 @@ def pair(name: str, age: int) -> str:
     return f"{name}:{age}"
 
 
-def test_star_spreads_a_record_by_position(tmp_path):
-    assert pair(*(name="ann", age=30)) == "ann:30"  # `*` is by position, `**` by name
+def test_a_record_spreads_into_a_call_by_name_not_position(tmp_path):
+    assert pair(**(age=30, name="ann")) == "ann:30"
     verdicts = checker(
         """\
         def pair(name: str, age: int) -> str: ...
         pair(*(age=30, name="ann"))
+        pair(**(age=30, name="ann"))
         """,
         tmp_path,
     )
-    assert 'Argument of type "int" cannot be assigned to parameter "name"' in verdicts[2]
-    assert 'Argument of type "str" cannot be assigned to parameter "age"' in verdicts[2]
+    assert sorted(verdicts) == [2]
+    assert 'is not iterable' in verdicts[2]
