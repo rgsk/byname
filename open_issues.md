@@ -93,3 +93,19 @@ a `*Ts` one widen too). Only a caller that needs the literal sees it, a false er
 item to a `Literal["r", "w"]` parameter. Workaround: annotate the function (`-> tuple[Literal["r", "w"], int]`);
 annotated functions aren't rewritten. Accepted: labels in hover are worth more than literals here. Showing the
 labels in hover text only (the proxy) would keep literals but work only on the definition's own hover.
+
+## No syntax for function types; keyword-only callbacks can't be typed
+
+```python
+def fn(*, name: str, age: int) -> None: ...
+
+a: Callable[[str, int], None] = fn   # error: fn takes no positional arguments
+b: Callable[..., None] = fn          # accepted, but b(nme="x") isn't checked
+
+type Greet = (*, name: str, age: int) -> None   # wanted; today a syntax error
+```
+
+byname favours keyword-only functions, and `Callable` can only describe positional parameters, so a keyword-only
+function passed as a value, or held in a record field, has no type short of a hand-written Protocol with
+`def __call__(self, *, name: str, age: int) -> None: ...` (measured: that checks calls, missing `age` included).
+Plan in DEVELOPMENT.md, "Designed, not built": translate `(params) -> T` to that Protocol for the checker.
