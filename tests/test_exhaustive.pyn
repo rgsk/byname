@@ -612,6 +612,29 @@ def test_a_spread_of_known_records_is_typed_without_an_annotation(tmp_path):
     assert verdicts[4].startswith('Cannot access attribute "btach_size"')
 
 
+def test_replace_updates_a_record_and_a_spread_builds_a_new_one(tmp_path):
+    # both copy with a field changed; _replace keeps the record's type, a spread makes whatever it's given
+    r = (name="rahul", age=26)
+    assert r._replace(age=r.age + 1) == (**r, age=r.age + 1) == (name="rahul", age=27)
+    verdicts = checker(
+        """\
+        r = (name="rahul", age=26)
+        r._replace(agee=27)
+        r._replace(age="27")
+        typo = (**r, agee=27)
+        reveal_type(typo)
+        retyped = (**r, age="27")
+        reveal_type(retyped)
+        """,
+        tmp_path,
+    )
+    assert verdicts[2].startswith('No parameter named "agee"')  # a typo
+    assert 'cannot be assigned to parameter "age" of type "int"' in verdicts[3]  # another type
+    assert sorted(verdicts) == [2, 3, 5, 7]  # the spreads themselves are fine
+    assert verdicts[5] == 'Type of "typo" is "(name: str, age: int, agee: int)"'  # a new field, silently
+    assert verdicts[7] == 'Type of "retyped" is "(name: str, age: str)"'  # a new type, silently
+
+
 type Contact = (name: str, age: int, surname: str, city: str)
 
 

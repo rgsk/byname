@@ -154,6 +154,12 @@ pattern items is always a pattern, so a default record needs values: `user=(name
   `??` ([PEP 505](https://peps.python.org/pep-0505/) is deferred), so byname leaves it to plain Python,
   `email = user.email if user.email is not None else "none"`, rather than invent an operator that a
   future Python might define differently.
+- **Mutable records,** like `{name="rahul", age=26}` with `m.age += 1`. Immutability is what lets a record
+  be passed without the caller wondering whether it changed, and what makes it hashable (a set member,
+  a dict key). Code that changes values mostly changes keyed collections (`cnt[x] += 1`), not named
+  fields; for the rest there's `rec = rec._replace(age=rec.age + 1)` or a `@dataclass`. Braces couldn't
+  carry it cleanly either: `{**a, **b}` is a dict and `{name: str}` parses as one, so neither a spread-only
+  value nor the type could be written that way.
 
 [`examples/all.pyn`](examples/all.pyn) runs every feature, one assert per use.
 
