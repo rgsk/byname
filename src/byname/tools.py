@@ -79,7 +79,8 @@ def has_pyright_config(root: Path) -> bool:
 
 
 def remap(line: str, root: Path, out: Path, cache: dict) -> tuple[str | None, bool]:
-    """(line to print or None to drop, whether it was a location line)."""
+    """(line to print, None to drop it as generated code or "" as a quiet walrus label, whether it was a
+    location line)."""
     line = pretty(line)
     m = LOCATION.match(line)
     if not m:
@@ -106,6 +107,8 @@ def remap(line: str, root: Path, out: Path, cache: dict) -> tuple[str | None, bo
     off, how = hit
     if span := generated(how):
         off = span[0]
+    if tr.quiet(off, line):
+        return "", True  # a walrus labelling a returned tuple, called unused
     pos = tr.src_lines.position(off)
     loc = f"{rel.with_suffix('.pyn')}:{pos['line'] + 1}" + (f":{pos['character'] + 1}" if m["col"] else "")
     return f"{m['pre']}{loc}{m['rest']}", True
@@ -147,17 +150,22 @@ def main(argv: list[str]) -> int:
         args = ["--pythonpath", sys.executable, *args]
     proc = subprocess.run([resolve(cmd), *args], cwd=out, capture_output=True, text=True, check=False)
     cache: dict = {}
-    dropped = kept = 0
+    dropped = kept = quiet = 0
     lines = []
     for line in condense((proc.stdout + proc.stderr).splitlines()):
         new, located = remap(line, root, out, cache)
         if new is None:
             dropped += 1
+        elif new == "":
+            quiet += 1
         else:
             kept += located
             lines.append(new)
-    if dropped:  # the tool's own totals now overcount
+    if dropped or quiet:  # the tool's own totals now overcount
         lines = [ln for ln in lines if not SUMMARY.match(ln.strip())]
+    if dropped:
         lines.append(f"byname: hid {dropped} diagnostic(s) on generated code")
+    if quiet:
+        lines.append(f"byname: hid {quiet} unused-variable warning(s) on walrus labels in returns")
     print("\n".join(lines))
     return 0 if dropped and not kept else proc.returncode

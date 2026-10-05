@@ -108,10 +108,12 @@ class Translation:
         self.error: Exception | None = None
         self.problems: list[dict] = []  # byname diagnostics from tolerant translation
         self.fields: list[tuple[int, int]] = []  # source spans of record field names
+        self.labels: set[int] = set()  # where a walrus labelling a returned tuple starts (see Result.labels)
         try:
             r = transform(source, tolerant=True, checker=True)
             body, prelude, edits = r.body, r.prelude, r.edits
             self.fields = r.fields
+            self.labels = {s for s, _ in r.labels}
         except Exception as e:  # mid-edit code: send it raw; the checker reports the syntax error
             self.error = e
             body, prelude, edits = source, "", []
@@ -125,6 +127,10 @@ class Translation:
             for s, e, msg in r.problems:
                 rng = {"start": self.src_lines.position(s), "end": self.src_lines.position(e)}
                 self.problems.append({"range": rng, "severity": 1, "source": "byname", "message": msg})
+
+    def quiet(self, start: int, message: str) -> bool:
+        """The checker calls a walrus that labels a returned tuple unused: it's bound to name a position."""
+        return start in self.labels and "is not accessed" in message
 
     def _to_hidden(self, off: int, end: bool, touch: bool = False) -> int:
         g = self.map.to_body(off, end, touch)

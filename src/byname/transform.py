@@ -183,6 +183,7 @@ class Result:
     standins: list[tuple[int, int, str]] = field(default_factory=list)  # (start, end, text): plain-Python stand-ins, for formatting
     fields: list[tuple[int, int]] = field(default_factory=list)  # source spans of record field names, for highlighting
     inserted: list[int] = field(default_factory=list)  # source lines that got a generated line before them (see to_code)
+    labels: list[tuple[int, int]] = field(default_factory=list)  # source spans of walrus names labelling a returned tuple
 
 
 def field_error(name: str) -> str:
@@ -460,6 +461,7 @@ def transform(
     problems: list[tuple[int, int, str]] = []
     standins: list[tuple[int, int, str]] = []
     field_spans: list[tuple[int, int]] = []  # every record field name: in records, patterns and record types
+    label_spans: list[tuple[int, int]] = []  # `x` in `return (x := ..., ...)`: bound to name a position, never read
 
     def span(a: int, b: int | None = None) -> tuple[int, int]:
         return off(toks[a].start), off(toks[a if b is None else b].end)
@@ -824,7 +826,11 @@ def transform(
                 return ""
             name = toks[it[0]].string
             # it must survive the class name's `__` separators: `a__b` or `_a` would split wrong
-            return name if "__" not in name and name.strip("_") == name else ""
+            if "__" in name or name.strip("_") != name:
+                return ""
+            if len(it) > 1:  # a walrus: the checker would call it unused (see Result.labels)
+                label_spans.append(span(it[0]))
+            return name
 
         found: dict[tuple[str, ...], None] = {}
         for r, t in enumerate(toks):
@@ -1051,7 +1057,7 @@ def transform(
     if tuples:
         prelude += "".join(tuple_def(t) for t in tuples)
     standins.sort()
-    return Result(prelude, body, edits, problems, standins, sorted(field_spans), sorted(inserted))
+    return Result(prelude, body, edits, problems, standins, sorted(field_spans), sorted(inserted), sorted(label_spans))
 
 
 def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:

@@ -51,7 +51,8 @@ record is built and nothing that reads it changes meaning.
 - **Records or tuples:** a tuple fits values unpacked right where they're returned (`x, y = get_batch()`),
   and hover labels each position with the name returned there, a bare name or a walrus:
   `return x, y.to(device)` shows `-> tuple[x: Tensor, Tensor]`, and
-  `return (x := x.to(device), y := y.to(device))` shows `-> tuple[x: Tensor, y: Tensor]`. Any other
+  `return (x := x.to(device), y := y.to(device))` shows `-> tuple[x: Tensor, y: Tensor]` (a walrus name
+  there isn't reported unused). Any other
   expression has no label, and a written `-> tuple[...]` wins. Display only: at runtime it's a plain tuple,
   and `.x` is an error. A record fits a value that's kept, passed around, has many fields or may grow:
   adding a field breaks no reader.

@@ -809,6 +809,8 @@ class Proxy:
                 continue
             if (r["start"]["line"], r["start"]["character"]) in flagged:
                 continue  # half-typed pattern item: our message says it; drop the checker's echo
+            if doc.tr.quiet(doc.tr.src_lines.offset(r["start"]["line"], r["start"]["character"]), d.get("message", "")):
+                continue
             fields = positional_fields(d.get("message", ""))
             d = {**d, "range": r, "message": pretty(explain_fields(d.get("message", "")))}
             if fields and "data" not in d:

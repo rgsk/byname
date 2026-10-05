@@ -413,6 +413,19 @@ def test_mixed_record_list_is_checked_in_the_editor(lsp):
         msgs = [d["message"] for d in c.wait_diags(uri)]
     assert any('No parameter named "nme"' in m for m in msgs)
 
+def test_a_walrus_labelling_a_returned_tuple_is_not_called_unused(lsp):
+    # `(x := ...)` in a return names a position (hover shows tuple[x: ..., y: ...]); nothing reads it after
+    c, root, uri = lsp
+    text = MAIN + "def pair(a: int):\n    return (lo := a, hi := a + 1)\ndef other(a: int):\n    unused = a\n    return a\n"
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 960}, "contentChanges": [{"text": text}]}})
+    end, msgs = time.time() + 60, []
+    while time.time() < end and not any('"unused"' in m for m in msgs):  # skip diagnostics for the previous text
+        c.diags.pop(uri, None)
+        msgs = [d["message"] for d in c.wait_diags(uri)]
+    assert any('"unused" is not accessed' in m for m in msgs)  # other unused variables still are
+    assert not any('"lo"' in m or '"hi"' in m for m in msgs)
+
+
 def test_explicit_record_type_errors_in_the_editor(lsp):
     # any field order is fine for an explicit type; an extra field is named plainly, not as _byname_fieldset
     c, root, uri = lsp
