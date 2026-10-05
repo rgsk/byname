@@ -83,8 +83,8 @@ def uri_to_path(uri: str) -> Path:
     return Path(url2pathname(urlparse(uri).path))
 
 
-REC_RE = re.compile(r"_(rec|dct|typ|opn)_(\w+)")
-GENERATED_PREFIXES = ("_rec_", "_dct_", "_typ_", "_opn_")
+REC_RE = re.compile(r"_(rec|dct|typ|opn|tup)_(\w+)")
+GENERATED_PREFIXES = ("_rec_", "_dct_", "_typ_", "_opn_", "_tup_")
 # an exact record type's field-set mismatch, as pyright reports it: "...Literal['a,b,c']" ... "...Literal['a,b']"
 FIELDSET_RE = re.compile(r"""Literal\['([\w,]*)'\]" is not assignable to type "(?:\(\) -> )?Literal\['([\w,]*)'\]""")
 TARGET_RE = re.compile(r'is incompatible with protocol "_typ_(\w+?)\[')
@@ -121,7 +121,7 @@ def pretty(text: str) -> str:
     while m := REC_RE.search(text, i):
         out.append(text[i : m.start()])
         fields = m.group(2).split("__")
-        lp, rp = ("{", "}") if m.group(1) == "dct" else ("(", ", ...)") if m.group(1) == "opn" else ("(", ")")
+        lp, rp = {"dct": ("{", "}"), "opn": ("(", ", ...)"), "tup": ("tuple[", "]")}.get(m.group(1), ("(", ")"))
         j = m.end()
         if j < len(text) and text[j] == "[":
             args, depth, start = [], 0, j + 1
@@ -137,7 +137,7 @@ def pretty(text: str) -> str:
                 elif text[k] == "," and depth == 1:
                     args.append(text[start:k].strip())
                     start = k + 1
-            out.append(lp + ", ".join(f"{f}: {pretty(a)}" for f, a in zip(fields, args)) + rp)
+            out.append(lp + ", ".join(f"{f}: {pretty(a)}" if f else pretty(a) for f, a in zip(fields, args)) + rp)
         else:
             out.append(lp + ", ".join(fields) + rp)
         i = j

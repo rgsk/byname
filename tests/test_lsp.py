@@ -47,6 +47,8 @@ def test_pretty_record_types():
     assert pretty("_rec_a__b[dict[str, int], list[_rec_x[int]]]") == "(a: dict[str, int], b: list[(x: int)])"
     assert pretty('class "_rec_name__age"') == 'class "(name, age)"'  # unparametrised
     assert pretty("no records here") == "no records here"
+    assert pretty("-> _tup_lo__hi[int, int]") == "-> tuple[lo: int, hi: int]"  # a tuple returned by name
+    assert pretty("-> _tup_x__[Tensor, Tensor]") == "-> tuple[x: Tensor, Tensor]"  # the 2nd wasn't a bare name
     assert pretty("-> _dct_name__age[str, int]") == "-> {name: str, age: int}"  # what _asdict() returns
 
 

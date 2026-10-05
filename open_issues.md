@@ -83,3 +83,13 @@ literal), but only for TypedDicts: records are Protocols for the checker, so aft
 overload per field name narrows records in both branches (measured), but the translation can't tell whether
 the right side of `in` is a record, so it would rewrite every `in` (or every `"literal" in x`), and those lose
 basedpyright's own checks on `in` and TypedDict narrowing. Dropped for now.
+
+## A labelled tuple widens literal values
+
+`return name, age` with `name = "rahul"` is `tuple[name: str, age: int]` to the checker, where plain Python
+gives `tuple[Literal['rahul'], Literal[26]]`: the checker translation returns `_byname_tup_name__age(name, age)`,
+and pyright widens literals when it solves a generic call's type parameters (a `(t: tuple[T0, T1])` helper and
+a `*Ts` one widen too). Only a caller that needs the literal sees it, a false error such as passing the first
+item to a `Literal["r", "w"]` parameter. Workaround: annotate the function (`-> tuple[Literal["r", "w"], int]`);
+annotated functions aren't rewritten. Accepted: labels in hover are worth more than literals here. Showing the
+labels in hover text only (the proxy) would keep literals but work only on the definition's own hover.

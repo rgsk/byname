@@ -360,6 +360,15 @@ def test_output_files_read_records_by_name_only_too():
         sorted([ns["r"], ns["r"]])
 
 
+def test_a_returned_tuple_is_labelled_for_the_checker_only():
+    src = "def f(n):\n    lo = n\n    return lo, n + 1\ndef g() -> tuple[int, int]:\n    a = 1\n    return a, a\n"
+    r = transform(src, checker=True)
+    assert r.body.splitlines()[2] == "    return _byname_tup_lo__(lo, n + 1)"
+    assert r.body.splitlines()[5] == "    return a, a"  # annotated: left alone
+    assert "class _tup_lo__[T0, T1](tuple[T0, T1]): ..." in r.prelude
+    assert transform(src).body == src and transform(src).prelude == ""  # what runs: untouched
+
+
 def test_import_hook_runs_pyn_modules(tmp_path):
     (tmp_path / "people.pyn").write_text(
         "def make(*, name: str, age: int):\n"

@@ -205,6 +205,26 @@ def type_class(fields: tuple[str, ...], is_open: bool) -> str:
     return ("_opn_" if is_open else "_typ_") + "__".join(fields)
 
 
+def tuple_class(labels: tuple[str, ...]) -> str:
+    """A tuple returned by name, checker only: `return x, y.to(d)` is _tup_x__ (see label_returns)."""
+    return "_tup_" + "__".join(labels)
+
+
+def tuple_maker(labels: tuple[str, ...]) -> str:
+    return "_byname" + tuple_class(labels)
+
+
+def tuple_def(labels: tuple[str, ...]) -> str:
+    """A tuple subclass, so unpacking, indexing and assigning to `tuple[...]` work as on the tuple it is at
+    runtime, with no attributes: the labels are only the class's name, which hover shows."""
+    params = ", ".join(f"T{i}" for i in range(len(labels)))
+    args = ", ".join(f"a{i}: T{i}" for i in range(len(labels)))
+    return (
+        f"class {tuple_class(labels)}[{params}](tuple[{params}]): ...\n"
+        f"def {tuple_maker(labels)}[{params}]({args}, /) -> {tuple_class(labels)}[{params}]: ...  # pyright: ignore[reportReturnType]\n"
+    )
+
+
 def fieldset(fields: tuple[str, ...]) -> str:
     return ",".join(sorted(fields))
 
@@ -409,8 +429,12 @@ def transform(
 
     def items(open_i: int) -> list[list[int]]:
         # top-level comma-separated items inside a bracket, as token index lists
-        out, cur, j = [], [], open_i + 1
-        while j < pair[open_i]:
+        return split(open_i + 1, pair[open_i])
+
+    def split(j: int, stop: int) -> list[list[int]]:
+        # top-level comma-separated items in toks[j:stop], as token index lists
+        out, cur = [], []
+        while j < stop:
             if toks[j].string == ",":
                 out.append(cur)
                 cur = []
@@ -763,6 +787,75 @@ def transform(
         edits.append(Edit(at, at, lead + indent + text + "\n", display, marks))
         inserted.append(line)
 
+    def label_returns() -> dict[tuple[str, ...], None]:
+        """Checker only: `return x, y` in a function with no return annotation -> `return _byname_tup_x__y(x, y)`,
+        a tuple whose positions carry the names returned, so hover shows `tuple[x: Tensor, y: Tensor]`. An item
+        that isn't a bare name has no label (""). What runs is untouched."""
+        bodies: list[tuple[int, int, bool]] = []  # each def's body as a token range, and whether it's annotated
+        for d, t in enumerate(toks):
+            if t.string != "def" or t.type != tokenize.NAME or not is_name(toks[d + 1]):
+                continue
+            o = d + 2
+            if toks[o].string == "[":
+                o = pair[o] + 1
+            if o not in pair:
+                continue
+            j = pair[o] + 1
+            annotated = toks[j].string == "->"
+            while toks[j].string != ":" and toks[j].type != tokenize.ENDMARKER:
+                j = pair.get(j, j) + 1
+            k = j + 1
+            if toks[k].type == tokenize.NEWLINE:  # an indented body: up to its closing DEDENT
+                depth, k = 0, k + 1
+                while toks[k].type != tokenize.ENDMARKER:
+                    depth += {tokenize.INDENT: 1, tokenize.DEDENT: -1}.get(toks[k].type, 0)
+                    if depth == 0:
+                        break
+                    k += 1
+            else:  # `def f(): return x, y`
+                while toks[k].type not in (tokenize.NEWLINE, tokenize.ENDMARKER):
+                    k += 1
+            bodies.append((j, k, annotated))
+        def label(it: list[int]) -> str:
+            # a bare name, or the name a walrus binds: `x := x.to(d)`, `(x := x.to(d))`
+            if len(it) >= 3 and it[0] in pair and pair[it[0]] == it[-1]:
+                it = it[1:-1]
+            if not it or not is_name(toks[it[0]]) or not (len(it) == 1 or toks[it[1]].string == ":="):
+                return ""
+            name = toks[it[0]].string
+            # it must survive the class name's `__` separators: `a__b` or `_a` would split wrong
+            return name if "__" not in name and name.strip("_") == name else ""
+
+        found: dict[tuple[str, ...], None] = {}
+        for r, t in enumerate(toks):
+            if t.string != "return" or t.type != tokenize.NAME or toks[r - 1].string not in (";", ":") and toks[r - 1].type not in STMT_START:
+                continue
+            inside = [b for b in bodies if b[0] < r < b[1]]
+            if not inside or max(inside)[2]:  # the innermost def, annotated: its annotation is what hover shows
+                continue
+            end = r + 1
+            while toks[end].type not in (tokenize.NEWLINE, tokenize.ENDMARKER) and toks[end].string != ";":
+                end = pair.get(end, end) + 1
+            if end == r + 1:
+                continue
+            paren = toks[r + 1].string == "(" and pair.get(r + 1) == end - 1
+            its = items(r + 1) if paren else split(r + 1, end)  # `return (x, y)` / `return x, y`
+            if len(its) < 2:
+                continue
+            if any(is_kw(it) or toks[it[0]].string in ("*", "**") for it in its):
+                continue  # a record, or an unpacked item: positions unknown
+            labels = tuple(label(it) for it in its)
+            if not any(labels):
+                continue
+            found[labels] = None
+            whole = span(r + 1, end - 1)
+            if paren:
+                edits.append(Edit(whole[0], whole[0], tuple_maker(labels), whole))
+            else:
+                edits.append(Edit(whole[0], whole[0], tuple_maker(labels) + "(", whole))
+                edits.append(Edit(whole[1], whole[1], ")", whole))
+        return found
+
     for i, t in enumerate(toks):
         if t.type == tokenize.OP and t.string == "{" and i in pair:  # dict display: `{**u, **r}`
             wrap_kw(items(i))
@@ -922,6 +1015,8 @@ def transform(
         standins.append((at, at, PAT))
         expand_shorthand(its)
 
+    tuples = label_returns() if checker else {}
+
     # apply edits back-to-front
     edits.sort(key=lambda e: (e.start, e.end))
     body = src
@@ -953,6 +1048,8 @@ def transform(
         elif builds:
             prelude += BUILD_PRELUDE + BUILD_REC.replace("{sig}", "def _byname_rec(d: _Mp[str, _A], /) -> _A:")
             prelude += CTX_PRELUDE if checker else ""
+    if tuples:
+        prelude += "".join(tuple_def(t) for t in tuples)
     standins.sort()
     return Result(prelude, body, edits, problems, standins, sorted(field_spans), sorted(inserted))
 

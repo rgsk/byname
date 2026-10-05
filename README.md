@@ -48,6 +48,13 @@ record is built and nothing that reads it changes meaning.
 - **Equality** is by name and value: the same fields with the same values, in any written order, are equal
   and hash alike, so `(x=1, y=2) == (y=2, x=1)`. A record never equals a plain tuple.
 - **They print the way you write them:** `(name='Rahul', age=26)`.
+- **Records or tuples:** a tuple fits values unpacked right where they're returned (`x, y = get_batch()`),
+  and hover labels each position with the name returned there, a bare name or a walrus:
+  `return x, y.to(device)` shows `-> tuple[x: Tensor, Tensor]`, and
+  `return (x := x.to(device), y := y.to(device))` shows `-> tuple[x: Tensor, y: Tensor]`. Any other
+  expression has no label, and a written `-> tuple[...]` wins. Display only: at runtime it's a plain tuple,
+  and `.x` is an error. A record fits a value that's kept, passed around, has many fields or may grow:
+  adding a field breaks no reader.
 - **Form:** one field needs no trailing comma (`(name=)`). Records can nest, and can appear anywhere an expression can, including comprehensions and lambdas.
 - **Field names** can't start with `_`, and can't repeat.
 
@@ -154,6 +161,13 @@ pattern items is always a pattern, so a default record needs values: `user=(name
   `??` ([PEP 505](https://peps.python.org/pep-0505/) is deferred), so byname leaves it to plain Python,
   `email = user.email if user.email is not None else "none"`, rather than invent an operator that a
   future Python might define differently.
+- **Flagging a swapped unpack,** like `y, x = get_batch()` when it returns `x, y`. It could only catch a
+  swap under the returned names, never `yb, xb = get_batch()`, the same mistake under names of your own, so
+  it would suggest unpacks are checked when most aren't. Hover shows the order where you write the unpack.
+- **Labels written in a tuple type,** like `-> tuple[x: Tensor, y: Tensor]`. It's valid Python already
+  (two slices, `x:Tensor` and `y:Tensor`), and up to Python 3.13 it raises `NameError` when the `def`
+  runs. Nothing would check the labels against what's returned either. Leave the function unannotated and
+  hover shows `tuple[x: Tensor, y: Tensor]` from `return x, y`; annotate a record for names that are checked.
 - **Mutable records,** like `{name="rahul", age=26}` with `m.age += 1`. Immutability is what lets a record
   be passed without the caller wondering whether it changed, and what makes it hashable (a set member,
   a dict key). Code that changes values mostly changes keyed collections (`cnt[x] += 1`), not named

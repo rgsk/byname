@@ -260,6 +260,47 @@ def test_a_record_is_hashable_so_it_can_be_a_dict_key():
     assert seen[(age=26, name="rahul")] == "found"  # equal records hash alike
 
 
+def lo_hi(xs: list[int]):
+    lo, hi = min(xs), max(xs)
+    return lo, hi
+
+
+def test_a_returned_tuple_shows_the_names_it_was_returned_from(tmp_path):
+    # Want positions? Return a tuple: hover labels each position with the name returned there, so the order
+    # is documented with nothing written. A plain tuple at runtime, read by position as usual.
+    lo, hi = lo_hi([3, 1, 2])
+    assert (lo, hi) == (1, 3) and type(lo_hi([1])) is tuple
+    verdicts = checker(
+        """\
+        def get_batch(n: int):
+            x, y = [n], "s"
+            return x, y.upper()
+        def lo_hi(n: int):
+            lo, hi = n, n + 1
+            return lo, hi
+        def annotated(n: int) -> tuple[int, int]:
+            lo = n
+            return lo, lo
+        reveal_type(get_batch)
+        reveal_type(lo_hi)
+        reveal_type(annotated)
+        lo, hi = lo_hi(1)
+        reveal_type(hi)
+        lo_hi(1).hi
+        def moved(x: list[int], y: list[int]):
+            return (x := x * 2, y := y * 2)  # a walrus labels its position too
+        reveal_type(moved)
+        """,
+        tmp_path,
+    )
+    assert verdicts[10] == 'Type of "get_batch" is "(n: int) -> tuple[x: list[int], str]"'  # `y.upper()` isn't a name
+    assert verdicts[11] == 'Type of "lo_hi" is "(n: int) -> tuple[lo: int, hi: int]"'
+    assert verdicts[12] == 'Type of "annotated" is "(n: int) -> tuple[int, int]"'  # what's written wins
+    assert verdicts[14] == 'Type of "hi" is "int"'
+    assert verdicts[15].startswith('Cannot access attribute "hi"')  # labels are for reading, not attributes
+    assert verdicts[18] == 'Type of "moved" is "(x: list[int], y: list[int]) -> tuple[x: list[int], y: list[int]]"'
+
+
 # ============================================================================
 # 4. DESTRUCTURING: bind fields to locals by name
 # ============================================================================
