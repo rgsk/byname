@@ -295,6 +295,7 @@ class Proxy:
         self.own_triggers: set[str] = set()
         self.field_type: int | None = None  # semantic token type for record field names ("property")
         self.final_field: tuple[int, int] | None = None  # (readonly, static) modifier bits
+        self.callable_types: set[int] = set()  # "function", "method": beat the field colour (see remap_tokens)
         self.output_on_save = False  # byname.outputOnSave: write <file>.pyn.py on every save
         self.strip_main = False  # byname.outputStripMain: drop `if __name__ == "__main__":` from it
         # byname.diagnosticsOnSave: hold diagnostics back while typing, show the saved text's ones
@@ -768,6 +769,7 @@ class Proxy:
                         stp["full"] = True  # we remap whole token lists; no delta support
                         types = stp.get("legend", {}).get("tokenTypes", [])
                         self.field_type = types.index("property") if "property" in types else None
+                        self.callable_types = {types.index(t) for t in ("function", "method") if t in types}
                         mods = stp.get("legend", {}).get("tokenModifiers", [])
                         if "readonly" in mods and "static" in mods:
                             self.final_field = (1 << mods.index("readonly"), 1 << mods.index("static"))
@@ -777,7 +779,7 @@ class Proxy:
                     self.own_triggers = {c for c in EXTRA_TRIGGERS if c not in have}
                     have.extend(sorted(self.own_triggers))
                 elif req.startswith("textDocument/semanticTokens"):
-                    msg = {**msg, "result": {"data": remap_tokens(msg["result"].get("data", []), doc, self.field_type, self.final_field)}}
+                    msg = {**msg, "result": {"data": remap_tokens(msg["result"].get("data", []), doc, self.field_type, self.final_field, self.callable_types)}}
                 else:
                     result = self.to_editor(msg["result"], doc)
                     msg = {**msg, "result": None if result is DROP else result}
@@ -886,14 +888,21 @@ def still_shown(shown: list, new: list) -> list:
 
 
 def remap_tokens(
-    data: list[int], doc: Doc | None, field_type: int | None = None, final_field: tuple[int, int] | None = None
+    data: list[int],
+    doc: Doc | None,
+    field_type: int | None = None,
+    final_field: tuple[int, int] | None = None,
+    callable_types: frozenset[int] | set[int] = frozenset(),
 ) -> list[int]:
     """Semantic tokens come as 5-int groups, positions relative to the previous token.
     Decode, map each token to the source, drop those on generated text, re-encode.
     field_type: the legend index to give record field names (the checker gives them none).
     final_field: (readonly, static) modifier bits. A field read through a record type (`p.age` where
     `p: (age: int, ...)`) is a Final Protocol attribute, `readonly static`; a record's own field is just
-    `static`. Dropping `readonly` from that pair colours both alike."""
+    `static`. Dropping `readonly` from that pair colours both alike.
+    callable_types: a field name the checker colours as a function or method keeps that colour. A pattern
+    label reads an attribute (`(decode=d) = tok` is `d = tok.decode`), so it looks like `tok.decode`; a
+    shorthand (`(encode=) = tok`, `(f=)`) is also the local. Record-literal labels are keyword arguments."""
     if doc is None:
         return data
     tokens, line, col = [], 0, 0
@@ -910,9 +919,13 @@ def remap_tokens(
             mods &= ~final_field[0]
         tokens.append((s["line"], s["character"], e["character"] - s["character"], typ, mods))
     if field_type is not None:
+        spans = set()
         for fs, fe in doc.tr.fields:
             p = doc.tr.src_lines.position(fs)
-            tokens.append((p["line"], p["character"], fe - fs, field_type, 0))
+            spans.add((p["line"], p["character"], fe - fs))
+        callables = {t[:3] for t in tokens if t[3] in callable_types and t[:3] in spans}
+        tokens = [t for t in tokens if t[:3] not in callables or t[3] in callable_types]
+        tokens += [(*sp, field_type, 0) for sp in spans - callables]
     out, pl, pc, last_end = [], 0, 0, (-1, -1)
     for ln, c, length, typ, mods in sorted(tokens):
         if (ln, c) < last_end:

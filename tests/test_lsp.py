@@ -263,6 +263,28 @@ def test_spread_names_and_fields_keep_their_colours(lsp):
     assert got.get((2, "c")) == "property", got  # the generic path, for comparison
 
 
+def test_pattern_labels_reading_methods_are_coloured_as_methods(lsp):
+    # a pattern label reads an attribute, so it's coloured like one: `decode=` as `tok.decode` (method),
+    # `n=` as `tok.n` (property); a shorthand is also the local
+    c, root, uri = lsp
+    text = (
+        "class Tok:\n    def __init__(self): self.n = 65\n    def encode(self, s: str) -> int: return 1\n"
+        "    def decode(self, i: int) -> str: return ''\n(encode=, decode=renamed, n=) = Tok()\nr = (encode=)\n"
+    )
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 994}, "contentChanges": [{"text": text}]}})
+    legend = c.init["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"]
+    data = c.request("textDocument/semanticTokens/full", {"textDocument": {"uri": uri}})["data"]
+    lines, line, col, got = text.splitlines(), 0, 0, {}
+    for i in range(0, len(data), 5):
+        dl, dc, length, typ, _ = data[i : i + 5]
+        line, col = line + dl, (col + dc if dl == 0 else dc)
+        got[(line, lines[line][col : col + length])] = legend[typ]
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 995}, "contentChanges": [{"text": MAIN}]}})
+    assert got[(4, "encode")] == got[(4, "decode")] == "method" and got[(4, "renamed")] == "function", got
+    assert got[(4, "n")] == "property", got
+    assert got[(5, "encode")] == "function", got  # a record built from the local `encode`
+
+
 def test_fields_read_through_record_types_look_like_record_fields(lsp):
     # `p.age` through a record type reads a Final Protocol attribute (readonly static); a record's own
     # field is static. Both must get the same token, or themes colour them differently
