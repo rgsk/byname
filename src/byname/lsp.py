@@ -727,6 +727,11 @@ class Proxy:
         def analysis(cfg: dict, based: bool) -> dict:
             cfg = dict(cfg or {})
             cfg["extraPaths"] = list(cfg.get("extraPaths") or []) + self.extra_paths()
+            if cfg.get("stubPath") == "typings":
+                # the BasedPyright extension's default, sent as if set: the checker then reports a missing
+                # `typings` folder as an error ("stubPath ... is not a valid directory"). Unset, it falls
+                # back to the same folder silently
+                del cfg["stubPath"]
             if based:
                 # byname.typeCheckingMode, not the editor's basedpyright one: that's for .py files (and
                 # "recommended" by default with the BasedPyright extension); a project pyright config still wins

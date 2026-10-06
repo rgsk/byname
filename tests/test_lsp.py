@@ -240,6 +240,22 @@ def test_pyn_mode_is_bynames_setting_not_the_editors():
             assert out[0]["analysis"]["typeCheckingMode"] == out[1]["typeCheckingMode"] == ours
 
 
+def test_default_stub_path_is_not_sent_as_set():
+    # the BasedPyright extension's default `stubPath: "typings"` arrives as if set, and the checker then pops
+    # up "stubPath .../typings is not a valid directory" in a project without one; unset, it uses the same
+    # folder quietly. A path the user chose is passed on
+    from types import SimpleNamespace
+
+    from byname.lsp import Proxy
+
+    fake = SimpleNamespace(extra_paths=lambda: [], check_mode="standard")
+    items = [{"section": "basedpyright"}, {"section": "basedpyright.analysis"}, {"section": "python.analysis"}]
+    out = Proxy.inject_config(fake, items, [{"analysis": {"stubPath": "typings"}}, {"stubPath": "typings"}, {"stubPath": "typings"}])
+    assert all("stubPath" not in cfg for cfg in (out[0]["analysis"], out[1], out[2]))
+    out = Proxy.inject_config(fake, items[1:2], [{"stubPath": "stubs"}])
+    assert out[0]["stubPath"] == "stubs"
+
+
 def test_only_our_command_is_advertised(lsp):
     # VS Code registers each listed command; basedpyright's own would clash with the BasedPyright
     # extension ("command 'basedpyright.createtypestub' already exists") when both are installed
