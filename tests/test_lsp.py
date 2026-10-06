@@ -241,18 +241,15 @@ def test_definition_of_destructured_local_covers_the_word(lsp):
     assert snippet(MAIN, rng) == "greeting"
 
 
-def test_without_a_project_config_the_editors_mode_applies_standard_by_default(tmp_path):
-    # no [tool.basedpyright] / pyrightconfig.json: basedpyright.analysis.typeCheckingMode from the editor,
-    # "standard" if unset rather than basedpyright's noisy "recommended"
-    from types import SimpleNamespace
-
+def test_the_editors_mode_applies_standard_by_default():
+    # basedpyright.analysis.typeCheckingMode from the editor, "standard" if unset rather than basedpyright's
+    # noisy "recommended" (a project config decides over both: test_a_project_config_decides_over_the_editors_settings)
     from byname.lsp import Proxy
 
-    fake = SimpleNamespace(root=tmp_path)
     items = [{"section": "basedpyright"}, {"section": "basedpyright.analysis"}]
     for editor, want in (("off", "off"), ("strict", "strict"), (None, "standard")):
         sent = {"analysis": {"typeCheckingMode": editor}} if editor else None
-        out = Proxy.inject_config(fake, items, [sent, {"typeCheckingMode": editor} if editor else None])
+        out = Proxy.inject_config(items, [sent, {"typeCheckingMode": editor} if editor else None])
         assert out[0]["analysis"]["typeCheckingMode"] == out[1]["typeCheckingMode"] == want
 
 
@@ -933,10 +930,10 @@ def test_python_diagnostics_off_keeps_only_syntax_errors_and_hints(tmp_path):
 
 
 def test_a_pyn_in_a_folder_made_after_startup_imports_its_neighbours(tmp_path):
-    # the checker gets the folders holding .pyn when it asks for its settings; a .pyn in a folder made
-    # later (files moved, a new package) must still import the .py and .pyn next to it
+    # file events sync the mirror: a .pyn in a folder made later (files moved, a new package) imports the .py and
+    # .pyn next to it
     c, root, uri = start(tmp_path)
-    c.wait_diags(uri)  # settings asked and answered, as when VS Code opens the first file
+    c.wait_diags(uri)  # the checker is up, as when VS Code opens the first file
     (root / "pkg").mkdir()
     (root / "pkg" / "helper_py.py").write_text("def a() -> int:\n    return 1\n")
     (root / "pkg" / "helper_pyn.pyn").write_text("def b():\n    return (x=1)\n")

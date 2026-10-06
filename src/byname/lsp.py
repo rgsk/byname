@@ -277,14 +277,6 @@ def is_position(v) -> bool:
     return isinstance(v, dict) and "line" in v and "character" in v and len(v) == 2
 
 
-def has_pyright_config(root: Path) -> bool:
-    """The project configures the checker itself: pyrightconfig.json, or [tool.basedpyright] / [tool.pyright]."""
-    if (root / "pyrightconfig.json").exists():
-        return True
-    pp = root / "pyproject.toml"
-    return pp.exists() and re.search(r"^\[tool\.(based)?pyright", pp.read_text(), re.MULTILINE) is not None
-
-
 def resolve_checker(cmd: list[str]) -> list[str]:
     """Find the checker next to this interpreter first, so a venv's basedpyright works without PATH."""
     local = Path(sys.executable).parent / cmd[0]
@@ -1015,7 +1007,8 @@ class Proxy:
                 out.setdefault((self.mirror / rel).as_uri(), c.get("type", 2))
         return [{"uri": u, "type": t} for u, t in out.items()] + passed
 
-    def inject_config(self, items: list[dict], result: list) -> list:
+    @staticmethod
+    def inject_config(items: list[dict], result: list) -> list:
         """byname's defaults in the checker's settings, whichever shape it asks in: pyright asks for
         `python.analysis`, basedpyright for `python` / `basedpyright` with a nested `analysis`. A project config
         decides over all of them (the checker ignores the editor's analysis settings then)."""
@@ -1096,10 +1089,6 @@ class Proxy:
 
         if method == "workspace/configuration" and mid is not None:
             self.server_requests[mid] = msg.get("params", {}).get("items", [])
-        elif method == "workspace/workspaceFolders" and mid is not None:  # we serve one root: the mirror
-            assert self.mirror is not None and self.root is not None
-            self.server.send({"jsonrpc": "2.0", "id": mid, "result": [{"uri": self.mirror.as_uri(), "name": self.root.name}]})
-            return
         elif mid is not None and method in ("workspace/applyEdit", "window/showDocument"):  # mirror uris -> the editor's
             msg = {**msg, "params": self.to_editor(msg.get("params"), None)}
         elif method == "textDocument/publishDiagnostics":

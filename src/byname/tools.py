@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .lsp import LOAD_EXT_RE, explain_fields, has_pyright_config, pretty
+from .lsp import LOAD_EXT_RE, explain_fields, pretty
 from .srcmap import Translation, generated
 
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
@@ -32,6 +32,14 @@ NB_HEADER = re.compile(r"^(?P<path>\S+\.ipynb)(?P<rest> - cell \d+)$")  # basedp
 GENERATED_STYLE = re.compile(r"\bE70[123]\b")
 HELPER = re.compile(r"`_byname_\w*`")
 TOO_LONG = re.compile(r"\bE501 Line too long \(\d+ > (\d+)\)")  # measured on the translation's longer line
+
+
+def has_pyright_config(root: Path) -> bool:
+    """The project configures the checker itself: pyrightconfig.json, or [tool.basedpyright] / [tool.pyright]."""
+    if (root / "pyrightconfig.json").exists():
+        return True
+    pp = root / "pyproject.toml"
+    return pp.exists() and re.search(r"^\[tool\.(based)?pyright", pp.read_text(), re.MULTILINE) is not None
 
 
 def resolve(cmd: str) -> str:
