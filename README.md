@@ -218,6 +218,17 @@ editor <--LSP--> byname lsp <--LSP--> basedpyright
 `byname lsp` translates each `.pyn` to Python in memory, hands it to basedpyright, and maps every
 position back. Hidden translations live in `~/.cache/byname/`, never in your project.
 
+**byname is the workspace's Python language server:** it serves `.pyn`, `.py` and Jupyter notebooks,
+so turn the BasedPyright (or Pylance) extension off in a workspace where byname is on. `.py` files and
+notebooks without `%load_ext byname` go to basedpyright as they are. In a notebook with
+`%load_ext byname`, every cell is checked as `.pyn` (see [Notebooks](#notebooks)). In a plain Python
+project, use any language server you like.
+
+basedpyright's own settings apply to every file: `basedpyright.analysis.typeCheckingMode` (`standard`
+if unset) and the rest, overridden by a project config (`[tool.basedpyright]` in `pyproject.toml`,
+`pyrightconfig.json`). Formatting and Ruff's fixes on save are served for `.pyn` and byname notebook
+cells; `.py` files keep your Python formatter.
+
 **What you get in `.pyn` files:**
 - **Navigation and editing:** hover, completion, go to definition, rename, outline, and colours from semantic highlighting.
 - **Errors** shown where you wrote the code.
@@ -236,7 +247,8 @@ vsce package --allow-missing-repository --skip-license -o byname.vsix
 code --install-extension byname.vsix
 ```
 
-The extension starts `<workspace>/.venv/bin/byname lsp`.
+The extension starts `<workspace>/.venv/bin/byname lsp`, else `byname lsp` from `PATH`; with neither (a project
+without byname) it stays off.
 
 | Setting | Default | |
 |---|---|---|
@@ -245,7 +257,6 @@ The extension starts `<workspace>/.venv/bin/byname lsp`.
 | `byname.outputOnSave` | `false` | on save, write the translation next to the file as `<name>.pyn.py` |
 | `byname.outputStripMain` | `false` | leave the `if __name__ == "__main__":` block out of `<name>.pyn.py` |
 | `byname.diagnosticsOnSave` | `false` | new errors appear on save, not while typing; fixed ones disappear at once |
-| `byname.typeCheckingMode` | `"standard"` | basedpyright's mode for `.pyn` files; `.py` files keep `basedpyright.analysis.typeCheckingMode`, so the two can differ. A project pyright config overrides both |
 
 The command **"byname: Write Python Output"** writes `<name>.pyn.py` on demand.
 
@@ -255,9 +266,13 @@ The command **"byname: Write Python Output"** writes `<name>.pyn.py` on demand.
 
 `byname tool` mirrors the project into `~/.cache`, with `.pyn` files translated and everything else
 symlinked. It runs the tool there and maps `file:line:col` back. Your project's tool config applies.
+Notebooks work too: one with `%load_ext byname` has each code cell translated, and errors point at
+the cell as written (`nb.ipynb:cell 4:2:5` from Ruff, `nb.ipynb:3:2:5` from basedpyright, which counts
+code cells only). `.py` files and plain notebooks are checked as they are, with basedpyright in
+`standard` mode unless the project configures it.
 
 ```
-byname tool ruff check --output-format=concise file.pyn
+byname tool ruff check --output-format=concise file.pyn   # or .py, .ipynb
 byname tool basedpyright file.pyn
 ```
 
@@ -319,8 +334,9 @@ pass between cells (equal by name and value whichever cell built them), and trac
 as written, at its own line numbers. The kernel's `byname` must be the one installed in the notebook's
 environment, and `import foo` finds `foo.pyn` there too. `%unload_ext byname` turns it off.
 
-The editor still checks notebook cells as plain Python, so byname syntax is underlined there; `.pyn`
-files get the full editor support below.
+In VS Code, the byname extension checks the cells as `.pyn` (hover, errors, completion, formatting), each
+cell the way the kernel runs it, with names flowing from cell to cell. Typing `%load_ext byname` into
+a cell switches the notebook over at once. See [Editor support](#editor-support-vs-code).
 
 ## Output files
 
@@ -366,3 +382,7 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for design decisions, status and the code m
 uv sync --all-extras
 uv run pytest
 ```
+
+`BYNAME_DEBUG=1 byname tool ...` also prints what byname hid from the tool's output: findings on its
+generated code, and unused-variable warnings on walrus labels. Without it the output reads like the
+tool's own, totals recounted.

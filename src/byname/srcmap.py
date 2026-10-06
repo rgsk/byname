@@ -129,8 +129,9 @@ class Translation:
                 self.problems.append({"range": rng, "severity": 1, "source": "byname", "message": msg})
 
     def quiet(self, start: int, message: str) -> bool:
-        """The checker calls a walrus that labels a returned tuple unused: it's bound to name a position."""
-        return start in self.labels and "is not accessed" in message
+        """The checker (or Ruff's F841) calls a walrus that labels a returned tuple unused: it's bound to
+        name a position."""
+        return start in self.labels and ("is not accessed" in message or "is assigned to but never used" in message)
 
     def _to_hidden(self, off: int, end: bool, touch: bool = False) -> int:
         g = self.map.to_body(off, end, touch)

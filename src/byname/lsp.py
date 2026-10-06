@@ -1,10 +1,14 @@
-"""byname lsp: language server for .pyn, proxying a Python type checker.
+"""byname lsp: language server for .pyn, .py and notebooks, proxying a Python type checker.
 
     editor <--LSP--> byname lsp <--LSP--> checker (basedpyright-langserver by default)
 
 The checker sees each .pyn as a shadow .py file holding its translation: open documents are sent
 in memory, and every .pyn in the workspace is also written to a shadow directory so imports
 resolve. Positions are mapped both ways; everything else passes through untouched.
+
+.py files go to the checker as they are: byname syntax can't run there. So do notebooks, unless a
+cell loads byname (`%load_ext byname`, see notebook.py): then every cell is translated on its own,
+as the kernel runs it, and keeps its own URI on the checker's side, which chains cells itself.
 """
 
 import hashlib
@@ -32,6 +36,8 @@ PLACEHOLDER = "__byname_slot"  # stands in for an empty pattern item while compl
 EXTRA_TRIGGERS = ["(", ","]  # pop completion in pattern slots, like TS does after `{` / `,`
 FIX_ALL_KIND, ORGANIZE_KIND = "source.fixAll", "source.organizeImports"  # ruff code actions, served by us
 METHOD = 2  # CompletionItemKind
+# a cell that makes the notebook's cells .pyn (IPython takes one module per %load_ext)
+LOAD_EXT_RE = re.compile(r"^[ \t]*%load_ext[ \t]+byname[ \t]*(?:#.*)?$", re.MULTILINE)
 # methods records and tuples bring along (byname's `keys`, tuple's); a class's own methods stay
 MACHINERY = {"keys", "count", "index"}
 
@@ -282,6 +288,26 @@ class Doc:
         self.tr = Translation(text)
 
 
+class Notebook:
+    def __init__(self, uri: str, version: int | None, cells: list[str]):
+        self.uri = uri
+        self.version = version
+        self.cells = cells  # cell document uris, in order (markdown cells too)
+        self.byname = False  # a cell runs `%load_ext byname`: cells are translated
+
+
+def apply_changes(text: str, changes: list[dict]) -> str:
+    """Apply LSP content changes, ranged (incremental) or whole-text, in order."""
+    for ch in changes:
+        if "range" not in ch:
+            text = ch["text"]
+            continue
+        lines = LineIndex(text)
+        s, e = (lines.offset(ch["range"][k]["line"], ch["range"][k]["character"]) for k in ("start", "end"))
+        text = text[:s] + ch["text"] + text[e:]
+    return text
+
+
 # --- the proxy ---------------------------------------------------------------
 
 
@@ -292,7 +318,12 @@ class Proxy:
         self.server = Writer(self.proc.stdin)
         self.root: Path | None = None
         self.shadow_root: Path | None = None
-        self.docs: dict[Path, list[Doc]] = {}  # open .pyn by path; recent versions, newest last
+        # open .pyn by path, and cells of byname notebooks by uri; recent versions, newest last
+        self.docs: dict[Path | str, list[Doc]] = {}
+        self.notebooks: dict[str, Notebook] = {}  # open notebooks by uri
+        self.cell_text: dict[str, str] = {}  # every open notebook cell's text, by uri
+        self.cell_version: dict[str, int | None] = {}  # its editor version
+        self.cell_nb: dict[str, str] = {}  # its notebook's uri
         self.pending: dict = {}  # editor request id -> (method, Doc)
         self.own_actions: dict = {}  # codeAction request id -> byname's quick fixes, added to the checker's
         self.server_requests: dict = {}  # checker request id -> configuration items
@@ -305,7 +336,6 @@ class Proxy:
         self.callable_types: set[int] = set()  # "function", "method": beat the field colour (see remap_tokens)
         self.output_on_save = False  # byname.outputOnSave: write <file>.pyn.py on every save
         self.strip_main = False  # byname.outputStripMain: drop `if __name__ == "__main__":` from it
-        self.check_mode = "standard"  # byname.typeCheckingMode: the checker's mode for .pyn files
         # byname.diagnosticsOnSave: hold diagnostics back while typing, show the saved text's ones
         self.diags_on_save = False
         self.saved: dict[Path, int | None] = {}  # editor version of the last saved text, per open .pyn
@@ -337,21 +367,39 @@ class Proxy:
     def is_pyn(self, uri) -> bool:
         return isinstance(uri, str) and uri.startswith("file:") and uri.endswith(".pyn")
 
+    def key(self, uri) -> Path | str | None:
+        """Where an editor document's versions are kept in self.docs: a .pyn by path, a byname
+        notebook's cell by uri. None: the document goes to the checker as it is."""
+        if self.is_pyn(uri):
+            return uri_to_path(uri)
+        if isinstance(uri, str) and uri in self.docs:
+            return uri
+        return None
+
+    def checker_uri(self, key: Path | str) -> str:
+        return self.shadow_path(key).as_uri() if isinstance(key, Path) else key
+
     def doc_for_shadow(self, uri: str, version=None) -> Doc | None:
+        if isinstance(uri, str) and uri in self.docs:  # a byname notebook's cell: same uri both sides
+            return self.pick(self.docs[uri], version)
         if not (isinstance(uri, str) and uri.startswith("file:")):
             return None
         pyn = self.pyn_path(uri_to_path(uri))
         if pyn is None:
             return None
         if versions := self.docs.get(pyn):
-            for d in reversed(versions):
-                if version is None or d.sent == version:
-                    return d
-            return versions[-1]
+            return self.pick(versions, version)
         try:
             return Doc(pyn.as_uri(), pyn.read_text(encoding="utf-8"), None)
         except OSError:
             return None
+
+    @staticmethod
+    def pick(versions: list[Doc], version) -> Doc:
+        for d in reversed(versions):
+            if version is None or d.sent == version:
+                return d
+        return versions[-1]
 
     # shadows on disk ----------------------------------------------------
 
@@ -493,7 +541,6 @@ class Proxy:
             self.output_on_save = bool(opts.get("outputOnSave"))
             self.strip_main = bool(opts.get("outputStripMain"))
             self.diags_on_save = bool(opts.get("diagnosticsOnSave"))
-            self.check_mode = opts.get("typeCheckingMode") or "standard"
             self.pending[mid] = ("initialize", None)
             self.server.send(msg)
             return
@@ -502,9 +549,19 @@ class Proxy:
             self.client.send(self.run_write_output(mid, (params.get("arguments") or [None])[0]))
             return
 
+        if method and method.startswith("notebookDocument/"):
+            self.on_notebook(msg)
+            return
+
         td = params.get("textDocument") or {}
         uri = td.get("uri")
-        if not self.is_pyn(uri):
+        key = self.key(uri)
+        if key is None:
+            if method == "textDocument/formatting" or (method == "textDocument/codeAction" and source_kind(params)):
+                # .py files and plain notebooks: we advertise formatting and Ruff's source actions for
+                # .pyn; the checker has neither. Nothing to do here, so the editor's own formatter is it
+                self.client.send({"jsonrpc": "2.0", "id": mid, "result": []})
+                return
             if method == "workspace/didChangeWatchedFiles":
                 msg = {**msg, "params": {"changes": [self.watched(c) for c in params.get("changes", [])]}}
             elif mid is not None:  # e.g. workspace/symbol: results may still point into shadows
@@ -512,54 +569,24 @@ class Proxy:
             self.server.send(msg)
             return
 
-        path = uri_to_path(uri)
-        shadow = self.shadow_path(path).as_uri()
-
-        if method == "textDocument/didOpen":
-            doc = Doc(uri, td["text"], td.get("version"))
-            doc.sent = self.next_version()
-            self.docs[path] = [doc]
-            self.saved[path] = doc.version  # opened from disk, so this text is the saved one
-            self.write_shadow(path, td["text"])
-            sent = {"uri": shadow, "languageId": "python", "version": doc.sent, "text": doc.tr.hidden}
-            self.server.send({**msg, "params": {"textDocument": sent}})
-            return
-        if method == "textDocument/didChange":
-            text = params["contentChanges"][-1]["text"]  # we advertise full sync
-            doc = Doc(uri, text, td.get("version"))
-            self.docs.setdefault(path, []).append(doc)
-            del self.docs[path][:-5]
-            self.send_text(path, doc.tr.hidden, doc)
-            return
-        if method == "textDocument/didSave":
-            versions = self.docs.get(path)
-            self.write_shadow(path, versions[-1].tr.source if versions else None)
-            self.server.send({**msg, "params": {"textDocument": {"uri": shadow}}})
-            if self.output_on_save and versions:
-                self.write_output(path, versions[-1])
-            if versions:
-                self.release_held(path, versions[-1].version)
-            return
-        if method == "textDocument/didClose":
-            self.docs.pop(path, None)
-            self.saved.pop(path, None)
-            self.held.pop(path, None)
-            self.shown.pop(path, None)
-            self.server.send({**msg, "params": {"textDocument": {"uri": shadow}}})
-            self.client.send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": uri, "diagnostics": []}})
+        if isinstance(key, Path) and self.on_pyn_sync(msg, key):
             return
 
-        versions = self.docs.get(path)
-        doc = versions[-1] if versions else Doc(uri, path.read_text(encoding="utf-8"), None)
+        versions = self.docs.get(key)  # a cell's are always there; a .pyn's while it's open
+        doc = versions[-1] if versions else Doc(uri, Path(key).read_text(encoding="utf-8"), None)
+        # a cell's notebook file stands in for its path (Ruff's config, error messages)
+        path = key if isinstance(key, Path) else uri_to_path(self.cell_nb[key])
         if mid is not None:
             self.pending[mid] = (method, doc)
-        if method == "textDocument/completion" and self.complete_slot(msg, path, doc):
+        if method == "textDocument/completion" and self.complete_slot(msg, key, doc):
             return
         if method == "textDocument/formatting":
             self.client.send(self.format(mid, path, doc))
             return
         if method == "textDocument/codeAction" and (kind := source_kind(params)):
-            self.client.send(self.fix(mid, path, doc, kind))
+            # a cell alone can't say which imports are unused: later cells may use them
+            ok = isinstance(key, Path)
+            self.client.send(self.fix(mid, path, doc, kind) if ok else {"jsonrpc": "2.0", "id": mid, "result": []})
             return
         if method == "textDocument/codeAction" and mid is not None and (actions := self.by_name_actions(params, doc)):
             self.own_actions[mid] = actions
@@ -571,21 +598,154 @@ class Proxy:
             msg = {**msg, "method": "textDocument/definition"}
         self.server.send({**msg, "params": mapped})
 
+    def on_pyn_sync(self, msg: dict, path: Path) -> bool:
+        """didOpen/didChange/didSave/didClose of a .pyn: True if it was one."""
+        method, params = msg.get("method"), msg.get("params") or {}
+        td = params.get("textDocument") or {}
+        uri = td.get("uri")
+        shadow = self.shadow_path(path).as_uri()
+
+        if method == "textDocument/didOpen":
+            doc = Doc(uri, td["text"], td.get("version"))
+            doc.sent = self.next_version()
+            self.docs[path] = [doc]
+            self.saved[path] = doc.version  # opened from disk, so this text is the saved one
+            self.write_shadow(path, td["text"])
+            sent = {"uri": shadow, "languageId": "python", "version": doc.sent, "text": doc.tr.hidden}
+            self.server.send({**msg, "params": {"textDocument": sent}})
+            return True
+        if method == "textDocument/didChange":
+            text = params["contentChanges"][-1]["text"]  # we advertise full sync
+            doc = Doc(uri, text, td.get("version"))
+            self.docs.setdefault(path, []).append(doc)
+            del self.docs[path][:-5]
+            self.send_text(path, doc.tr.hidden, doc)
+            return True
+        if method == "textDocument/didSave":
+            versions = self.docs.get(path)
+            self.write_shadow(path, versions[-1].tr.source if versions else None)
+            self.server.send({**msg, "params": {"textDocument": {"uri": shadow}}})
+            if self.output_on_save and versions:
+                self.write_output(path, versions[-1])
+            if versions:
+                self.release_held(path, versions[-1].version)
+            return True
+        if method == "textDocument/didClose":
+            self.docs.pop(path, None)
+            self.saved.pop(path, None)
+            self.held.pop(path, None)
+            self.shown.pop(path, None)
+            self.server.send({**msg, "params": {"textDocument": {"uri": shadow}}})
+            self.client.send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": uri, "diagnostics": []}})
+            return True
+        return False
+
+    # notebooks ----------------------------------------------------------
+
+    def is_byname(self, nb: Notebook) -> bool:
+        return any(LOAD_EXT_RE.search(self.cell_text.get(u, "")) for u in nb.cells)
+
+    def cell_for_checker(self, nb: Notebook, uri: str) -> dict:
+        """A cell's text and version as the checker gets them: translated in a byname notebook (and
+        kept in self.docs for mapping), as typed otherwise. Versions are ours, as for .pyn."""
+        text, v = self.cell_text[uri], self.next_version()
+        if not nb.byname:
+            self.docs.pop(uri, None)
+            return {"uri": uri, "version": v, "text": text}
+        doc = Doc(uri, text, self.cell_version.get(uri))
+        doc.sent = v
+        self.docs.setdefault(uri, []).append(doc)
+        del self.docs[uri][:-5]
+        return {"uri": uri, "version": v, "text": doc.tr.hidden}
+
+    def open_cell(self, nb: Notebook, td: dict) -> None:
+        self.cell_text[td["uri"]] = td["text"]
+        self.cell_version[td["uri"]] = td.get("version")
+        self.cell_nb[td["uri"]] = nb.uri
+
+    def close_cell(self, uri: str) -> None:
+        for d in (self.cell_text, self.cell_version, self.cell_nb):
+            d.pop(uri, None)
+        if self.docs.pop(uri, None) is not None:  # its translated diagnostics have nowhere to go
+            self.client.send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": uri, "diagnostics": []}})
+
+    def on_notebook(self, msg: dict) -> None:
+        method, params = msg["method"], msg.get("params") or {}
+        nbd = params.get("notebookDocument") or {}
+        if method == "notebookDocument/didOpen":
+            nb = Notebook(nbd["uri"], nbd.get("version"), [c["document"] for c in nbd.get("cells", [])])
+            self.notebooks[nb.uri] = nb
+            for td in params.get("cellTextDocuments", []):
+                self.open_cell(nb, td)
+            nb.byname = self.is_byname(nb)
+            cells = [{**td, **self.cell_for_checker(nb, td["uri"])} for td in params.get("cellTextDocuments", [])]
+            self.server.send({**msg, "params": {**params, "cellTextDocuments": cells}})
+            return
+        nb = self.notebooks.get(nbd.get("uri"))
+        if nb is None:
+            self.server.send(msg)
+            return
+        if method == "notebookDocument/didClose":
+            del self.notebooks[nb.uri]
+            for u in nb.cells:
+                self.close_cell(u)
+            self.server.send(msg)
+            return
+        if method != "notebookDocument/didChange":
+            self.server.send(msg)
+            return
+        nb.version = nbd.get("version", nb.version)
+        change = params.get("change") or {}
+        cells = dict(change.get("cells") or {})
+        opened: list[dict] = []
+        changed: list[str] = []
+        if st := cells.get("structure"):
+            arr = st["array"]
+            nb.cells[arr["start"] : arr["start"] + arr["deleteCount"]] = [c["document"] for c in arr.get("cells") or []]
+            for td in st.get("didClose") or []:
+                self.close_cell(td["uri"])
+            opened = st.get("didOpen") or []
+            for td in opened:
+                self.open_cell(nb, td)
+        for tc in cells.get("textContent") or []:
+            u = tc["document"]["uri"]
+            self.cell_text[u] = apply_changes(self.cell_text.get(u, ""), tc["changes"])
+            self.cell_version[u] = tc["document"].get("version")
+            changed.append(u)
+        was, nb.byname = nb.byname, self.is_byname(nb)
+        if nb.byname != was:  # `%load_ext byname` added or removed: every cell changes meaning
+            new = {td["uri"] for td in opened}
+            changed = [u for u in nb.cells if u in self.cell_text and u not in new]
+        if st:
+            cells["structure"] = {**st, "didOpen": [{**td, **self.cell_for_checker(nb, td["uri"])} for td in opened]}
+        if changed:
+            content = [self.cell_for_checker(nb, u) for u in dict.fromkeys(changed)]
+            cells["textContent"] = [{"document": {"uri": c["uri"], "version": c["version"]}, "changes": [{"text": c["text"]}]} for c in content]
+        self.server.send({**msg, "params": {**params, "change": {**change, "cells": cells}}})
+
     def next_version(self) -> int:
         self.counter += 1
         return self.counter
 
-    def send_text(self, path: Path, hidden: str, doc: Doc | None) -> None:
-        """didChange to the checker; doc=None marks a temporary completion-only text."""
+    def send_text(self, key: Path | str, hidden: str, doc: Doc | None) -> None:
+        """didChange to the checker; doc=None marks a temporary completion-only text. A cell changes
+        through its notebook."""
         v = self.next_version()
         if doc is None:
             self.temp_versions.add(v)
         else:
             doc.sent = v
-        td = {"uri": self.shadow_path(path).as_uri(), "version": v}
-        self.server.send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {"textDocument": td, "contentChanges": [{"text": hidden}]}})
+        td = {"uri": self.checker_uri(key), "version": v}
+        changes = [{"text": hidden}]
+        if isinstance(key, Path):
+            self.server.send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {"textDocument": td, "contentChanges": changes}})
+            return
+        nb = self.notebooks[self.cell_nb[key]]
+        cells = {"textContent": [{"document": td, "changes": changes}]}
+        params = {"notebookDocument": {"uri": nb.uri, "version": nb.version}, "change": {"cells": cells}}
+        self.server.send({"jsonrpc": "2.0", "method": "notebookDocument/didChange", "params": params})
 
-    def complete_slot(self, msg: dict, path: Path, doc: Doc) -> bool:
+    def complete_slot(self, msg: dict, key: Path | str, doc: Doc) -> bool:
         """Completion at a field position of `(...) = expr`. The checker is shown a temporary text
         where the slot reads `_ds.<typed>` and asked there; the real text is restored on response."""
         params, mid = msg["params"], msg["id"]
@@ -611,17 +771,17 @@ class Proxy:
         hidden = ttr.hidden
         if word == PLACEHOLDER:  # leave `_ds.` with nothing after it: complete every field
             hidden, h = hidden[: h - len(word)] + hidden[h:], h - len(word)
-        self.send_text(path, hidden, None)
+        self.send_text(key, hidden, None)
         hpos = LineIndex(hidden).position(h)
         rng = {"start": tr.src_lines.position(ws), "end": tr.src_lines.position(we)}
-        self.pending[mid] = ("slot", (path, doc, rng, set(listed)))
-        sent = {"textDocument": {"uri": self.shadow_path(path).as_uri()}, "position": hpos}
+        self.pending[mid] = ("slot", (key, doc, rng, set(listed)))
+        sent = {"textDocument": {"uri": self.checker_uri(key)}, "position": hpos}
         self.server.send({**msg, "params": sent})
         return True
 
-    def finish_slot(self, result, path: Path, doc: Doc, rng: dict, listed: set[str]) -> dict:
-        latest = self.docs.get(path, [doc])[-1]
-        self.send_text(path, latest.tr.hidden, latest)  # restore the real text
+    def finish_slot(self, result, key: Path | str, doc: Doc, rng: dict, listed: set[str]) -> dict:
+        latest = self.docs.get(key, [doc])[-1]
+        self.send_text(key, latest.tr.hidden, latest)  # restore the real text
         items = result.get("items", []) if isinstance(result, dict) else (result or [])
         out = []
         for it in items:
@@ -727,15 +887,8 @@ class Proxy:
         def analysis(cfg: dict, based: bool) -> dict:
             cfg = dict(cfg or {})
             cfg["extraPaths"] = list(cfg.get("extraPaths") or []) + self.extra_paths()
-            if cfg.get("stubPath") == "typings":
-                # the BasedPyright extension's default, sent as if set: the checker then reports a missing
-                # `typings` folder as an error ("stubPath ... is not a valid directory"). Unset, it falls
-                # back to the same folder silently
-                del cfg["stubPath"]
             if based:
-                # byname.typeCheckingMode, not the editor's basedpyright one: that's for .py files (and
-                # "recommended" by default with the BasedPyright extension); a project pyright config still wins
-                cfg["typeCheckingMode"] = self.check_mode
+                cfg.setdefault("typeCheckingMode", "standard")  # pyright's default; "recommended" is noisy
             return cfg
 
         out = list(result)
@@ -759,8 +912,8 @@ class Proxy:
         if method is None:  # response to an editor request
             method_doc = self.pending.pop(mid, None)
             if method_doc and method_doc[0] == "slot":
-                path, doc, rng, listed = method_doc[1]
-                self.client.send({**msg, "result": self.finish_slot(msg.get("result"), path, doc, rng, listed)})
+                key, doc, rng, listed = method_doc[1]
+                self.client.send({**msg, "result": self.finish_slot(msg.get("result"), key, doc, rng, listed)})
                 return
             if (own := self.own_actions.pop(mid, None)) and "result" in msg:
                 result = self.to_editor(msg["result"], method_doc[1]) if msg["result"] else []
@@ -779,9 +932,8 @@ class Proxy:
                         **(cap if isinstance(cap, dict) else {}),
                         "codeActionKinds": [*kinds, *(k for k in (FIX_ALL_KIND, ORGANIZE_KIND) if k not in kinds)],
                     }
-                    # only ours: the client registers every listed command, and the checker's own
-                    # (basedpyright.restartserver, ...) would collide with its VS Code extension's
-                    caps.setdefault("executeCommandProvider", {})["commands"] = [WRITE_OUTPUT]
+                    ecp = caps.setdefault("executeCommandProvider", {"commands": []})
+                    ecp["commands"] = [*ecp.get("commands", []), WRITE_OUTPUT]
                     if stp := caps.get("semanticTokensProvider"):
                         stp["full"] = True  # we remap whole token lists; no delta support
                         types = stp.get("legend", {}).get("tokenTypes", [])
@@ -790,7 +942,8 @@ class Proxy:
                         mods = stp.get("legend", {}).get("tokenModifiers", [])
                         if "readonly" in mods and "static" in mods:
                             self.final_field = (1 << mods.index("readonly"), 1 << mods.index("static"))
-                    caps.pop("notebookDocumentSync", None)
+                    # notebooks: their cells are synced whole through notebookDocument/*, see on_notebook
+                    caps["notebookDocumentSync"] = {"notebookSelector": [{"notebook": "jupyter-notebook", "cells": [{"language": "python"}]}]}
                     cp = caps.setdefault("completionProvider", {})
                     have = cp.setdefault("triggerCharacters", [])
                     self.own_triggers = {c for c in EXTRA_TRIGGERS if c not in have}
@@ -819,8 +972,11 @@ class Proxy:
             return None  # computed on a completion-only temporary text
         doc = self.doc_for_shadow(params["uri"], params.get("version"))
         if doc is None:
+            if params["uri"] in self.cell_text:  # a plain notebook's cell: the version is ours, not the editor's
+                return {**msg, "params": {k: v for k, v in params.items() if k != "version"}}
             return msg
-        if uri_to_path(doc.uri) not in self.docs:
+        key = self.key(doc.uri)
+        if key not in self.docs:
             return None  # closed .pyn: its shadow's diagnostics have nowhere to go
         out = list(doc.tr.problems)
         flagged = {(p["range"]["start"]["line"], p["range"]["start"]["character"]) for p in out}
@@ -847,8 +1003,8 @@ class Proxy:
         else:
             params.pop("version", None)
         msg = {**msg, "params": params}
-        if self.diags_on_save:
-            path = uri_to_path(doc.uri)
+        if self.diags_on_save and isinstance(key, Path):  # a notebook saves as a whole: cells show them at once
+            path = key
             with self.held_lock:
                 if doc.version != self.saved.get(path):
                     # unsaved text: new errors wait for the save, but fixed ones go away now

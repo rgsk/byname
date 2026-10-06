@@ -1,5 +1,6 @@
 """`byname tool` runs real tools on a throwaway two-file project and maps their output back to .pyn."""
 
+import json
 import os
 import subprocess
 import sys
@@ -29,11 +30,14 @@ def project(tmp_path):
     return tmp_path
 
 
-def tool(project: Path, *args: str) -> tuple[str, int]:
+def tool(project: Path, *args: str, debug: bool = False) -> tuple[str, int]:
     bindir = Path(sys.executable).parent
     if not (bindir / args[0]).exists():
         pytest.skip(f"{args[0]} not installed (uv sync)")
-    env = {**os.environ, "XDG_CACHE_HOME": str(project / ".cache")}
+    env = {k: v for k, v in os.environ.items() if k != "BYNAME_DEBUG"}
+    env["XDG_CACHE_HOME"] = str(project / ".cache")
+    if debug:  # byname also says what it hid
+        env["BYNAME_DEBUG"] = "1"
     p = subprocess.run(
         [sys.executable, "-m", "byname", "tool", *args],
         cwd=project, env=env, capture_output=True, text=True, check=False,
@@ -54,7 +58,7 @@ def test_records_are_typed_on_python_before_3_14(project):
     # before 3.14 an annotation can't name a class defined further down: each record's type must come first
     (project / "pyrightconfig.json").write_text('{"typeCheckingMode": "standard", "pythonVersion": "3.12"}')
     (project / "old.pyn").write_text("def f(): return (x=1, y=2)\nreveal_type(f())\n")
-    out, rc = tool(project, "basedpyright", "old.pyn")
+    out, rc = tool(project, "basedpyright", "old.pyn", debug=True)
     assert 'Type of "f()" is "(x: int, y: int)"' in out
     assert "hid" not in out  # no undefined names in the generated header either
 
@@ -262,3 +266,86 @@ def test_ruff_real_issue_reported_at_pyn_position(project):
     out, rc = tool(project, "ruff", "check", "--output-format=concise", "--select", "F401", "bad.pyn")
     assert rc == 1
     assert "bad.pyn:1:8: F401" in out
+
+
+def notebook(cells: list[tuple[str, str]]) -> str:
+    return json.dumps({
+        "cells": [{"cell_type": kind, "metadata": {}, "source": src, **({"outputs": [], "execution_count": None} if kind == "code" else {})} for kind, src in cells],
+        "metadata": {}, "nbformat": 4, "nbformat_minor": 5,
+    })
+
+
+NB_CELLS = [
+    ("code", "%load_ext byname"),
+    ("markdown", "# records"),
+    ("code", "from people import make\nres = make(name='R', age=1)"),
+    ("code", "(greeting=, age=years) = res\nres.nme\nimport os"),
+]
+
+
+def test_byname_notebooks_are_checked_cell_by_cell(project):
+    # a notebook with `%load_ext byname` has each code cell translated; locations are the cell's own.
+    # basedpyright numbers code cells (3rd), ruff every cell (4th)
+    (project / "nb.ipynb").write_text(notebook(NB_CELLS))
+    out, rc = tool(project, "basedpyright", str(project / "nb.ipynb"))  # absolute, as the editor task passes it
+    assert 'nb.ipynb:3:2:5 - error: Cannot access attribute "nme" for class "(name: str, age: int, greeting: str)"' in out
+    assert ".cache" not in out and "_rec_" not in out
+    out, rc = tool(project, "ruff", "check", "--select", "F", "--output-format=concise", "nb.ipynb")
+    assert [ln for ln in out.splitlines() if ln.startswith("nb.ipynb")] == ["nb.ipynb:cell 4:3:8: F401 [*] `os` imported but unused"]
+
+
+def test_plain_notebooks_are_checked_as_they_are(project):
+    (project / "plain.ipynb").write_text(notebook([("markdown", "# x"), ("code", "x: int = 'a'")]))
+    out, rc = tool(project, "basedpyright", str(project / "plain.ipynb"))
+    assert 'plain.ipynb:1:1:10 - error: Type "Literal[\'a\']" is not assignable to declared type "int"' in out
+
+
+def test_ruff_findings_on_byname_layout_are_hidden_and_real_ones_kept(project):
+    # each hidden finding is about code byname wrote; its look-alike on the user's own code stays
+    (project / "other.py").write_text("res = (1, 2)\n")
+    (project / "layout.pyn").write_text(
+        "from other import res\n"                 # E402 only because the record prelude sits above it
+        "\n"
+        "extra = (city='Pune')\n"
+        "print((**res, **extra, age=27))\n"       # B008 on the `_byname_kw` helper of an unknown spread
+        "r = (name='a', age=1)\n"
+        "(name=, age=years) = r\n"                # E702: a destructure is one line of `;` statements
+        "print(name, years); print(1)\n"          # a semicolon the user wrote: kept
+        "\n"
+        "\n"
+        "def get_batch():\n"
+        "    return (x := 1, y := 5)\n"           # F841: walrus labels name the returned positions
+        "\n"
+        "\n"
+        "def f():\n"
+        "    z = 3\n"                             # really unused: kept
+        "\n"
+        "\n"
+        "import sys\n"                            # really after code: kept
+    )
+    out, rc = tool(project, "ruff", "check", "--select", "E,F,B", "--output-format=concise", "layout.pyn")
+    assert [ln for ln in out.splitlines() if ln.startswith("layout.pyn")] == [
+        "layout.pyn:7:19: E702 Multiple statements on one line (semicolon)",
+        "layout.pyn:15:5: F841 Local variable `z` is assigned to but never used",
+        "layout.pyn:18:1: E402 Module level import not at top of file",
+        "layout.pyn:18:8: F401 [*] `sys` imported but unused",
+    ]
+
+
+def test_totals_count_what_is_shown(project):
+    # byname hides findings on its own generated code; the tool's totals are recounted to match, and what it
+    # hid is only said with BYNAME_DEBUG=1
+    (project / "walrus.pyn").write_text("def get_batch():\n    return (x := 1, y := 5)\n\n\nr = (a=1)\nr.b\n")
+    out, rc = tool(project, "ruff", "check", "--select", "F", "--output-format=concise", "walrus.pyn")
+    assert (out, rc) == ("All checks passed!\n", 0)
+    out, rc = tool(project, "basedpyright", "walrus.pyn")
+    assert out.splitlines()[-1] == "1 error, 0 warnings, 0 notes" and rc == 1
+    out, rc = tool(project, "ruff", "check", "--select", "F", "--output-format=concise", "walrus.pyn", debug=True)
+    assert "byname: hid 2 unused-variable warning(s) on walrus labels in returns" in out
+
+
+def test_py_errors_show_the_projects_path(project):
+    (project / "plain.py").write_text("x: int = 'a'\n")
+    out, rc = tool(project, "basedpyright", str(project / "plain.py"))
+    assert "  plain.py:1:10 - error: Type \"Literal['a']\" is not assignable to declared type \"int\"" in out
+    assert ".cache" not in out

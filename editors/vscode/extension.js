@@ -5,17 +5,25 @@ const { LanguageClient } = require("vscode-languageclient/node");
 
 let client;
 
+function onPath(name) {
+  return (process.env.PATH || "").split(path.delimiter).some((d) => d && fs.existsSync(path.join(d, name)));
+}
+
+// null: no byname here (the extension now wakes for any Python file, and a plain project shouldn't get errors)
 function serverCommand(cfg, cwd) {
   const custom = cfg.get("serverCommand");
   if (custom && custom.length) return custom;
   const local = cwd && path.join(cwd, ".venv", "bin", "byname");
-  return [local && fs.existsSync(local) ? local : "byname", "lsp"];
+  if (local && fs.existsSync(local)) return [local, "lsp"];
+  return onPath("byname") ? ["byname", "lsp"] : null;
 }
 
 async function start() {
   const cfg = vscode.workspace.getConfiguration("byname");
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  const [command, ...args] = serverCommand(cfg, cwd);
+  const cmd = serverCommand(cfg, cwd);
+  if (!cmd) return;
+  const [command, ...args] = cmd;
   const checker = cfg.get("checker");
   if (checker && checker.length) args.push("--", ...checker);
 
@@ -24,13 +32,22 @@ async function start() {
     "byname",
     { command, args, options: { cwd } },
     {
-      documentSelector: [{ scheme: "file", language: "pyn" }],
-      synchronize: { fileEvents: vscode.workspace.createFileSystemWatcher("**/*.pyn") },
+      // .pyn, and .py and notebooks too: byname is the workspace's Python server (turn the BasedPyright
+      // extension off here). .py files and notebooks without `%load_ext byname` pass through untranslated
+      documentSelector: [
+        { scheme: "file", language: "pyn" },
+        { scheme: "file", language: "python" },
+        { scheme: "untitled", language: "python" },
+        { notebook: "jupyter-notebook", language: "python" },
+      ],
+      synchronize: {
+        fileEvents: vscode.workspace.createFileSystemWatcher("**/*.pyn"),
+        configurationSection: ["python", "basedpyright"],
+      },
       initializationOptions: {
         outputOnSave: cfg.get("outputOnSave"),
         outputStripMain: cfg.get("outputStripMain"),
         diagnosticsOnSave: cfg.get("diagnosticsOnSave"),
-        typeCheckingMode: cfg.get("typeCheckingMode"),
       },
     }
   );

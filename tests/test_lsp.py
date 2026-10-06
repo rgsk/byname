@@ -132,6 +132,7 @@ def lsp(tmp_path_factory):
     c = Client(root, tmp_path_factory.mktemp("cache"))
     caps = {  # like VS Code: the checker asks us for settings, and we accept semantic tokens
         "workspace": {"configuration": True},
+        "notebookDocument": {"synchronization": {}},
         "textDocument": {"semanticTokens": {"requests": {"full": {"delta": True}}, "tokenTypes": [], "tokenModifiers": [], "formats": ["relative"]}},
     }
     c.init = c.request("initialize", {"processId": None, "rootUri": root.as_uri(), "capabilities": caps})
@@ -224,43 +225,27 @@ def test_definition_of_destructured_local_covers_the_word(lsp):
     assert snippet(MAIN, rng) == "greeting"
 
 
-def test_pyn_mode_is_bynames_setting_not_the_editors():
-    # basedpyright's editor setting is for .py files (the BasedPyright extension sends "recommended" by
-    # default, a project may send "off"); .pyn gets byname.typeCheckingMode, "standard" unless set
+def test_mode_is_the_editors_basedpyright_setting_standard_by_default():
+    # byname serves .py, .pyn and notebooks alike, so one setting: basedpyright.analysis.typeCheckingMode.
+    # Unset, "standard" rather than basedpyright's noisy "recommended"
     from types import SimpleNamespace
 
     from byname.lsp import Proxy
 
+    fake = SimpleNamespace(extra_paths=lambda: [])
     items = [{"section": "basedpyright"}, {"section": "basedpyright.analysis"}]
-    for ours in ("standard", "off", "strict"):
-        fake = SimpleNamespace(extra_paths=lambda: [], check_mode=ours)
-        for editor in ("recommended", "off", None):
-            sent = {"analysis": {"typeCheckingMode": editor}} if editor else None
-            out = Proxy.inject_config(fake, items, [sent, {"typeCheckingMode": editor}])
-            assert out[0]["analysis"]["typeCheckingMode"] == out[1]["typeCheckingMode"] == ours
+    for editor, want in (("off", "off"), ("strict", "strict"), (None, "standard")):
+        sent = {"analysis": {"typeCheckingMode": editor}} if editor else None
+        out = Proxy.inject_config(fake, items, [sent, {"typeCheckingMode": editor} if editor else None])
+        assert out[0]["analysis"]["typeCheckingMode"] == out[1]["typeCheckingMode"] == want
 
 
-def test_default_stub_path_is_not_sent_as_set():
-    # the BasedPyright extension's default `stubPath: "typings"` arrives as if set, and the checker then pops
-    # up "stubPath .../typings is not a valid directory" in a project without one; unset, it uses the same
-    # folder quietly. A path the user chose is passed on
-    from types import SimpleNamespace
-
-    from byname.lsp import Proxy
-
-    fake = SimpleNamespace(extra_paths=lambda: [], check_mode="standard")
-    items = [{"section": "basedpyright"}, {"section": "basedpyright.analysis"}, {"section": "python.analysis"}]
-    out = Proxy.inject_config(fake, items, [{"analysis": {"stubPath": "typings"}}, {"stubPath": "typings"}, {"stubPath": "typings"}])
-    assert all("stubPath" not in cfg for cfg in (out[0]["analysis"], out[1], out[2]))
-    out = Proxy.inject_config(fake, items[1:2], [{"stubPath": "stubs"}])
-    assert out[0]["stubPath"] == "stubs"
-
-
-def test_only_our_command_is_advertised(lsp):
-    # VS Code registers each listed command; basedpyright's own would clash with the BasedPyright
-    # extension ("command 'basedpyright.createtypestub' already exists") when both are installed
+def test_checker_commands_are_advertised_with_ours(lsp):
+    # byname is the only Python server in the editor, so basedpyright's commands come through too
     c, root, uri = lsp
-    assert c.init["capabilities"]["executeCommandProvider"]["commands"] == ["byname.server.writeOutput"]
+    commands = c.init["capabilities"]["executeCommandProvider"]["commands"]
+    assert "byname.server.writeOutput" in commands
+    assert any(cmd.startswith("basedpyright.") for cmd in commands)
 
 
 def test_semantic_tokens_cover_only_source_text(lsp):
@@ -731,3 +716,91 @@ def test_ordering_a_record_says_to_use_a_field():
     assert explain_fields(raw) == raw.split("\n")[0] + "\n" + hint + " (reportArgumentType)"
     raw = 'Operator "<" not supported for types "_typ_age[int]" and "_typ_age[int]" (reportOperatorIssue)'
     assert explain_fields(raw) == raw.removesuffix(" (reportOperatorIssue)") + "\n" + hint.replace("r.name", "r.age") + " (reportOperatorIssue)"
+
+
+# --- .py files and notebooks ---------------------------------------------------
+
+
+def test_py_files_go_to_the_checker_as_they_are(lsp):
+    # byname syntax can't run in a .py file, so it isn't translated: hover is basedpyright's own
+    c, root, uri = lsp
+    text = "from helpers import shout\n\nn: int = shout('a')\n"
+    py = (root / "script.py").as_uri()
+    c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": py, "languageId": "python", "version": 1, "text": text}}})
+    assert "(s: str) -> str" in hover_text(c, py, pos(text, "shout", 1))
+    assert errors(c.wait_diags(py)) == [(2, 'Type "str" is not assignable to declared type "int"')]
+
+
+CELLS = [
+    "%load_ext byname\n",
+    "from people import make\n\nname, age = 'Rahul', 26\nres = make(name=, age=)\n",
+    "(greeting=, age=years) = res\nres.nme\n",
+]
+
+
+def open_notebook(c, root, name, cells):
+    nb = (root / name).as_uri()
+    uris = [f"vscode-notebook-cell:{nb[len('file:'):]}#C{i}" for i in range(len(cells))]
+    c.send({"method": "notebookDocument/didOpen", "params": {
+        "notebookDocument": {"uri": nb, "notebookType": "jupyter-notebook", "version": 1, "cells": [{"kind": 2, "document": u} for u in uris]},
+        "cellTextDocuments": [{"uri": u, "languageId": "python", "version": 1, "text": t} for u, t in zip(uris, cells)],
+    }})
+    return nb, uris
+
+
+def edit_cell(c, nb, uri, version, start, end, text):
+    rng = {"start": {"line": start[0], "character": start[1]}, "end": {"line": end[0], "character": end[1]}}
+    c.diags.pop(uri, None)
+    c.send({"method": "notebookDocument/didChange", "params": {
+        "notebookDocument": {"uri": nb, "version": version},
+        "change": {"cells": {"textContent": [{"document": {"uri": uri, "version": version}, "changes": [{"range": rng, "text": text}]}]}},
+    }})
+
+
+def wait_errors(c, uri, want, timeout=30) -> list[tuple[int, str]]:
+    """The cell's errors once they match `want`: after an edit the checker may republish the old ones first."""
+    end = time.time() + timeout
+    while True:
+        got = errors(c.diags.get(uri, []))
+        if got == want or time.time() > end:
+            return got
+        try:
+            c.handle(c.q.get(timeout=0.5))
+        except queue.Empty:
+            pass
+
+
+def errors(diags) -> list[tuple[int, str]]:
+    return [(d["range"]["start"]["line"], d["message"].split("\n")[0]) for d in diags if d.get("severity", 1) == 1]
+
+
+def test_byname_notebook_cells_are_translated_and_chained(lsp):
+    # `%load_ext byname` in a cell: every cell is .pyn, each translated alone as the kernel runs it.
+    # Names flow from cell to cell, and positions are the cell's own
+    c, root, uri = lsp
+    nb, cells = open_notebook(c, root, "byname.ipynb", CELLS)
+    assert errors(c.wait_diags(cells[2])) == [(1, 'Cannot access attribute "nme" for class "(name: str, age: int, greeting: str)"')]
+    assert errors(c.wait_diags(cells[1])) == []
+    assert "years: int" in hover_text(c, cells[2], pos(CELLS[2], "years"))
+    assert "-> (name: str, age: int, greeting: str)" in hover_text(c, cells[1], pos(CELLS[1], "make", 1))
+
+
+def test_plain_notebook_cells_are_not_translated(lsp):
+    # without `%load_ext byname` the kernel runs cells as Python, so the checker sees them as typed
+    c, root, uri = lsp
+    nb, cells = open_notebook(c, root, "plain.ipynb", ["x = 1\n", "(a=x)\n"])
+    assert errors(c.wait_diags(cells[1])) == [(0, '"(" was not closed')]
+    assert errors(c.wait_diags(cells[0])) == []
+
+
+def test_loading_byname_in_a_cell_translates_the_notebook(lsp):
+    # typing `%load_ext byname` into a cell (an incremental edit) resends every cell, translated
+    c, root, uri = lsp
+    nb, cells = open_notebook(c, root, "later.ipynb", ["\n", "r = (a=1)\nr.b\n"])
+    assert errors(c.wait_diags(cells[1])) == [(0, '"(" was not closed')]
+    edit_cell(c, nb, cells[0], 2, (0, 0), (0, 0), "%load_ext byname")
+    want = [(1, 'Cannot access attribute "b" for class "(a: int)"')]
+    assert wait_errors(c, cells[1], want) == want
+    # and an edit inside a byname cell is applied where it was typed
+    edit_cell(c, nb, cells[1], 3, (1, 2), (1, 3), "a")
+    assert wait_errors(c, cells[1], []) == []

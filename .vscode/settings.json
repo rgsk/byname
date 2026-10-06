@@ -7,5 +7,40 @@
         // don't swallow print() from passing tests -- the test explorer only
         // ever shows what pytest itself writes out
         "-rP"
-    ]
+    ],
+
+    // --- type checking: byname (basedpyright behind it) for .pyn, .py and notebooks ---
+    // no second language server from the Python extension; the BasedPyright extension stays off here
+    "python.languageServer": "None",
+    "basedpyright.analysis.typeCheckingMode": "standard",
+
+    // --- Ruff: format and fix on save ---
+    // .pyn: byname runs Ruff (formatter is rgsk.byname by the extension's default)
+    "[pyn]": {
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+            "source.fixAll": "explicit",
+            "source.organizeImports": "explicit"
+        }
+    },
+    // .py and notebook cells: the Ruff extension, which also lints them (pyproject.toml's [tool.ruff])
+    "[python]": {
+        "editor.defaultFormatter": "charliermarsh.ruff",
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+            "source.fixAll.ruff": "explicit",
+            "source.organizeImports.ruff": "explicit"
+        }
+    },
+    "notebook.defaultFormatter": "charliermarsh.ruff",
+    "notebook.formatOnSave.enabled": true,
+    "notebook.codeActionsOnSave": {
+        "notebook.source.fixAll": "explicit",
+        "notebook.source.organizeImports": "explicit"
+    },
+    // byname notebooks: their cells aren't Python, so Ruff can't format them
+    "ruff.exclude": ["examples/notebook.ipynb"],
+    // no Ruff warnings in the editor, as in .pyn: the extension only formats and fixes on save.
+    // Alt+L (byname tool ruff) still lints
+    "ruff.lint.enable": false
 }

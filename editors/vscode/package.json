@@ -1,8 +1,8 @@
 {
   "name": "byname",
   "displayName": "byname (.pyn)",
-  "description": "Language support for .pyn files: bind-by-name Python, type-checked through basedpyright.",
-  "version": "0.3.3",
+  "description": "Language support for .pyn files, and .py files and Jupyter notebooks alongside them: bind-by-name Python, type-checked through basedpyright.",
+  "version": "0.4.0",
   "publisher": "rgsk",
   "private": true,
   "license": "MIT",
@@ -15,6 +15,8 @@
   "main": "./extension.js",
   "activationEvents": [
     "onLanguage:pyn",
+    "onLanguage:python",
+    "onNotebook:jupyter-notebook",
     "onCommand:byname.writeOutput"
   ],
   "contributes": {
@@ -76,12 +78,6 @@
           "type": "boolean",
           "default": false,
           "description": "Show errors for the saved text only: no new red squiggles while typing, they update on save."
-        },
-        "byname.typeCheckingMode": {
-          "type": "string",
-          "enum": ["off", "basic", "standard", "strict", "recommended", "all"],
-          "default": "standard",
-          "description": "basedpyright's mode for .pyn files. .py files keep basedpyright.analysis.typeCheckingMode, so the two can differ. A project pyright config (pyproject.toml [tool.basedpyright], pyrightconfig.json) overrides both."
         }
       }
     },

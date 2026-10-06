@@ -1,31 +1,70 @@
 """byname tool <cmd> [args...]: run a Python tool (ruff, basedpyright) on .pyn files, like nbqa.
 
 The project is mirrored into a cache dir: .pyn translated to .py, .py and config files symlinked,
-so imports and tool config work unchanged. The tool runs inside the mirror on the translated
-files; `path:line[:col]` in its output is mapped back to the .pyn. Diagnostics on the generated
-record header are dropped, as in the editor.
+so imports and tool config work unchanged. Notebooks are mirrored too: one with `%load_ext byname`
+gets each code cell translated (as the kernel runs it), a plain one is symlinked. The tool runs
+inside the mirror on the translated files; `path:line[:col]` in its output is mapped back to the
+.pyn, and a notebook's cell locations to the cell as written. Diagnostics on the generated record
+header are dropped, as in the editor.
 """
 
+import ast
 import hashlib
+import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
-from .lsp import explain_fields, pretty
+from .lsp import LOAD_EXT_RE, explain_fields, pretty
 from .srcmap import Translation, generated
 
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 CONFIGS = {"pyproject.toml", "setup.cfg", "ruff.toml", ".ruff.toml", "pyrightconfig.json"}
 KEEP_IN_MIRROR = {".ruff_cache"}  # tool caches survive between runs
 LOCATION = re.compile(r"^(?P<pre>\s*)(?P<path>[^\s:]+\.py):(?P<line>\d+)(?::(?P<col>\d+))?(?P<rest>.*)$")
-SUMMARY = re.compile(r"^(Found \d+ errors?|\d+ errors?, \d+ warnings?|All checks passed|Success: no issues|\[\*\] \d+ fixable)")
+# a notebook cell: ruff `nb.ipynb:cell 3:1:5` (counting every cell), basedpyright `nb.ipynb:3:1:5` (code cells)
+NB_LOCATION = re.compile(r"^(?P<pre>\s*)(?P<path>[^\s:]+\.ipynb):(?P<ruff>cell )?(?P<cell>\d+):(?P<line>\d+):(?P<col>\d+)(?P<rest>.*)$")
+NB_HEADER = re.compile(r"^(?P<path>\S+\.ipynb)(?P<rest> - cell \d+)$")  # basedpyright's per-cell header
+# Ruff findings about how byname wrote its code, not about the user's: statements a translation puts on
+# one line (`(a=, b=) = r` is `_ds = r; a = _ds.a; b = _ds.b`), and anything naming byname's helpers
+GENERATED_STYLE = re.compile(r"\bE70[123]\b")
+HELPER = re.compile(r"`_byname_\w*`")
+TOO_LONG = re.compile(r"\bE501 Line too long \(\d+ > (\d+)\)")  # measured on the translation's longer line
 
 
 def resolve(cmd: str) -> str:
     local = Path(sys.executable).parent / cmd
     return str(local) if local.exists() else cmd
+
+
+def byname_cells(nb: dict) -> list[str] | None:
+    """A notebook's cells' sources, or None unless a code cell loads byname."""
+    cells = ["".join(c["source"]) if isinstance(c.get("source"), list) else c.get("source", "") for c in nb.get("cells", [])]
+    code = [src for c, src in zip(nb.get("cells", []), cells) if c.get("cell_type") == "code"]
+    return cells if any(LOAD_EXT_RE.search(src) for src in code) else None
+
+
+def translated_notebook(src: Path) -> str | None:
+    """The notebook with each code cell translated, or None for a plain notebook (or one that isn't JSON)."""
+    try:
+        nb = json.loads(src.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (cells := byname_cells(nb)) is None:
+        return None
+    for c, text in zip(nb["cells"], cells):
+        if c.get("cell_type") == "code":
+            c["source"] = Translation(text).hidden
+    return json.dumps(nb, indent=1, ensure_ascii=False) + "\n"
+
+
+def write_if_changed(dst: Path, text: str) -> None:
+    if not dst.is_file() or dst.is_symlink() or dst.read_text(encoding="utf-8") != text:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.unlink(missing_ok=True)
+        dst.write_text(text, encoding="utf-8")
 
 
 def mirror(root: Path) -> Path:
@@ -41,12 +80,11 @@ def mirror(root: Path) -> Path:
             src = Path(dirpath) / f
             if f.endswith(".pyn"):
                 dst = out / rel / (f[:-4] + ".py")
-                text = Translation(src.read_text(encoding="utf-8")).hidden
-                if not dst.is_file() or dst.is_symlink() or dst.read_text(encoding="utf-8") != text:
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    dst.unlink(missing_ok=True)
-                    dst.write_text(text, encoding="utf-8")
-            elif f.endswith((".py", ".pyi")) or (f in CONFIGS and rel == Path(".")):
+                write_if_changed(dst, Translation(src.read_text(encoding="utf-8")).hidden)
+            elif f.endswith(".ipynb") and (text := translated_notebook(src)) is not None:
+                dst = out / rel / f
+                write_if_changed(dst, text)
+            elif f.endswith((".py", ".pyi", ".ipynb")) or (f in CONFIGS and rel == Path(".")):
                 dst = out / rel / f
                 if not (dst.is_symlink() and dst.readlink() == src):
                     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -82,6 +120,8 @@ def remap(line: str, root: Path, out: Path, cache: dict) -> tuple[str | None, bo
     """(line to print, None to drop it as generated code or "" as a quiet walrus label, whether it was a
     location line)."""
     line = pretty(line)
+    if NB_LOCATION.match(line) or NB_HEADER.match(line):
+        return remap_notebook(line, root, out, cache)
     m = LOCATION.match(line)
     if not m:
         bare = Path(line.strip())
@@ -94,24 +134,97 @@ def remap(line: str, root: Path, out: Path, cache: dict) -> tuple[str | None, bo
     p = Path(m["path"])
     rel = p.relative_to(out) if p.is_absolute() and p.is_relative_to(out) else p
     pyn = root / rel.with_suffix(".pyn")
-    if p.is_absolute() and not p.is_relative_to(out) or not pyn.exists():
-        return line, True  # an ordinary .py file
+    if p.is_absolute() and not p.is_relative_to(out):
+        return line, True  # outside the project (site-packages, ...)
+    if not pyn.exists():  # an ordinary .py file: the project's path, not the mirror's
+        return f"{m['pre']}{rel}:{m['line']}" + (f":{m['col']}" if m["col"] else "") + m["rest"], True
     if pyn not in cache:
         cache[pyn] = Translation(pyn.read_text(encoding="utf-8"))
-    tr = cache[pyn]
-    col = int(m["col"]) - 1 if m["col"] else 0
-    h = tr.hid_lines.offset(int(m["line"]) - 1, col)
-    hit = tr._from_hidden(h, False)
-    if hit is None:
-        return None, True  # generated record header
-    off, how = hit
-    if span := generated(how):
-        off = span[0]
-    if tr.quiet(off, line):
-        return "", True  # a walrus labelling a returned tuple, called unused
-    pos = tr.src_lines.position(off)
+    pos = source_position(cache[pyn], int(m["line"]) - 1, int(m["col"]) - 1 if m["col"] else 0, line)
+    if not isinstance(pos, dict):
+        return pos, True
     loc = f"{rel.with_suffix('.pyn')}:{pos['line'] + 1}" + (f":{pos['character'] + 1}" if m["col"] else "")
     return f"{m['pre']}{loc}{m['rest']}", True
+
+
+def source_position(tr: Translation, line: int, col: int, message: str) -> dict | str | None:
+    """A 0-based position in tr's translation as one in its source. None hides the finding: it's on the
+    generated record header, or a Ruff finding about how byname laid its code out (see GENERATED_STYLE,
+    HELPER, imports_lead_to, TOO_LONG). "" for a walrus labelling a returned tuple, called unused."""
+    if HELPER.search(message):
+        return None
+    hit = tr._from_hidden(tr.hid_lines.offset(line, col), False)
+    if hit is None:
+        return None
+    off, how = hit
+    if span := generated(how):
+        if GENERATED_STYLE.search(message):
+            return None
+        off = span[0]
+    if tr.quiet(off, message):
+        return ""
+    if "E402" in message and imports_lead_to(tr, line):
+        return None
+    pos = tr.src_lines.position(off)
+    if (long := TOO_LONG.search(message)) and len(tr.source.split("\n")[pos["line"]]) <= int(long[1]):
+        return None  # the line as written fits
+    return pos
+
+
+def imports_lead_to(tr: Translation, line: int) -> bool:
+    """Ruff's E402 (import not at top) on hidden `line`, caused only by the record prelude byname puts
+    above the user's imports: without it, nothing but imports and a docstring comes first."""
+    prelude_lines = tr.hidden.count("\n", tr.at, tr.at + tr.plen)
+    if line < tr.hidden.count("\n", 0, tr.at) + prelude_lines:
+        return True  # a line of the prelude itself
+    try:
+        tree = ast.parse(tr.hidden[: tr.at] + tr.hidden[tr.at + tr.plen :])
+    except SyntaxError:
+        return False
+    for st in tree.body:
+        if st.lineno - 1 >= line - prelude_lines:
+            return True
+        doc = isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant) and isinstance(st.value.value, str)
+        if not (isinstance(st, (ast.Import, ast.ImportFrom)) or doc):
+            return False
+    return True
+
+
+def remap_notebook(line: str, root: Path, out: Path, cache: dict) -> tuple[str | None, bool]:
+    """A notebook location: the mirror's path as the project's, and in a byname notebook the cell's
+    translated position as its source one. Cells are numbered as the tool numbers them."""
+    m = NB_LOCATION.match(line) or NB_HEADER.match(line)
+    assert m is not None
+    p = Path(m["path"])
+    rel = p.relative_to(out) if p.is_absolute() and p.is_relative_to(out) else p
+    if "line" not in m.groupdict():  # header
+        return f"{rel}{m['rest']}", False
+    nb_path = root / rel
+    if nb_path not in cache:
+        try:
+            nb = json.loads(nb_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            nb = {}
+        cells = byname_cells(nb)
+        if cells is None:
+            cache[nb_path] = None
+        else:
+            kinds = [c.get("cell_type") for c in nb["cells"]]
+            every = [Translation(src) if k == "code" else None for k, src in zip(kinds, cells)]
+            cache[nb_path] = (every, [t for t in every if t is not None])
+    loc = f"{rel}:{m['ruff'] or ''}{m['cell']}"
+    if cache[nb_path] is None:  # a plain notebook: positions are the cell's own
+        return f"{m['pre']}{loc}:{m['line']}:{m['col']}{m['rest']}", True
+    every, code = cache[nb_path]
+    cells = every if m["ruff"] else code
+    k = int(m["cell"]) - 1
+    tr = cells[k] if 0 <= k < len(cells) else None
+    if tr is None:
+        return line, True
+    pos = source_position(tr, int(m["line"]) - 1, int(m["col"]) - 1, line)
+    if not isinstance(pos, dict):
+        return pos, True
+    return f"{m['pre']}{loc}:{pos['line'] + 1}:{pos['character'] + 1}{m['rest']}", True
 
 
 def condense(lines: list[str]) -> list[str]:
@@ -145,13 +258,15 @@ def main(argv: list[str]) -> int:
             if not p.is_relative_to(root):
                 sys.exit(f"byname tool: {a} is outside {root}")
             a = str(p.relative_to(root).with_suffix(".py"))
+        elif a.endswith((".py", ".ipynb")) and p.is_absolute() and p.resolve().is_relative_to(root):
+            a = str(p.resolve().relative_to(root))  # its copy in the mirror (a byname notebook is translated there)
         args.append(a)
     if Path(cmd).name in ("basedpyright", "pyright") and "--pythonpath" not in args:
         args = ["--pythonpath", sys.executable, *args]
     proc = subprocess.run([resolve(cmd), *args], cwd=out, capture_output=True, text=True, check=False)
     cache: dict = {}
-    dropped = kept = quiet = 0
-    lines = []
+    dropped = quiet = 0
+    lines, located_lines = [], []
     for line in condense((proc.stdout + proc.stderr).splitlines()):
         new, located = remap(line, root, out, cache)
         if new is None:
@@ -159,13 +274,38 @@ def main(argv: list[str]) -> int:
         elif new == "":
             quiet += 1
         else:
-            kept += located
+            if located:
+                located_lines.append(new)
             lines.append(new)
-    if dropped or quiet:  # the tool's own totals now overcount
-        lines = [ln for ln in lines if not SUMMARY.match(ln.strip())]
-    if dropped:
-        lines.append(f"byname: hid {dropped} diagnostic(s) on generated code")
-    if quiet:
-        lines.append(f"byname: hid {quiet} unused-variable warning(s) on walrus labels in returns")
+    if dropped or quiet:  # the tool's own totals count what byname hid: recount what's shown
+        lines = recount(lines, located_lines)
+    if os.environ.get("BYNAME_DEBUG"):
+        if dropped:
+            lines.append(f"byname: hid {dropped} diagnostic(s) on generated code")
+        if quiet:
+            lines.append(f"byname: hid {quiet} unused-variable warning(s) on walrus labels in returns")
     print("\n".join(lines))
-    return 0 if dropped and not kept else proc.returncode
+    return 0 if (dropped or quiet) and not located_lines else proc.returncode
+
+
+def plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def recount(lines: list[str], located: list[str]) -> list[str]:
+    """The tool's summary lines, with totals for the diagnostics shown: Ruff's `Found N errors.` (or
+    `All checks passed!`) and `[*] N fixable ...`, basedpyright's `N errors, N warnings, N notes`."""
+    out = []
+    for ln in lines:
+        text = ln.strip()
+        if text.startswith(("Found ", "All checks passed")):
+            out.append(f"Found {plural(len(located), 'error')}." if located else "All checks passed!")
+        elif text.startswith("[*] "):
+            if fixable := sum("[*]" in loc for loc in located):
+                out.append(f"[*] {fixable} fixable with the `--fix` option.")
+        elif re.match(r"\d+ errors?, \d+ warnings?, \d+ notes?", text):
+            n = {k: sum(f" - {k}:" in loc for loc in located) for k in ("error", "warning", "information")}
+            out.append(f"{plural(n['error'], 'error')}, {plural(n['warning'], 'warning')}, {plural(n['information'], 'note')}")
+        else:
+            out.append(ln)
+    return out
