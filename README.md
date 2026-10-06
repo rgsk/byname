@@ -280,6 +280,7 @@ without byname) it stays off.
 | `byname.outputOnSave` | `false` | on save, write the translation next to the file as `<name>.pyn.py` |
 | `byname.outputStripMain` | `false` | leave the `if __name__ == "__main__":` block out of `<name>.pyn.py` |
 | `byname.diagnosticsOnSave` | `false` | new errors appear on save, not while typing; fixed ones disappear at once |
+| `byname.pythonDiagnostics` | `true` | `false`: `.py` files and plain notebooks show no errors or warnings, only syntax errors and faded unused code (check them with `byname tool basedpyright`); `.pyn` always shows all |
 
 The command **"byname: Write Python Output"** writes `<name>.pyn.py` on demand.
 

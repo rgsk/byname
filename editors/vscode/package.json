@@ -2,7 +2,7 @@
   "name": "byname",
   "displayName": "byname (.pyn)",
   "description": "Language support for .pyn files, and .py files and Jupyter notebooks alongside them: bind-by-name Python, type-checked through basedpyright.",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "publisher": "rgsk",
   "private": true,
   "license": "MIT",
@@ -78,6 +78,11 @@
           "type": "boolean",
           "default": false,
           "description": "Show errors for the saved text only: no new red squiggles while typing, they update on save."
+        },
+        "byname.pythonDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the checker's errors and warnings for .py files and plain notebooks. Off: they still get hover, completion and go to definition, plus syntax errors and faded unused code; check them with `byname tool basedpyright`. .pyn files and byname notebooks always show everything."
         }
       }
     },

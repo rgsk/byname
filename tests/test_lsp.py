@@ -877,3 +877,62 @@ def test_py_files_are_formatted_and_fixed_by_byname(lsp):
         ctx = {"diagnostics": [], "only": [kind], "triggerKind": 2}
         actions = c.request("textDocument/codeAction", {"textDocument": {"uri": py}, "range": rng, "context": ctx})
         assert [e["newText"] for a in actions for es in a["edit"]["changes"].values() for e in es] == [want], kind
+
+
+def test_python_diagnostics_off_keeps_only_syntax_errors_and_hints(tmp_path):
+    # byname.pythonDiagnostics false: a .py file shows no type errors in the editor (Alt+L still checks it),
+    # but a syntax error and faded unused code still show; .pyn always shows everything
+    c, root, uri = start(tmp_path, pythonDiagnostics=False)
+    py = (root / "x.py").as_uri()
+    text = "import os\nx: int = 'a'\ndef f(:\n    pass\n"
+    c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": py, "languageId": "python", "version": 1, "text": text}}})
+    end = time.time() + 30
+    while not c.diags.get(py) and time.time() < end:  # the first publish can be the empty one before analysis
+        c.diags.pop(py, None)
+        c.wait_diags(py, timeout=5)
+    diags = c.diags[py]
+    assert {d.get("code") for d in diags} == {None, "reportUnusedImport"}
+    assert not any(d.get("code") == "reportAssignmentType" for d in diags)
+    bad = (root / "bad.pyn").as_uri()  # the same error in a .pyn is shown
+    c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": bad, "languageId": "pyn", "version": 1, "text": "x: int = 'a'\n"}}})
+    assert [d.get("code") for d in c.wait_diags(bad)] == ["reportAssignmentType"]
+    c.close()
+
+
+def test_a_pyn_in_a_folder_made_after_startup_imports_its_neighbours(tmp_path):
+    # the checker gets the folders holding .pyn when it asks for its settings; a .pyn in a folder made
+    # later (files moved, a new package) must still import the .py and .pyn next to it
+    c, root, uri = start(tmp_path)
+    c.wait_diags(uri)  # settings asked and answered, as when VS Code opens the first file
+    (root / "pkg").mkdir()
+    (root / "pkg" / "helper_py.py").write_text("def a() -> int:\n    return 1\n")
+    (root / "pkg" / "helper_pyn.pyn").write_text("def b():\n    return (x=1)\n")
+    changes = [{"uri": (root / "pkg" / f).as_uri(), "type": 1} for f in ("helper_py.py", "helper_pyn.pyn")]
+    c.send({"method": "workspace/didChangeWatchedFiles", "params": {"changes": changes}})
+    text = "from helper_py import a\nfrom helper_pyn import b\n\nprint(a(), b().x)\n"
+    late = (root / "pkg" / "late.pyn").as_uri()
+    c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": late, "languageId": "pyn", "version": 1, "text": text}}})
+    c.wait_diags(late)
+    assert wait_errors(c, late, []) == []
+    c.close()
+
+
+def test_pyn_imports_pyn_with_a_project_config_as_vs_code_starts_it(tmp_path):
+    # VS Code sends workspace folders and rootPath; with a project config setting extraPaths, the checker would then
+    # ignore the extraPaths byname sends for its shadow files, and a .pyn couldn't import its .pyn neighbour
+    root = tmp_path / "ws"
+    (root / "src").mkdir(parents=True)
+    (root / "pyproject.toml").write_text('[tool.basedpyright]\ntypeCheckingMode = "standard"\nextraPaths = ["src"]\n')
+    (root / "src" / "people.pyn").write_text(PEOPLE)
+    c = Client(root, tmp_path / "cache")
+    caps = {"workspace": {"configuration": True, "workspaceFolders": True}}
+    folders = [{"uri": root.as_uri(), "name": "ws"}]  # as VS Code sends them, rootPath included
+    c.request("initialize", {"processId": None, "rootPath": str(root), "rootUri": root.as_uri(), "workspaceFolders": folders, "capabilities": caps})
+    c.send({"method": "initialized", "params": {}})
+    text = "from people import make\n\nprint(make(name='a', age=1).nme)\n"
+    uri = (root / "src" / "main.pyn").as_uri()
+    c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": uri, "languageId": "pyn", "version": 1, "text": text}}})
+    want = [(2, 'Cannot access attribute "nme" for class "(name: str, age: int, greeting: str)"')]
+    c.wait_diags(uri)
+    assert wait_errors(c, uri, want) == want
+    c.close()

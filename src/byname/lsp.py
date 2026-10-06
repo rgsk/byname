@@ -345,6 +345,10 @@ class Proxy:
         self.strip_main = False  # byname.outputStripMain: drop `if __name__ == "__main__":` from it
         # byname.diagnosticsOnSave: hold diagnostics back while typing, show the saved text's ones
         self.diags_on_save = False
+        # byname.pythonDiagnostics: the checker's findings on .py files and plain notebooks in the editor.
+        # Off: only syntax errors and faded unused code there (Alt+L still checks them); .pyn always shows all
+        self.python_diags = True
+        self.sent_paths: list[str] | None = None  # extra_paths() as last given to the checker
         self.saved: dict[Path, int | None] = {}  # editor version of the last saved text, per open .pyn
         self.held: dict[Path, dict] = {}  # newest diagnostics not shown yet, per open .pyn
         self.shown: dict[Path, list] = {}  # diagnostics the editor shows now, per open .pyn
@@ -439,6 +443,14 @@ class Proxy:
                 if d not in out:
                     out.append(d)
         return out
+
+    def refresh_paths(self) -> None:
+        """A .pyn appeared in (or left) a folder: the checker's extraPaths, given when it asked for its
+        settings, are stale, so a .pyn there can't import its .py neighbours. Saying the settings changed
+        makes it ask again (inject_config)."""
+        if self.sent_paths is not None and self.extra_paths() != self.sent_paths:
+            self.sent_paths = None
+            self.server.send({"jsonrpc": "2.0", "method": "workspace/didChangeConfiguration", "params": {"settings": None}})
 
     # rewriting ----------------------------------------------------------
 
@@ -540,6 +552,13 @@ class Proxy:
             self.scan()
             caps = params.get("capabilities", {})
             caps.get("general", {}).pop("positionEncodings", None)  # we map in UTF-16
+            # one root, no workspace folders: with folders, a project config setting extraPaths
+            # ([tool.basedpyright] in pyproject.toml, pyrightconfig.json) makes the checker drop the
+            # extraPaths we send for the shadow files, so a .pyn can't import another .pyn (measured, 1.40.1)
+            params["rootUri"] = self.root.as_uri()
+            params.pop("workspaceFolders", None)
+            params.pop("rootPath", None)  # deprecated twin of rootUri that VS Code still sends: the same as a folder
+            caps.get("workspace", {}).pop("workspaceFolders", None)
             # no pull diagnostics: VS Code would ask for them on every edit and get the checker's answer
             # straight back; pushed ones go through diagnostics(), which maps and maybe holds them
             caps.get("textDocument", {}).pop("diagnostic", None)
@@ -548,10 +567,13 @@ class Proxy:
             self.output_on_save = bool(opts.get("outputOnSave"))
             self.strip_main = bool(opts.get("outputStripMain"))
             self.diags_on_save = bool(opts.get("diagnosticsOnSave"))
+            self.python_diags = opts.get("pythonDiagnostics") is not False
             self.pending[mid] = ("initialize", None)
             self.server.send(msg)
             return
 
+        if method == "workspace/didChangeWorkspaceFolders":
+            return  # we serve one root (see initialize)
         if method == "workspace/executeCommand" and params.get("command") == WRITE_OUTPUT:
             self.client.send(self.run_write_output(mid, (params.get("arguments") or [None])[0]))
             return
@@ -592,6 +614,9 @@ class Proxy:
                     self.py_text.pop(uri, None)
             if method == "workspace/didChangeWatchedFiles":
                 msg = {**msg, "params": {"changes": [self.watched(c) for c in params.get("changes", [])]}}
+                self.server.send(msg)
+                self.refresh_paths()
+                return
             elif mid is not None:  # e.g. workspace/symbol: results may still point into shadows
                 self.pending[mid] = (method, self.last_completion if method == "completionItem/resolve" else None)
             self.server.send(msg)
@@ -642,6 +667,7 @@ class Proxy:
             self.write_shadow(path, td["text"])
             sent = {"uri": shadow, "languageId": "python", "version": doc.sent, "text": doc.tr.hidden}
             self.server.send({**msg, "params": {"textDocument": sent}})
+            self.refresh_paths()
             return True
         if method == "textDocument/didChange":
             text = params["contentChanges"][-1]["text"]  # we advertise full sync
@@ -958,7 +984,8 @@ class Proxy:
 
         def analysis(cfg: dict, based: bool) -> dict:
             cfg = dict(cfg or {})
-            cfg["extraPaths"] = list(cfg.get("extraPaths") or []) + self.extra_paths()
+            self.sent_paths = self.extra_paths()
+            cfg["extraPaths"] = list(cfg.get("extraPaths") or []) + self.sent_paths
             if based:
                 cfg.setdefault("typeCheckingMode", "standard")  # pyright's default; "recommended" is noisy
             return cfg
@@ -1044,7 +1071,11 @@ class Proxy:
         if params.get("version") in self.temp_versions:
             return None  # computed on a completion-only temporary text
         doc = self.doc_for_shadow(params["uri"], params.get("version"))
-        if doc is None:
+        if doc is None:  # a .py file or a plain notebook's cell, as the checker saw it
+            if not self.python_diags:  # keep syntax errors (no rule) and hints (faded unused code)
+                kept = [d for d in params.get("diagnostics", []) if not d.get("code") or d.get("severity", 1) == 4]
+                params = {**params, "diagnostics": kept}
+                msg = {**msg, "params": params}
             if params["uri"] in self.cell_text:  # a plain notebook's cell: the version is ours, not the editor's
                 return {**msg, "params": {k: v for k, v in params.items() if k != "version"}}
             return msg
