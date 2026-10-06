@@ -2,16 +2,17 @@
 
     editor <--LSP--> byname lsp <--LSP--> checker (basedpyright-langserver by default)
 
-The checker sees each .pyn as a shadow .py file holding its translation: open documents are sent
-in memory, and every .pyn in the workspace is also written to a shadow directory so imports
-resolve. Positions are mapped both ways; everything else passes through untouched.
+The checker runs on a mirror of the project (tools.mirror, as `byname tool` does): each .pyn is its
+translation there, .py and config files are symlinks, so the project's checker config, import paths
+and executionEnvironments apply to a .pyn as to a .py beside it. Every URI is mapped between the
+project and the mirror; open documents are sent in memory under their mirror URI. Positions in a .pyn
+are mapped both ways; everything else passes through untouched.
 
 .py files go to the checker as they are: byname syntax can't run there. So do notebooks, unless a
 cell loads byname (`%load_ext byname`, see notebook.py): then every cell is translated on its own,
-as the kernel runs it, and keeps its own URI on the checker's side, which chains cells itself.
+as the kernel runs it, under its URI in the mirror, where the checker chains cells itself.
 """
 
-import hashlib
 import json
 import os
 import re
@@ -21,7 +22,7 @@ import sys
 import threading
 from collections import Counter
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import url2pathname
 
 from .output import output_path, render
@@ -29,7 +30,6 @@ from .srcmap import LineIndex, Translation
 from .transform import DS, FIELDSET, ORDER, REPR, pattern_slot
 
 DEFAULT_CHECKER = ["basedpyright-langserver", "--stdio"]
-SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache"}
 DROP = object()  # a result element whose position fell inside generated-only code
 WRITE_OUTPUT = "byname.server.writeOutput"  # executeCommand: write <file>.pyn.py now (Alt+C)
 PLACEHOLDER = "__byname_slot"  # stands in for an empty pattern item while completing
@@ -124,6 +124,9 @@ VARIANCE_RE = re.compile(r'Type parameter "T(\d+)@_(?:typ|opn)_(\w+?)" is \w+, b
 KEY_RE = re.compile(r'"_key_\w*"')
 RULE_RE = re.compile(r"\s*\((report\w+)\)\s*$")
 CODE_KEYS = {"newText", "insertText", "filterText", "sortText", "uri", "targetUri", "data"}
+# keys whose string values are document URIs (a notebook cell's `document` is one, in a structure change)
+URI_KEYS = {"uri", "targetUri", "document", "oldUri", "newUri"}
+URI_SCHEMES = ("file:", "vscode-notebook-cell:")
 
 
 def pretty(text: str) -> str:
@@ -330,7 +333,8 @@ class Proxy:
         self.proc = subprocess.Popen(checker, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         self.server = Writer(self.proc.stdin)
         self.root: Path | None = None
-        self.shadow_root: Path | None = None
+        self.mirror: Path | None = None  # what the checker runs on, see tools.mirror
+        self.back: dict[str, str] = {}  # mirror uri -> the editor's uri, as the editor wrote it
         # open .pyn by path, and cells of byname notebooks by uri; recent versions, newest last
         self.docs: dict[Path | str, list[Doc]] = {}
         self.notebooks: dict[str, Notebook] = {}  # open notebooks by uri
@@ -356,7 +360,6 @@ class Proxy:
         # byname.pythonDiagnostics: the checker's findings on .py files and plain notebooks in the editor.
         # Off: only syntax errors and faded unused code there (Alt+L still checks them); .pyn always shows all
         self.python_diags = True
-        self.sent_paths: list[str] | None = None  # extra_paths() as last given to the checker
         self.saved: dict[Path, int | None] = {}  # editor version of the last saved text, per open .pyn
         self.held: dict[Path, dict] = {}  # newest diagnostics not shown yet, per open .pyn
         self.shown: dict[Path, list] = {}  # diagnostics the editor shows now, per open .pyn
@@ -364,24 +367,52 @@ class Proxy:
 
     # paths --------------------------------------------------------------
 
-    def shadow_path(self, pyn: Path) -> Path:
-        assert self.shadow_root is not None
-        try:
-            rel = pyn.relative_to(self.root)
-        except ValueError:
-            rel = Path("_abs") / pyn.relative_to(pyn.anchor)
-        return (self.shadow_root / rel).with_suffix(".py")
+    def to_mirror(self, path: Path) -> Path:
+        """Where the checker sees an editor file: its copy in the mirror (a .pyn's translation), or the file
+        itself if the mirror doesn't hold it (.venv, site-packages). A .pyn it doesn't hold (outside the
+        project) goes under _abs."""
+        from .tools import mirrored
 
-    def pyn_path(self, shadow: Path) -> Path | None:
-        if self.shadow_root is None:
-            return None
-        try:
-            rel = shadow.relative_to(self.shadow_root)
-        except ValueError:
-            return None
-        if rel.parts and rel.parts[0] == "_abs":
-            return (Path("/") / Path(*rel.parts[1:])).with_suffix(".pyn")
-        return (self.root / rel).with_suffix(".pyn")
+        assert self.root is not None and self.mirror is not None
+        if path.is_relative_to(self.mirror):
+            return path
+        if (rel := mirrored(self.root, path)) is not None:
+            return self.mirror / rel
+        if path.suffix == ".pyn":
+            return (self.mirror / "_abs" / path.relative_to(path.anchor)).with_suffix(".py")
+        return path
+
+    def from_mirror(self, path: Path) -> Path:
+        """The editor file a checker path stands for: a mirror .py is its .pyn's translation if there is one."""
+        if self.mirror is None or self.root is None or not path.is_relative_to(self.mirror):
+            return path
+        rel = path.relative_to(self.mirror)
+        real = Path("/", *rel.parts[1:]) if rel.parts and rel.parts[0] == "_abs" else self.root / rel
+        if real.suffix == ".py" and ((pyn := real.with_suffix(".pyn")) in self.docs or pyn.is_file() or rel.parts[0] == "_abs"):
+            return pyn
+        return real
+
+    def uri_to_checker(self, uri):
+        if self.mirror is None or not (isinstance(uri, str) and uri.startswith(URI_SCHEMES)):
+            return uri
+        p = urlparse(uri)
+        path = Path(url2pathname(p.path))
+        if (m := self.to_mirror(path)) == path:
+            return uri
+        out = m.as_uri() if p.scheme == "file" else uri.replace(p.path, quote(str(m)), 1)  # a cell keeps its form
+        self.back[out] = uri
+        return out
+
+    def uri_to_editor(self, uri):
+        if self.mirror is None or not (isinstance(uri, str) and uri.startswith(URI_SCHEMES)):
+            return uri
+        if uri in self.back:
+            return self.back[uri]
+        p = urlparse(uri)
+        path = Path(url2pathname(p.path))
+        if (real := self.from_mirror(path)) == path:
+            return uri
+        return real.as_uri() if p.scheme == "file" else uri.replace(p.path, quote(str(real)), 1)
 
     def is_pyn(self, uri) -> bool:
         return isinstance(uri, str) and uri.startswith("file:") and uri.endswith(".pyn")
@@ -395,21 +426,23 @@ class Proxy:
             return uri
         return None
 
-    def checker_uri(self, key: Path | str) -> str:
-        return self.shadow_path(key).as_uri() if isinstance(key, Path) else key
+    def editor_uri(self, key: Path | str) -> str:
+        if isinstance(key, str):
+            return key
+        return self.docs[key][-1].uri if self.docs.get(key) else key.as_uri()
 
-    def doc_for_shadow(self, uri: str, version=None) -> Doc | None:
-        if isinstance(uri, str) and uri in self.docs:  # a byname notebook's cell: same uri both sides
+    def doc_for(self, uri: str, version=None) -> Doc | None:
+        """The .pyn or byname cell a checker uri holds the translation of, at that checker version."""
+        uri = self.uri_to_editor(uri)
+        if isinstance(uri, str) and uri in self.docs:  # a byname notebook's cell
             return self.pick(self.docs[uri], version)
-        if not (isinstance(uri, str) and uri.startswith("file:")):
+        if not self.is_pyn(uri):
             return None
-        pyn = self.pyn_path(uri_to_path(uri))
-        if pyn is None:
-            return None
+        pyn = uri_to_path(uri)
         if versions := self.docs.get(pyn):
             return self.pick(versions, version)
         try:
-            return Doc(pyn.as_uri(), pyn.read_text(encoding="utf-8"), None)
+            return Doc(uri, pyn.read_text(encoding="utf-8"), None)
         except OSError:
             return None
 
@@ -420,50 +453,40 @@ class Proxy:
                 return d
         return versions[-1]
 
-    # shadows on disk ----------------------------------------------------
+    # the mirror on disk -------------------------------------------------
 
-    def write_shadow(self, pyn: Path, text: str | None = None) -> None:
-        try:
-            text = pyn.read_text(encoding="utf-8") if text is None else text
-        except OSError:
-            return
-        out = self.shadow_path(pyn)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(Translation(text).hidden, encoding="utf-8")
+    def sync(self, changes: list | None = None) -> None:
+        """Bring the whole mirror up to date (0.04s on a 2000-file project: walking, translating each .pyn)."""
+        from .tools import mirror
 
-    def scan(self) -> None:
-        if self.root is None:
-            return
-        shutil.rmtree(self.shadow_root, ignore_errors=True)
-        for dirpath, dirnames, filenames in os.walk(self.root):
-            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-            for f in filenames:
-                if f.endswith(".pyn"):
-                    self.write_shadow(Path(dirpath) / f)
+        assert self.root is not None
+        mirror(self.root, "lsp", default_config=False, changes=changes)
 
-    def extra_paths(self) -> list[str]:
-        """Dirs holding .pyn: the shadow dir (sibling .pyn imports) and the real one (sibling .py imports)."""
-        if self.shadow_root is None or not self.shadow_root.exists():
-            return []
-        out = [str(self.shadow_root)]
-        for py in self.shadow_root.rglob("*.py"):
-            for d in (str(py.parent), str(self.pyn_path(py).parent)):
-                if d not in out:
-                    out.append(d)
-        return out
+    def place(self, path: Path) -> None:
+        """One file's copy in the mirror up to date (a .pyn from outside the project too)."""
+        from .tools import place, write_if_changed
 
-    def refresh_paths(self) -> None:
-        """A .pyn appeared in (or left) a folder: the checker's extraPaths, given when it asked for its
-        settings, are stale, so a .pyn there can't import its .py neighbours. Saying the settings changed
-        makes it ask again (inject_config)."""
-        if self.sent_paths is not None and self.extra_paths() != self.sent_paths:
-            self.sent_paths = None
-            self.server.send({"jsonrpc": "2.0", "method": "workspace/didChangeConfiguration", "params": {"settings": None}})
+        assert self.root is not None and self.mirror is not None
+        if place(self.root, self.mirror, path) is None and path.suffix == ".pyn" and path.is_file():
+            write_if_changed(self.to_mirror(path), Translation(path.read_text(encoding="utf-8")).hidden)
+
+    def send_server(self, msg: dict) -> None:
+        """To the checker, every document uri in the params as the checker knows it (see to_mirror)."""
+        if "params" in msg:
+            msg = {**msg, "params": self.uris_to_checker(msg["params"])}
+        self.server.send(msg)
+
+    def uris_to_checker(self, obj):
+        if isinstance(obj, list):
+            return [self.uris_to_checker(x) for x in obj]
+        if not isinstance(obj, dict):
+            return obj
+        return {k: self.uri_to_checker(v) if k in URI_KEYS and isinstance(v, str) else v if k == "data" else self.uris_to_checker(v) for k, v in obj.items()}
 
     # rewriting ----------------------------------------------------------
 
     def to_checker(self, obj, doc: Doc):
-        """Request params: .pyn uri -> shadow uri, source positions -> hidden positions."""
+        """Request params: source positions -> hidden positions (uris: send_server)."""
         if isinstance(obj, list):
             return [self.to_checker(x, doc) for x in obj]
         if not isinstance(obj, dict):
@@ -472,18 +495,10 @@ class Proxy:
             return doc.tr.range_to_hidden(obj)
         if is_position(obj):
             return doc.tr.position_to_hidden(obj)
-        out = {}
-        for k, v in obj.items():
-            if k == "uri" and self.is_pyn(v):
-                out[k] = self.shadow_path(uri_to_path(v)).as_uri()
-            elif k == "data":
-                out[k] = v
-            else:
-                out[k] = self.to_checker(v, doc)
-        return out
+        return {k: v if k == "data" else self.to_checker(v, doc) for k, v in obj.items()}
 
     def to_editor(self, obj, doc: Doc | None, display: bool = True, key: str = ""):
-        """Results: shadow uri -> .pyn uri, hidden ranges -> source ranges (DROP if in the prelude).
+        """Results: mirror uri -> editor uri, hidden ranges -> source ranges (DROP if in the prelude).
         Locations widen to the source they came from (display); TextEdits keep exact insertion points."""
         if isinstance(obj, list):
             items = [self.to_editor(x, doc, display, key) for x in obj]
@@ -517,21 +532,24 @@ class Proxy:
         outer = doc
         if uri_key or (isinstance(td, dict) and "uri" in td):
             uri = obj[uri_key] if uri_key else td["uri"]
-            target = self.doc_for_shadow(uri)
-            if target is not None:
-                if uri_key:
-                    out[uri_key] = target.uri
-                else:
-                    out["textDocument"] = {**td, "uri": target.uri}
+            target = self.doc_for(uri)
+            editor = target.uri if target is not None else self.uri_to_editor(uri)
+            if uri_key:
+                out[uri_key] = editor
+            else:
+                out["textDocument"] = {**td, "uri": editor}
             doc = target
         for k, v in obj.items():
             if k in ("data", "textDocument") or k == uri_key:
                 continue
+            if k in ("oldUri", "newUri"):  # a file operation in a WorkspaceEdit
+                out[k] = self.uri_to_editor(v)
+                continue
             if k == "changes" and isinstance(v, dict):  # WorkspaceEdit: {uri: [TextEdit]}
                 changes = {}
                 for u, edits in v.items():
-                    target = self.doc_for_shadow(u)
-                    changes[target.uri if target else u] = self.to_editor(edits, target)
+                    target = self.doc_for(u)
+                    changes[target.uri if target else self.uri_to_editor(u)] = self.to_editor(edits, target)
                 out[k] = changes
                 continue
             nv = self.to_editor(v, outer if k == "originSelectionRange" else doc, display and "newText" not in obj, k)
@@ -554,18 +572,18 @@ class Proxy:
         if method == "initialize":
             root = params.get("rootUri") or next((f["uri"] for f in params.get("workspaceFolders") or []), None)
             self.root = uri_to_path(root) if root else Path.cwd()
-            key = hashlib.sha1(str(self.root).encode()).hexdigest()[:12]
-            cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-            self.shadow_root = cache / "byname" / key
-            self.scan()
+            from .tools import mirror_dir
+
+            self.mirror = mirror_dir(self.root, "lsp")
+            self.sync()
             caps = params.get("capabilities", {})
             caps.get("general", {}).pop("positionEncodings", None)  # we map in UTF-16
-            # one root, no workspace folders: with folders, a project config setting extraPaths
-            # ([tool.basedpyright] in pyproject.toml, pyrightconfig.json) makes the checker drop the
-            # extraPaths we send for the shadow files, so a .pyn can't import another .pyn (measured, 1.40.1)
-            params["rootUri"] = self.root.as_uri()
-            params.pop("workspaceFolders", None)
-            params.pop("rootPath", None)  # deprecated twin of rootUri that VS Code still sends: the same as a folder
+            # one root, the mirror, given every way: with rootUri alone the checker doesn't read the project's
+            # config (pyproject.toml, pyrightconfig.json; measured, 1.40.1). No folder support, so it doesn't
+            # ask the editor for its folders
+            params["rootUri"] = self.mirror.as_uri()
+            params["rootPath"] = str(self.mirror)
+            params["workspaceFolders"] = [{"uri": self.mirror.as_uri(), "name": self.root.name}]
             caps.get("workspace", {}).pop("workspaceFolders", None)
             # no pull diagnostics: VS Code would ask for them on every edit and get the checker's answer
             # straight back; pushed ones go through diagnostics(), which maps and maybe holds them
@@ -577,7 +595,7 @@ class Proxy:
             self.diags_on_save = bool(opts.get("diagnosticsOnSave"))
             self.python_diags = opts.get("pythonDiagnostics") is not False
             self.pending[mid] = ("initialize", None)
-            self.server.send(msg)
+            self.server.send(msg)  # its uris are the mirror's already
             return
 
         if method == "workspace/didChangeWorkspaceFolders":
@@ -621,13 +639,12 @@ class Proxy:
                 elif method == "textDocument/didClose":
                     self.py_text.pop(uri, None)
             if method == "workspace/didChangeWatchedFiles":
-                msg = {**msg, "params": {"changes": [self.watched(c) for c in params.get("changes", [])]}}
-                self.server.send(msg)
-                self.refresh_paths()
+                if changes := self.watched(params.get("changes", [])):
+                    self.send_server({**msg, "params": {"changes": changes}})
                 return
-            elif mid is not None:  # e.g. workspace/symbol: results may still point into shadows
+            elif mid is not None:  # e.g. workspace/symbol: results point into the mirror
                 self.pending[mid] = (method, self.last_completion if method == "completionItem/resolve" else None)
-            self.server.send(msg)
+            self.send_server(msg)
             return
 
         if isinstance(key, Path) and self.on_pyn_sync(msg, key):
@@ -658,24 +675,22 @@ class Proxy:
             mapped["position"] = vp
         elif method == "textDocument/declaration":
             msg = {**msg, "method": "textDocument/definition"}
-        self.server.send({**msg, "params": mapped})
+        self.send_server({**msg, "params": mapped})
 
     def on_pyn_sync(self, msg: dict, path: Path) -> bool:
         """didOpen/didChange/didSave/didClose of a .pyn: True if it was one."""
         method, params = msg.get("method"), msg.get("params") or {}
         td = params.get("textDocument") or {}
         uri = td.get("uri")
-        shadow = self.shadow_path(path).as_uri()
 
         if method == "textDocument/didOpen":
             doc = Doc(uri, td["text"], td.get("version"))
             doc.sent = self.next_version()
             self.docs[path] = [doc]
             self.saved[path] = doc.version  # opened from disk, so this text is the saved one
-            self.write_shadow(path, td["text"])
-            sent = {"uri": shadow, "languageId": "python", "version": doc.sent, "text": doc.tr.hidden}
-            self.server.send({**msg, "params": {"textDocument": sent}})
-            self.refresh_paths()
+            self.place(path)  # a file made since the last sync: the others import it from the mirror
+            sent = {"uri": uri, "languageId": "python", "version": doc.sent, "text": doc.tr.hidden}
+            self.send_server({**msg, "params": {"textDocument": sent}})
             return True
         if method == "textDocument/didChange":
             text = params["contentChanges"][-1]["text"]  # we advertise full sync
@@ -686,8 +701,8 @@ class Proxy:
             return True
         if method == "textDocument/didSave":
             versions = self.docs.get(path)
-            self.write_shadow(path, versions[-1].tr.source if versions else None)
-            self.server.send({**msg, "params": {"textDocument": {"uri": shadow}}})
+            self.place(path)
+            self.send_server({**msg, "params": {"textDocument": {"uri": uri}}})
             if self.output_on_save and versions:
                 self.write_output(path, versions[-1])
             if versions:
@@ -698,7 +713,7 @@ class Proxy:
             self.saved.pop(path, None)
             self.held.pop(path, None)
             self.shown.pop(path, None)
-            self.server.send({**msg, "params": {"textDocument": {"uri": shadow}}})
+            self.send_server({**msg, "params": {"textDocument": {"uri": uri}}})
             self.client.send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": uri, "diagnostics": []}})
             return True
         return False
@@ -742,20 +757,20 @@ class Proxy:
                 self.open_cell(nb, td)
             nb.byname = self.is_byname(nb)
             cells = [{**td, **self.cell_for_checker(nb, td["uri"])} for td in params.get("cellTextDocuments", [])]
-            self.server.send({**msg, "params": {**params, "cellTextDocuments": cells}})
+            self.send_server({**msg, "params": {**params, "cellTextDocuments": cells}})
             return
         nb = self.notebooks.get(nbd.get("uri"))
         if nb is None:
-            self.server.send(msg)
+            self.send_server(msg)
             return
         if method == "notebookDocument/didClose":
             del self.notebooks[nb.uri]
             for u in nb.cells:
                 self.close_cell(u)
-            self.server.send(msg)
+            self.send_server(msg)
             return
         if method != "notebookDocument/didChange":
-            self.server.send(msg)
+            self.send_server(msg)
             return
         nb.version = nbd.get("version", nb.version)
         change = params.get("change") or {}
@@ -784,7 +799,7 @@ class Proxy:
         if changed:
             content = [self.cell_for_checker(nb, u) for u in dict.fromkeys(changed)]
             cells["textContent"] = [{"document": {"uri": c["uri"], "version": c["version"]}, "changes": [{"text": c["text"]}]} for c in content]
-        self.server.send({**msg, "params": {**params, "change": {**change, "cells": cells}}})
+        self.send_server({**msg, "params": {**params, "change": {**change, "cells": cells}}})
 
     def next_version(self) -> int:
         self.counter += 1
@@ -798,15 +813,15 @@ class Proxy:
             self.temp_versions.add(v)
         else:
             doc.sent = v
-        td = {"uri": self.checker_uri(key), "version": v}
+        td = {"uri": self.editor_uri(key), "version": v}
         changes = [{"text": hidden}]
         if isinstance(key, Path):
-            self.server.send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {"textDocument": td, "contentChanges": changes}})
+            self.send_server({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {"textDocument": td, "contentChanges": changes}})
             return
         nb = self.notebooks[self.cell_nb[key]]
         cells = {"textContent": [{"document": td, "changes": changes}]}
         params = {"notebookDocument": {"uri": nb.uri, "version": nb.version}, "change": {"cells": cells}}
-        self.server.send({"jsonrpc": "2.0", "method": "notebookDocument/didChange", "params": params})
+        self.send_server({"jsonrpc": "2.0", "method": "notebookDocument/didChange", "params": params})
 
     def complete_slot(self, msg: dict, key: Path | str, doc: Doc) -> bool:
         """Completion at a field position of `(...) = expr`. The checker is shown a temporary text
@@ -838,8 +853,8 @@ class Proxy:
         hpos = LineIndex(hidden).position(h)
         rng = {"start": tr.src_lines.position(ws), "end": tr.src_lines.position(we)}
         self.pending[mid] = ("slot", (key, doc, rng, set(listed)))
-        sent = {"textDocument": {"uri": self.checker_uri(key)}, "position": hpos}
-        self.server.send({**msg, "params": sent})
+        sent = {"textDocument": {"uri": self.editor_uri(key)}, "position": hpos}
+        self.send_server({**msg, "params": sent})
         return True
 
     def finish_slot(self, result, key: Path | str, doc: Doc, rng: dict, listed: set[str]) -> dict:
@@ -857,13 +872,20 @@ class Proxy:
             out.append(it)
         return {"isIncomplete": False, "items": out}
 
+    def ruff_at(self, path: Path) -> tuple[str, Path | None]:
+        """(filename, cwd) for Ruff on an editor file: its copy in the mirror, as `byname tool ruff` sees it.
+        Ruff tells first-party imports by the files it finds, and a .pyn is a module only in the mirror."""
+        if self.mirror is None:
+            return str(path), self.root
+        return str(self.to_mirror(path)), self.mirror
+
     def format(self, mid, path: Path, doc: Doc) -> dict:
         """Whole-document ruff format via stand-ins (see fmt.py); answered here, not by the checker."""
         from .fmt import FormatError, format_pyn
 
         src = doc.tr.source
         try:
-            out = format_pyn(src, str(path), cwd=self.root)
+            out = format_pyn(src, *self.ruff_at(path))
         except (FormatError, SyntaxError) as e:
             return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32603, "message": f"byname format: {e}"}}
         if out == src:
@@ -877,7 +899,7 @@ class Proxy:
 
         src = doc.tr.source
         try:
-            out = fix_pyn(src, str(path), cwd=self.root, select=ORGANIZE if kind == ORGANIZE_KIND else None)
+            out = fix_pyn(src, *self.ruff_at(path), select=ORGANIZE if kind == ORGANIZE_KIND else None)
         except (FixError, ValueError):
             out = src  # mid-edit code: offer nothing rather than fail the save
         if out == src:
@@ -918,7 +940,7 @@ class Proxy:
         else:
             texts = [self.cell_text[u] for u in code]
             try:
-                fixed = fix_notebook(texts, nb.byname, str(path), cwd=self.root, select=ORGANIZE if kind == NOTEBOOK_ORGANIZE else None)
+                fixed = fix_notebook(texts, nb.byname, *self.ruff_at(path), select=ORGANIZE if kind == NOTEBOOK_ORGANIZE else None)
             except (FixError, ValueError):
                 fixed = texts  # mid-edit code: offer nothing rather than fail the save
             for u, old, new in zip(code, texts, fixed):
@@ -974,33 +996,32 @@ class Proxy:
             return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32603, "message": f"byname: {err}"}}
         return {"jsonrpc": "2.0", "id": mid, "result": str(output_path(path))}
 
-    def watched(self, change: dict) -> dict:
-        uri = change.get("uri")
-        if not self.is_pyn(uri):
-            return change
-        path = uri_to_path(uri)
-        shadow = self.shadow_path(path)
-        if change.get("type") == 3:  # deleted
-            shadow.unlink(missing_ok=True)
-        elif path not in self.docs:  # open docs are synced via didChange
-            self.write_shadow(path)
-        return {**change, "uri": shadow.as_uri()}
+    def watched(self, changes: list[dict]) -> list[dict]:
+        """The editor's file events as the checker's: the mirror is synced, and each copy that sync changed is
+        an event, as is a change to a file the mirror links to. A folder made or removed shows as the files in
+        it. Events outside the project (site-packages) pass through."""
+        from .tools import mirrored
+
+        assert self.root is not None and self.mirror is not None
+        made: list = []
+        self.sync(made)
+        out = {p.as_uri(): t for p, t in made}
+        passed = []
+        for c in changes:
+            path = uri_to_path(c.get("uri", ""))
+            if not path.is_relative_to(self.root):
+                passed.append(c)
+            elif c.get("type") != 3 and (rel := mirrored(self.root, path)) is not None and (self.mirror / rel).exists():
+                out.setdefault((self.mirror / rel).as_uri(), c.get("type", 2))
+        return [{"uri": u, "type": t} for u, t in out.items()] + passed
 
     def inject_config(self, items: list[dict], result: list) -> list:
-        """Add our extraPaths (and defaults) to the checker's settings, whichever shape it asks in:
-        pyright asks for `python.analysis`, basedpyright for `python` / `basedpyright` with a nested `analysis`."""
-
-        project = self.root is not None and has_pyright_config(self.root)
+        """byname's defaults in the checker's settings, whichever shape it asks in: pyright asks for
+        `python.analysis`, basedpyright for `python` / `basedpyright` with a nested `analysis`. A project config
+        decides over all of them (the checker ignores the editor's analysis settings then)."""
 
         def analysis(cfg: dict, based: bool) -> dict:
-            self.sent_paths = self.extra_paths()
-            if project:
-                # the project's config decides, as for `byname tool`: the editor's analysis settings would
-                # otherwise win (the checker merges them over it, started on the root alone), e.g. a global
-                # basedpyright.analysis.typeCheckingMode "off" silencing every .py
-                return {"extraPaths": self.sent_paths}
             cfg = dict(cfg or {})
-            cfg["extraPaths"] = list(cfg.get("extraPaths") or []) + self.sent_paths
             if based:
                 cfg.setdefault("typeCheckingMode", "standard")  # pyright's default; "recommended" is noisy
             return cfg
@@ -1075,6 +1096,12 @@ class Proxy:
 
         if method == "workspace/configuration" and mid is not None:
             self.server_requests[mid] = msg.get("params", {}).get("items", [])
+        elif method == "workspace/workspaceFolders" and mid is not None:  # we serve one root: the mirror
+            assert self.mirror is not None and self.root is not None
+            self.server.send({"jsonrpc": "2.0", "id": mid, "result": [{"uri": self.mirror.as_uri(), "name": self.root.name}]})
+            return
+        elif mid is not None and method in ("workspace/applyEdit", "window/showDocument"):  # mirror uris -> the editor's
+            msg = {**msg, "params": self.to_editor(msg.get("params"), None)}
         elif method == "textDocument/publishDiagnostics":
             msg = self.diagnostics(msg)
             if msg is None:
@@ -1085,18 +1112,20 @@ class Proxy:
         params = msg["params"]
         if params.get("version") in self.temp_versions:
             return None  # computed on a completion-only temporary text
-        doc = self.doc_for_shadow(params["uri"], params.get("version"))
+        doc = self.doc_for(params["uri"], params.get("version"))
         if doc is None:  # a .py file or a plain notebook's cell, as the checker saw it
+            kept = params.get("diagnostics", [])
             if not self.python_diags:  # keep syntax errors (no rule) and hints (faded unused code)
-                kept = [d for d in params.get("diagnostics", []) if not d.get("code") or d.get("severity", 1) == 4]
-                params = {**params, "diagnostics": kept}
-                msg = {**msg, "params": params}
+                kept = [d for d in kept if not d.get("code") or d.get("severity", 1) == 4]
+            kept = [{**d, "relatedInformation": self.to_editor(d["relatedInformation"], None)} if "relatedInformation" in d else d for d in kept]
+            params = {**params, "uri": self.uri_to_editor(params["uri"]), "diagnostics": kept}
+            msg = {**msg, "params": params}
             if params["uri"] in self.cell_text:  # a plain notebook's cell: the version is ours, not the editor's
                 return {**msg, "params": {k: v for k, v in params.items() if k != "version"}}
             return msg
         key = self.key(doc.uri)
         if key not in self.docs:
-            return None  # closed .pyn: its shadow's diagnostics have nowhere to go
+            return None  # closed .pyn: its translation's diagnostics have nowhere to go
         out = list(doc.tr.problems)
         flagged = {(p["range"]["start"]["line"], p["range"]["start"]["character"]) for p in out}
         for d in params.get("diagnostics", []):

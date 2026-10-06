@@ -2,6 +2,7 @@
 
 import json
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -53,7 +54,7 @@ def test_pretty_record_types():
 
 
 class Client:
-    def __init__(self, root: Path, cache: Path):
+    def __init__(self, root: Path, cache: Path, settings: dict | None = None):
         env = {"XDG_CACHE_HOME": str(cache), "PATH": str(Path(sys.executable).parent)}
         self.p = subprocess.Popen(
             [sys.executable, "-m", "byname", "lsp"], cwd=root, env=env,
@@ -62,6 +63,7 @@ class Client:
         self.q: queue.Queue = queue.Queue()
         self.next_id = 0
         self.diags: dict[str, list] = {}
+        self.settings = settings or {}  # the editor's, by section: what workspace/configuration gets
         threading.Thread(target=self.pump, daemon=True).start()
 
     def pump(self):
@@ -77,7 +79,7 @@ class Client:
         """Answer checker->editor requests; record diagnostics; return responses."""
         if "method" in msg and "id" in msg:  # server request
             if msg["method"] == "workspace/configuration":
-                self.send({"id": msg["id"], "result": [None] * len(msg["params"]["items"])})
+                self.send({"id": msg["id"], "result": [self.settings.get(i.get("section")) for i in msg["params"]["items"]]})
             else:
                 self.send({"id": msg["id"], "result": None})
         elif msg.get("method") == "textDocument/publishDiagnostics":
@@ -109,6 +111,21 @@ class Client:
     def close(self):
         self.p.kill()
 
+    def initialize(self, root: Path, caps: dict, **opts):
+        """As VS Code starts it: rootUri, rootPath and the workspace folder all given."""
+        folders = [{"uri": root.as_uri(), "name": root.name}]
+        params = {"processId": None, "rootPath": str(root), "rootUri": root.as_uri(), "workspaceFolders": folders, "capabilities": caps}
+        result = self.request("initialize", {**params, "initializationOptions": opts})
+        self.send({"method": "initialized", "params": {}})
+        return result
+
+    def open(self, path: Path, text: str | None = None) -> str:
+        uri = path.as_uri()
+        lang = "pyn" if path.suffix == ".pyn" else "python"
+        td = {"uri": uri, "languageId": lang, "version": 1, "text": path.read_text() if text is None else text}
+        self.send({"method": "textDocument/didOpen", "params": {"textDocument": td}})
+        return uri
+
 
 def pos(text: str, needle: str, nth: int = 0, delta: int = 0) -> dict:
     off = -1
@@ -131,12 +148,11 @@ def lsp(tmp_path_factory):
     (root / "helpers.py").write_text(HELPERS)
     c = Client(root, tmp_path_factory.mktemp("cache"))
     caps = {  # like VS Code: the checker asks us for settings, and we accept semantic tokens
-        "workspace": {"configuration": True},
+        "workspace": {"configuration": True, "workspaceFolders": True},
         "notebookDocument": {"synchronization": {}},
         "textDocument": {"semanticTokens": {"requests": {"full": {"delta": True}}, "tokenTypes": [], "tokenModifiers": [], "formats": ["relative"]}},
     }
-    c.init = c.request("initialize", {"processId": None, "rootUri": root.as_uri(), "capabilities": caps})
-    c.send({"method": "initialized", "params": {}})
+    c.init = c.initialize(root, caps)
     uri = (root / "main.pyn").as_uri()
     c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": uri, "languageId": "pyn", "version": 1, "text": MAIN}}})
     yield c, root, uri
@@ -232,7 +248,7 @@ def test_without_a_project_config_the_editors_mode_applies_standard_by_default(t
 
     from byname.lsp import Proxy
 
-    fake = SimpleNamespace(extra_paths=lambda: [], root=tmp_path)
+    fake = SimpleNamespace(root=tmp_path)
     items = [{"section": "basedpyright"}, {"section": "basedpyright.analysis"}]
     for editor, want in (("off", "off"), ("strict", "strict"), (None, "standard")):
         sent = {"analysis": {"typeCheckingMode": editor}} if editor else None
@@ -241,17 +257,22 @@ def test_without_a_project_config_the_editors_mode_applies_standard_by_default(t
 
 
 def test_a_project_config_decides_over_the_editors_settings(tmp_path):
-    # with [tool.basedpyright], the editor's analysis settings aren't passed on (a global "off" would win
-    # otherwise, the checker merging them over the project's config); only byname's own paths are
-    from types import SimpleNamespace
-
-    from byname.lsp import Proxy
-
-    (tmp_path / "pyproject.toml").write_text('[tool.basedpyright]\ntypeCheckingMode = "standard"\n')
-    fake = SimpleNamespace(extra_paths=lambda: ["/shadow"], root=tmp_path)
-    items = [{"section": "basedpyright"}, {"section": "python"}]
-    out = Proxy.inject_config(fake, items, [{"analysis": {"typeCheckingMode": "off", "extraPaths": ["x"]}}, {}])
-    assert out[0]["analysis"] == out[1]["analysis"] == {"extraPaths": ["/shadow"]}
+    # with [tool.basedpyright], the checker ignores the editor's analysis settings, as for a .py in a plain
+    # Python project: a global basedpyright.analysis.typeCheckingMode "off" doesn't silence .py or .pyn
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "pyproject.toml").write_text('[tool.basedpyright]\ntypeCheckingMode = "standard"\n')
+    (root / "a.py").write_text("x: int = 'a'\n")
+    (root / "b.pyn").write_text("x: int = 'a'\n")
+    off = {"typeCheckingMode": "off"}
+    c = Client(root, tmp_path / "cache", {"basedpyright": {"analysis": off}, "basedpyright.analysis": off})
+    c.initialize(root, {"workspace": {"configuration": True, "workspaceFolders": True}})
+    for name in ("a.py", "b.pyn"):
+        uri = c.open(root / name)
+        c.wait_diags(uri)
+        want = [(0, "Type \"Literal['a']\" is not assignable to declared type \"int\"")]
+        assert wait_errors(c, uri, want) == want, name
+    c.close()
 
 
 def test_checker_commands_are_advertised_with_ours(lsp):
@@ -594,9 +615,7 @@ def start(tmp_path, caps=None, **opts):
     root.mkdir()
     (root / "sol.pyn").write_text(SOLUTION)
     c = Client(root, tmp_path / "cache")
-    caps = caps or {"workspace": {"configuration": True}}
-    c.request("initialize", {"processId": None, "rootUri": root.as_uri(), "capabilities": caps, "initializationOptions": opts})
-    c.send({"method": "initialized", "params": {}})
+    c.initialize(root, caps or {"workspace": {"configuration": True, "workspaceFolders": True}}, **opts)
     uri = (root / "sol.pyn").as_uri()
     c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": uri, "languageId": "pyn", "version": 1, "text": SOLUTION}}})
     return c, root, uri
@@ -932,21 +951,140 @@ def test_a_pyn_in_a_folder_made_after_startup_imports_its_neighbours(tmp_path):
 
 
 def test_pyn_imports_pyn_with_a_project_config_as_vs_code_starts_it(tmp_path):
-    # VS Code sends workspace folders and rootPath; with a project config setting extraPaths, the checker would then
-    # ignore the extraPaths byname sends for its shadow files, and a .pyn couldn't import its .pyn neighbour
+    # VS Code sends workspace folders and rootPath; with a project config setting extraPaths, a .pyn imports its
+    # .pyn neighbour (the checker ignores editor extraPaths then, so they can't be how it finds it)
     root = tmp_path / "ws"
     (root / "src").mkdir(parents=True)
     (root / "pyproject.toml").write_text('[tool.basedpyright]\ntypeCheckingMode = "standard"\nextraPaths = ["src"]\n')
     (root / "src" / "people.pyn").write_text(PEOPLE)
     c = Client(root, tmp_path / "cache")
-    caps = {"workspace": {"configuration": True, "workspaceFolders": True}}
-    folders = [{"uri": root.as_uri(), "name": "ws"}]  # as VS Code sends them, rootPath included
-    c.request("initialize", {"processId": None, "rootPath": str(root), "rootUri": root.as_uri(), "workspaceFolders": folders, "capabilities": caps})
-    c.send({"method": "initialized", "params": {}})
+    c.initialize(root, {"workspace": {"configuration": True, "workspaceFolders": True}})
     text = "from people import make\n\nprint(make(name='a', age=1).nme)\n"
     uri = (root / "src" / "main.pyn").as_uri()
     c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": uri, "languageId": "pyn", "version": 1, "text": text}}})
     want = [(2, 'Cannot access attribute "nme" for class "(name: str, age: int, greeting: str)"')]
     c.wait_diags(uri)
     assert wait_errors(c, uri, want) == want
+    c.close()
+
+
+# --- parity: a .pyn is checked as a .py in its place --------------------------
+
+PARITY_CONFIG = """\
+[tool.basedpyright]
+typeCheckingMode = "standard"
+extraPaths = ["src"]
+executionEnvironments = [{ root = "src/records" }]
+"""
+PARITY = """\
+from fn_import_test import to_be_imported
+from helper import h
+
+a_to_be = []
+print(to_be_imported(), h(), a_to_be)
+h("wrong")
+"""
+
+
+def parity_project(tmp_path) -> Path:
+    # llm's layout: a module on the extraPaths and a same-named one beside the file, in an execution
+    # environment of its own, where it's the one imported (only it has to_be_imported)
+    root = tmp_path / "ws"
+    (root / "src" / "records").mkdir(parents=True)
+    (root / "pyproject.toml").write_text(PARITY_CONFIG)
+    (root / "src" / "helper.py").write_text("def h() -> int:\n    return 1\n")
+    (root / "src" / "fn_import_test.py").write_text("x = 1\n")
+    (root / "src" / "records" / "fn_import_test.py").write_text("def to_be_imported() -> int:\n    return 1\n")
+    (root / "src" / "records" / "tc.pyn").write_text(PARITY)
+    (root / "src" / "records" / "tc_py.py").write_text(PARITY)
+    return root
+
+
+def test_a_pyn_is_checked_like_a_py_in_its_place(tmp_path):
+    # the project's mode (no "recommended" reportUnknown*), relative extraPaths and executionEnvironments apply
+    # to the .pyn as to the .py beside it; definitions land in the project, not the mirror
+    root = parity_project(tmp_path)
+    c = Client(root, tmp_path / "cache")
+    c.initialize(root, {"workspace": {"configuration": True, "workspaceFolders": True}})
+    want = [(5, "Expected 0 positional arguments")]
+    got = {}
+    for name in ("tc.pyn", "tc_py.py"):
+        uri = c.open(root / "src" / "records" / name)
+        c.wait_diags(uri)
+        assert wait_errors(c, uri, want) == want, name
+        got[name] = sorted((d["range"]["start"]["line"], d.get("code"), d["message"]) for d in c.diags[uri])
+        res = c.request("textDocument/definition", {"textDocument": {"uri": uri}, "position": pos(PARITY, "to_be_imported", 1)})
+        assert [r.get("targetUri") or r["uri"] for r in res] == [(root / "src" / "records" / "fn_import_test.py").as_uri()], name
+    assert got["tc.pyn"] == got["tc_py.py"]
+    c.close()
+
+
+def test_the_editor_and_byname_tool_agree(tmp_path):
+    # Alt+L (`byname tool basedpyright`) and the editor check the same mirror: the same findings
+    root = parity_project(tmp_path)
+    env = {"XDG_CACHE_HOME": str(tmp_path / "cache"), "PATH": str(Path(sys.executable).parent)}
+    out = subprocess.run([sys.executable, "-m", "byname", "tool", "basedpyright", "src/records/tc.pyn"], cwd=root, env=env, capture_output=True, text=True, check=False).stdout
+    found = [re.match(r"\s*src/records/tc\.pyn:(\d+):\d+ - error: (.*?)(?: \(\w+\))?$", ln) for ln in out.splitlines()]
+    tool = [(int(m[1]) - 1, m[2]) for m in found if m]
+    c = Client(root, tmp_path / "cache")
+    c.initialize(root, {"workspace": {"configuration": True, "workspaceFolders": True}})
+    uri = c.open(root / "src" / "records" / "tc.pyn")
+    c.wait_diags(uri)
+    want = [(5, "Expected 0 positional arguments")]
+    assert wait_errors(c, uri, want) == want
+    assert tool == want
+    c.close()
+
+
+def test_a_py_file_is_sent_under_its_mirror_uri_and_comes_back_as_itself(tmp_path):
+    # the checker sees the project's .py files in the mirror; the editor only ever sees the project's uris
+    root = parity_project(tmp_path)
+    c = Client(root, tmp_path / "cache")
+    c.initialize(root, {"workspace": {"configuration": True, "workspaceFolders": True}})
+    uri = c.open(root / "src" / "records" / "tc_py.py")
+    c.wait_diags(uri)
+    res = c.request("textDocument/definition", {"textDocument": {"uri": uri}, "position": pos(PARITY, "h", 3)})
+    assert [r.get("targetUri") or r["uri"] for r in res] == [(root / "src" / "helper.py").as_uri()]
+    assert all("byname/" not in u for u in c.diags)  # no diagnostics published for mirror paths
+    c.close()
+
+
+def test_a_deleted_pyn_is_gone_for_its_importers(tmp_path):
+    # file events sync the mirror: once a .pyn is deleted, importing it is an error, as for a .py
+    c, root, uri = start(tmp_path)
+    (root / "lib.pyn").write_text("def f():\n    return (x=1)\n")
+    c.send({"method": "workspace/didChangeWatchedFiles", "params": {"changes": [{"uri": (root / "lib.pyn").as_uri(), "type": 1}]}})
+    user = c.open(root / "user.pyn", "from lib import f\n\nprint(f().x)\n")
+    c.wait_diags(user)
+    assert wait_errors(c, user, []) == []
+    (root / "lib.pyn").unlink()
+    c.send({"method": "workspace/didChangeWatchedFiles", "params": {"changes": [{"uri": (root / "lib.pyn").as_uri(), "type": 3}]}})
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": user, "version": 2}, "contentChanges": [{"text": "from lib import f\n\nprint(f().x)\n\n"}]}})
+    want = [(0, 'Import "lib" could not be resolved')]
+    assert wait_errors(c, user, want) == want
+    c.close()
+
+
+def test_organize_imports_on_save_agrees_with_byname_tool_ruff(tmp_path):
+    # Ruff tells first-party modules by the files it finds; a .pyn is a module only in the mirror. Run in the
+    # project, the save's organize imports took `lib_pyn` for third-party and left two blocks that Alt+L
+    # (Ruff in the mirror) calls unsorted (I001), however often it was saved
+    c, root, uri = start(tmp_path)
+    (root / "pyproject.toml").write_text("[tool.ruff]\n")
+    (root / "lib_pyn.pyn").write_text("x = 1\n")
+    (root / "lib.py").write_text("y = 2\n")
+    for f in ("pyproject.toml", "lib_pyn.pyn", "lib.py"):
+        c.send({"method": "workspace/didChangeWatchedFiles", "params": {"changes": [{"uri": (root / f).as_uri(), "type": 1}]}})
+    text = "from lib_pyn import x\n\nfrom lib import y\n\nprint(x, y)\n"
+    (root / "user.pyn").write_text(text)
+    user = c.open(root / "user.pyn")
+    rng = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}
+    ctx = {"diagnostics": [], "only": ["source.organizeImports"], "triggerKind": 2}
+    actions = c.request("textDocument/codeAction", {"textDocument": {"uri": user}, "range": rng, "context": ctx})
+    fixed = [e["newText"] for a in actions for es in a["edit"]["changes"].values() for e in es]
+    assert fixed == ["from lib import y\nfrom lib_pyn import x\n\nprint(x, y)\n"]
+    (root / "user.pyn").write_text(fixed[0])
+    env = {"XDG_CACHE_HOME": str(tmp_path / "cache"), "PATH": str(Path(sys.executable).parent)}
+    out = subprocess.run([sys.executable, "-m", "byname", "tool", "ruff", "check", "--select", "I", "user.pyn"], cwd=root, env=env, capture_output=True, text=True, check=False).stdout
+    assert "All checks passed" in out, out
     c.close()

@@ -22,7 +22,7 @@ from .srcmap import Translation, generated
 
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 CONFIGS = {"pyproject.toml", "setup.cfg", "ruff.toml", ".ruff.toml", "pyrightconfig.json"}
-KEEP_IN_MIRROR = {".ruff_cache"}  # tool caches survive between runs
+KEEP_IN_MIRROR = {".ruff_cache", "_abs"}  # tool caches survive between runs; so do the editor's .pyn from outside the project
 LOCATION = re.compile(r"^(?P<pre>\s*)(?P<path>[^\s:]+\.py):(?P<line>\d+)(?::(?P<col>\d+))?(?P<rest>.*)$")
 # a notebook cell: ruff `nb.ipynb:cell 3:1:5` (counting every cell), basedpyright `nb.ipynb:3:1:5` (code cells)
 NB_LOCATION = re.compile(r"^(?P<pre>\s*)(?P<path>[^\s:]+\.ipynb):(?P<ruff>cell )?(?P<cell>\d+):(?P<line>\d+):(?P<col>\d+)(?P<rest>.*)$")
@@ -60,42 +60,85 @@ def translated_notebook(src: Path) -> str | None:
     return json.dumps(nb, indent=1, ensure_ascii=False) + "\n"
 
 
-def write_if_changed(dst: Path, text: str) -> None:
-    if not dst.is_file() or dst.is_symlink() or dst.read_text(encoding="utf-8") != text:
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.unlink(missing_ok=True)
-        dst.write_text(text, encoding="utf-8")
+def write_if_changed(dst: Path, text: str) -> bool:
+    if dst.is_file() and not dst.is_symlink() and dst.read_text(encoding="utf-8") == text:
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.unlink(missing_ok=True)
+    dst.write_text(text, encoding="utf-8")
+    return True
 
 
-def mirror(root: Path) -> Path:
-    """Sync root into its mirror; returns the mirror root. Unchanged files keep their mtime (tool caches)."""
+def mirror_dir(root: Path, kind: str) -> Path:
     key = hashlib.sha1(str(root).encode()).hexdigest()[:12]
     cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    out = cache / "byname" / f"{key}-tools"
+    return cache / "byname" / f"{key}-{kind}"
+
+
+def mirrored(root: Path, src: Path) -> Path | None:
+    """Where src goes in the mirror, relative to its root (a .pyn as its .py); None if it isn't mirrored."""
+    try:
+        rel = src.relative_to(root)
+    except ValueError:
+        return None
+    if not rel.parts or any(p in SKIP_DIRS for p in rel.parts[:-1]):
+        return None
+    if src.suffix == ".pyn":
+        return rel.with_suffix(".py")
+    if src.suffix in (".py", ".pyi", ".ipynb") or (src.name in CONFIGS and len(rel.parts) == 1):
+        return rel
+    return None
+
+
+def place(root: Path, out: Path, src: Path) -> tuple[Path, int | None] | None:
+    """Bring src's copy in the mirror up to date, removing it if src is gone. A .pyn wins over a .py of the
+    same name. Returns (the copy, what happened as a FileChangeType: 1 created, 2 changed, 3 deleted, None
+    unchanged), or None if src isn't mirrored."""
+    rel = mirrored(root, src)
+    if rel is None:
+        return None
+    dst = out / rel
+    existed = dst.is_symlink() or dst.exists()
+    if src.suffix == ".py" and src.with_suffix(".pyn").is_file():
+        return dst, None  # the .pyn's translation is there
+    if src.suffix == ".pyn" and not src.is_file() and src.with_suffix(".py").is_file():
+        src = src.with_suffix(".py")  # a .pyn gone uncovers its .py
+    if not src.is_file():
+        if not existed:
+            return dst, None
+        dst.unlink()
+        return dst, 3
+    if src.suffix == ".pyn":
+        changed = write_if_changed(dst, Translation(src.read_text(encoding="utf-8")).hidden)
+    elif src.suffix == ".ipynb" and (text := translated_notebook(src)) is not None:
+        changed = write_if_changed(dst, text)
+    elif dst.is_symlink() and dst.readlink() == src:
+        changed = False
+    else:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.unlink(missing_ok=True)
+        dst.symlink_to(src)
+        changed = True
+    return dst, (2 if existed else 1) if changed else None
+
+
+def mirror(root: Path, kind: str = "tools", default_config: bool = True, changes: list | None = None) -> Path:
+    """Sync root into its mirror; returns the mirror root. Unchanged files keep their mtime (tool caches).
+    default_config: a project that doesn't configure the checker gets the editor's default, "standard".
+    changes: collects (mirror path, FileChangeType) for what this sync changed."""
+    out = mirror_dir(root, kind)
     wanted: set[Path] = set()
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-        rel = Path(dirpath).relative_to(root)
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and Path(dirpath, d) != out]
         for f in filenames:
-            src = Path(dirpath) / f
-            if f.endswith(".pyn"):
-                dst = out / rel / (f[:-4] + ".py")
-                write_if_changed(dst, Translation(src.read_text(encoding="utf-8")).hidden)
-            elif f.endswith(".ipynb") and (text := translated_notebook(src)) is not None:
-                dst = out / rel / f
-                write_if_changed(dst, text)
-            elif f.endswith((".py", ".pyi", ".ipynb")) or (f in CONFIGS and rel == Path(".")):
-                dst = out / rel / f
-                if not (dst.is_symlink() and dst.readlink() == src):
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    dst.unlink(missing_ok=True)
-                    dst.symlink_to(src)
-            else:
-                continue
-            wanted.add(dst)
-    if not has_pyright_config(root):  # same default as the editor; "recommended" is noisy
+            if (placed := place(root, out, Path(dirpath) / f)) is not None:
+                wanted.add(placed[0])
+                if placed[1] is not None and changes is not None:
+                    changes.append(placed)
+    if default_config and not has_pyright_config(root):  # same default as the editor; "recommended" is noisy
         cfg = out / "pyrightconfig.json"
         if not cfg.is_file():
+            cfg.parent.mkdir(parents=True, exist_ok=True)
             cfg.write_text('{"typeCheckingMode": "standard"}\n')
         wanted.add(cfg)
     if out.exists():  # drop files whose source is gone
@@ -105,6 +148,8 @@ def mirror(root: Path) -> Path:
                 p = Path(dirpath) / f
                 if p not in wanted:
                     p.unlink()
+                    if changes is not None:
+                        changes.append((p, 3))
     out.mkdir(parents=True, exist_ok=True)
     return out
 

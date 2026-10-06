@@ -143,7 +143,7 @@ there run through byname directly; no output files.
 |---|---|
 | `src/byname/transform.py` | token-level `.pyn` → Python. Records `Edit`/`Mark` provenance for position mapping, `standins` for formatting, and `problems` (tolerant mode, editor only). Also `pattern_slot` for completion, and `source_ast`: the translation's AST with the `.pyn`'s own line numbers (parameter-pattern lines count as the `def`, no prelude), shared with `to_code`, for tools that match checker output to source (llm's `scripts/any_check.py`) |
 | `src/byname/srcmap.py` | `Translation`: source ↔ hidden position mapping (UTF-16 columns, prelude offset). Display vs edit vs exact range modes |
-| `src/byname/lsp.py` | the proxy (`.pyn`, `.py` passed through, notebooks): rewrites URIs and positions, shadow files, config injection, semantic tokens, slot completion, formatting, output writing, the `byname.server.writeOutput` command |
+| `src/byname/lsp.py` | the proxy (`.pyn`, `.py` passed through, notebooks): runs the checker on the project mirror (tools.mirror), rewrites URIs and positions, config defaults, semantic tokens, slot completion, formatting, output writing, the `byname.server.writeOutput` command |
 | `src/byname/tools.py` | `byname tool`: project mirror plus output remapping |
 | `src/byname/fmt.py` | Ruff formatting through stand-ins (`__p`, `__P`) |
 | `src/byname/fix.py` | Ruff's safe lint fixes (`source.fixAll`, `source.organizeImports`, `byname fix`) via the translation |
