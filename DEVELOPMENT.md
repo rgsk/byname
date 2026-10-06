@@ -148,6 +148,7 @@ there run through byname directly; no output files.
 | `src/byname/fix.py` | Ruff's safe lint fixes (`source.fixAll`, `source.organizeImports`, `byname fix`) via the translation |
 | `src/byname/output.py` | `<name>.pyn.py` rendering: marker, divider, `drop_main` |
 | `src/byname/hook.py` | import hook for `.pyn` |
+| `src/byname/notebook.py` | `%load_ext byname` (`load_ipython_extension` in `__init__.py`): an IPython post-input transformer per cell; the prelude runs into `user_ns` at translation time so the cell keeps its own line numbers, and a wrapped `shell.compile.cache` puts the cell as written into linecache for tracebacks |
 | `src/byname/cli.py` | `run`, `show`, `format`, `tool`, `lsp` |
 | `src/byname/pytest_plugin.py` | pytest collects `test_*.pyn` (`pytest11` entry point): `to_ast`, pytest's `rewrite_asserts` on it, then exec into a module registered in `sys.modules`, with the test's folder on `sys.path` like pytest's default prepend mode |
 | `editors/vscode/` | thin extension: launches `byname lsp`, settings, the "Write Python Output" command |

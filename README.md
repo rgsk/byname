@@ -300,6 +300,28 @@ imports its `.pyn` and `.py` neighbours. VS Code's Testing panel and the run but
 as for `.py` files once pytest is enabled (`"python.testing.pytestEnabled": true`). byname's own
 `tests/test_records.pyn` is an example.
 
+## Notebooks
+
+In Jupyter (VS Code, JupyterLab, Colab), run `%load_ext byname` in a cell; every cell after it is `.pyn`:
+
+```python
+%load_ext byname
+```
+```python
+def stats(xs: list[float]):
+    return (mean=sum(xs) / len(xs), n=len(xs))
+
+(mean=, n=) = stats([1.0, 2.0, 3.0])
+```
+
+Magics (`%time x = (a=1)`), `!shell` lines and top-level `await` work as in Python cells, records
+pass between cells (equal by name and value whichever cell built them), and tracebacks quote the cell
+as written, at its own line numbers. The kernel's `byname` must be the one installed in the notebook's
+environment, and `import foo` finds `foo.pyn` there too. `%unload_ext byname` turns it off.
+
+The editor still checks notebook cells as plain Python, so byname syntax is underlined there; `.pyn`
+files get the full editor support below.
+
 ## Output files
 
 `<name>.pyn.py` is plain Python with no dependency on byname. It's useful for handing code to something
