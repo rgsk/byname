@@ -78,7 +78,7 @@ def test_explicit_record_types_ignore_order_but_not_field_set(project):
         "(name=) = f()\n"
         "c, d = (age=1, name='R')\n"
         "reveal_type(name)\n"
-        "def g(p: (age: int, ...)) -> int:\n"
+        "def g(p: (..., age: int)) -> int:\n"
         "    return p.age\n"
         "g(u); g((name='R',))\n"                    # open type: at least `age`
     )

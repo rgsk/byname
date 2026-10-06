@@ -31,7 +31,7 @@ always your local. A bare `field=` means `field=field`.
 | destructure | `(name=, age=) = r` | `name = r.name; age = r.age` |
 | rename | `(name=who) = r` | `who = r.name` |
 | loop | `for (name=, age=) in rs:` | each item destructured, also in comprehensions |
-| record type | `def f() -> (name: str, age: int):` | a record with these fields, in any order; `(…, ...)` for at least these |
+| record type | `def f() -> (name: str, age: int):` | a record with these fields, in any order; `(..., …)` for at least these |
 
 Every form is a syntax error in plain Python, so byname never changes the meaning of valid Python code.
 
@@ -42,6 +42,9 @@ record is built and nothing that reads it changes meaning.
   raises `TypeError` at runtime, and the editor offers a quick fix: `x, y = get_batch()` becomes
   `(x=, y=) = get_batch()`. Want positions? Return a tuple. Like a dict, `"name" in rec` asks for a field
   name and `{**rec}` gives a dict (`json.dumps({**rec})`; `json.dumps(rec)` raises).
+- **`rec.name` is checked, `rec["name"]` isn't:** brackets take any string key and give `Any`, on any record
+  type, open types and unions of records included. It's the way around the checker when you know better
+  (`if "title" in p: p["title"]`); a field that isn't there is a `KeyError` at runtime.
 - **Copies are checked:** records are immutable, so change one with `rec = rec._replace(age=27)`. The editor
   completes and checks `_replace`'s field names and types, and checks `f(**rec._asdict())` against `f`'s
   parameters, so a field `f` doesn't take is flagged.
@@ -67,9 +70,14 @@ type User = (name: str, age: int)
 u: User = (age=26, name="Rahul")             # fine: field order doesn't matter
 x: User = (age=26, name="Rahul", po="x")     # error: extra field: po
 
-def birthday(p: (age: int, ...)) -> int:     # `...`: at least these fields; others are fine
+def birthday(p: (..., age: int)) -> int:     # `...`: at least these fields; others are fine
     return p.age + 1
+
+def log(p: (...)) -> None:                   # any record
+    print(p["msg"])                          # brackets: unchecked, see Access above
 ```
+
+`...` goes first, so a long type says it's open before listing its fields; anywhere else it's an error.
 
 The written order is only for display: hover, printing, `_asdict()` and `**rec` show the fields as you
 wrote them. To a checker, records with the same fields are the same type whatever the order, so
@@ -77,7 +85,7 @@ wrote them. To a checker, records with the same fields are the same type whateve
 
 You rarely need a record type, since return types are inferred. Two cases where you do:
 - **Recursive functions:** checkers can't infer through the recursive call, so its fields come out `Unknown`.
-- **Functions that take part of a config:** `def get_batch(cfg: (batch_size: int, block_size: int, ...))`
+- **Functions that take part of a config:** `def get_batch(cfg: (..., batch_size: int, block_size: int))`
   accepts any config with those fields, while `f(**cfg._asdict())` requires an exact match.
 
 Annotating a recursive function's return type:

@@ -312,7 +312,7 @@ def test_fields_read_through_record_types_look_like_record_fields(lsp):
     # `p.age` through a record type reads a Final Protocol attribute (readonly static); a record's own
     # field is static. Both must get the same token, or themes colour them differently
     c, root, uri = lsp
-    text = "def f(p: (age: int, ...), q: (age: int, name: str)) -> int:\n    return p.age + q.age\nr = (age=1, name='x')\nprint(r.age)\n"
+    text = "def f(p: (..., age: int), q: (age: int, name: str)) -> int:\n    return p.age + q.age\nr = (age=1, name='x')\nprint(r.age)\n"
     c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 990}, "contentChanges": [{"text": text}]}})
     legend = c.init["capabilities"]["semanticTokensProvider"]["legend"]
     data = c.request("textDocument/semanticTokens/full", {"textDocument": {"uri": uri}})["data"]
@@ -681,7 +681,8 @@ def test_diagnostics_on_save_drops_fixed_errors_at_once(tmp_path):
 
 def test_pretty_record_type_protocols():
     assert pretty("p: _typ_name__age[str, int]") == "p: (name: str, age: int)"
-    assert pretty("p: _opn_age[int]") == "p: (age: int, ...)"
+    assert pretty("p: _opn_age[int]") == "p: (..., age: int)"
+    assert pretty("p: _opn_") == "p: (...)"
 
 
 def test_field_set_errors_say_which_fields():

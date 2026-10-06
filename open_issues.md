@@ -82,7 +82,7 @@ literal), but only for TypedDicts: records are Protocols for the checker, so aft
 `user: (name: str) | (age: int)` stays the union and `user.name` is an error. A `TypeIs` helper with one
 overload per field name narrows records in both branches (measured), but the translation can't tell whether
 the right side of `in` is a record, so it would rewrite every `in` (or every `"literal" in x`), and those lose
-basedpyright's own checks on `in` and TypedDict narrowing. Dropped for now.
+basedpyright's own checks on `in` and TypedDict narrowing. Dropped for now; `user["name"]` (unchecked, `Any`) reads it meanwhile.
 
 ## A labelled tuple widens literal values
 

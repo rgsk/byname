@@ -85,7 +85,7 @@ def uri_to_path(uri: str) -> Path:
     return Path(url2pathname(urlparse(uri).path))
 
 
-REC_RE = re.compile(r"_(rec|dct|typ|opn|tup)_(\w+)")
+REC_RE = re.compile(r"_(rec|dct|typ|opn|tup)_(\w+)|_(opn)_()")
 GENERATED_PREFIXES = ("_rec_", "_dct_", "_typ_", "_opn_", "_tup_")
 # an exact record type's field-set mismatch, as pyright reports it: "...Literal['a,b,c']" ... "...Literal['a,b']"
 FIELDSET_RE = re.compile(r"""Literal\['([\w,]*)'\]" is not assignable to type "(?:\(\) -> )?Literal\['([\w,]*)'\]""")
@@ -99,7 +99,8 @@ PARAM_RE = re.compile(r"\b_byname_p\d+\b")
 # a record's field type mismatch: records are their exact type in the checker (see record_def), so two of the
 # same field set are compared by type argument, and pyright names the type parameter rather than the field
 # a record read by position, which records don't allow (see record_def in transform.py)
-POSITIONAL_RE = re.compile(r'"_(?:typ|opn)_(\w+?)\[[^"]*" is not iterable|"__getitem__" method not defined on type "_(?:typ|opn)_(\w+?)\[')
+# (`rec[0]`: `__getitem__` takes a `_key_<fields>`, see key_alias in transform.py)
+POSITIONAL_RE = re.compile(r'"_(?:typ|opn)_(\w+?)\[[^"]*" is not iterable|of type "_key_(\w+)" in function "__getitem__"')
 # a record ordered (`sorted(recs)`, `max(recs)`, `a < b`), which records don't allow: pyright's message is a page
 # about SupportsRichComparison
 UNORDERED_RE = re.compile(
@@ -109,6 +110,7 @@ UNORDERED_RE = re.compile(
 # a target list read by position: `x, y` / `(x, _)` / `x,`
 TARGETS_RE = re.compile(r"\(?\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*,?\s*\)?")
 VARIANCE_RE = re.compile(r'Type parameter "T(\d+)@_(?:typ|opn)_(\w+?)" is \w+, but "(.*)" is not (?:the same as|a subtype of|assignable to) "(.*)"')
+KEY_RE = re.compile(r'"_key_\w*"')
 RULE_RE = re.compile(r"\s*\((report\w+)\)\s*$")
 CODE_KEYS = {"newText", "insertText", "filterText", "sortText", "uri", "targetUri", "data"}
 
@@ -116,14 +118,18 @@ CODE_KEYS = {"newText", "insertText", "filterText", "sortText", "uri", "targetUr
 def pretty(text: str) -> str:
     """Display form of record types: _rec_name__age[str, int] -> (name: str, age: int), and of the
     TypedDict a record's `_asdict()` returns: _dct_name__age[str, int] -> {name: str, age: int}, and of
-    explicit record types: _typ_... -> (name: str, age: int), _opn_... -> (name: str, age: int, ...),
+    explicit record types: _typ_... -> (name: str, age: int), _opn_... -> (..., name: str, age: int), _opn_ -> (...),
     and of a spread record whose fields aren't known: _byname_AnyRec -> (...), and of a parameter pattern's
     parameter: _byname_p0 -> (...)."""
     out, i = [], 0
     while m := REC_RE.search(text, i):
         out.append(text[i : m.start()])
+        if m.group(3):  # `(...)`: an open type with no fields
+            out.append("(...)")
+            i = m.end()
+            continue
         fields = m.group(2).split("__")
-        lp, rp = {"dct": ("{", "}"), "opn": ("(", ", ...)"), "tup": ("tuple[", "]")}.get(m.group(1), ("(", ")"))
+        lp, rp = {"dct": ("{", "}"), "opn": ("(..., ", ")"), "tup": ("tuple[", "]")}.get(m.group(1), ("(", ")"))
         j = m.end()
         if j < len(text) and text[j] == "[":
             args, depth, start = [], 0, j + 1
@@ -206,6 +212,7 @@ def explain_fields(msg: str) -> str:
         return "\n".join(out)
     if fields := positional_fields(msg):
         msg = add_line(msg, f"records are read by name: ({', '.join(f + '=' for f in fields)})")
+    msg = KEY_RE.sub('"str"', msg)  # a record's key type, aliased only to carry its fields
     if m := UNORDERED_RE.search(msg):
         lines = msg.split("\n")
         rule = RULE_RE.search(lines[-1])

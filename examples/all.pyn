@@ -215,7 +215,7 @@ def welcome_or_guest(user=(name=): Person = (name="guest", age=0)) -> str:  # wi
 assert welcome_or_guest() == "guest" and welcome_or_guest((name="Bo", age=1)) == "Bo"
 
 
-def age_of(p: (age: int, ...)) -> int:  # open: any object with at least an int `age`
+def age_of(p: (..., age: int)) -> int:  # open: any record with at least an int `age`
     return p.age
 
 

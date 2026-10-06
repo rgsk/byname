@@ -162,7 +162,8 @@ def test_a_record_is_read_by_name_only(tmp_path):
     )
     assert sorted(verdicts) == [4, 5, 6, 7, 8]  # line 9, by name, is the way
     assert verdicts[4].startswith('"(x: int, y: int)" is not iterable')
-    assert verdicts[5].startswith('"__getitem__" method not defined on type "(x: int, y: int)"')
+    assert verdicts[5].startswith('Argument of type "Literal[0]" cannot be assigned to parameter "k" of type "str"')
+    assert "records are read by name: (x=, y=)" in verdicts[5]
     assert "records have no order: compare or sort by a field (key=lambda r: r.x)" in verdicts[8]
 
 
@@ -184,7 +185,7 @@ def test_reading_by_position_raises_at_runtime_too():
     with pytest.raises(TypeError, match="read by name only"):
         list(r)  # pyright: ignore[reportArgumentType]
     with pytest.raises(TypeError, match="read by name only"):
-        _ = r[0]  # pyright: ignore[reportIndexIssue]
+        _ = r[0]  # pyright: ignore[reportArgumentType]
     with pytest.raises(TypeError, match="read by name only"):
         _ = r + ()  # pyright: ignore[reportOperatorIssue]
 
@@ -465,7 +466,7 @@ def test_a_record_type_takes_any_field_order_but_exactly_its_fields(tmp_path):
 def test_an_open_type_takes_at_least_its_fields(tmp_path):
     verdicts = checker(
         """\
-        def age_of(p: (age: int, ...)) -> int:
+        def age_of(p: (..., age: int)) -> int:
             return p.age
         age_of((name="ivy", age=7, tall=True))
         age_of((name="ivy",))
@@ -474,6 +475,50 @@ def test_an_open_type_takes_at_least_its_fields(tmp_path):
     )
     assert sorted(verdicts) == [4]
     assert '"age" is not present' in verdicts[4]
+
+
+def test_brackets_read_a_record_unchecked(tmp_path):
+    # `rec.name` is checked; `rec["name"]` is the way around the checker: any str key, typed Any, also on an
+    # open type or a union, and a KeyError at runtime if the field isn't there. `in` asks for a field name
+    verdicts = checker(
+        """\
+        def greet(p: (..., name: str)) -> str:
+            if "title" in p:
+                return p["title"] + p.name
+            return p.name
+        anyone: (...) = (age=1)
+        users = [(name="rahul"), (age=27)]
+        print(greet((name="ivy", title="dr")), anyone["age"], users[0]["name"], users[1]["nmae"])
+        print(anyone.keys(), dict(anyone), {**anyone})  # an open type is a record: keys() and `**` too
+        """,
+        tmp_path,
+    )
+    assert verdicts == {}
+    r = (name="ivy", title="dr")
+    assert r["title"] == "dr" and "title" in r
+    with pytest.raises(KeyError):
+        r["nmae"]
+
+
+def test_an_open_type_takes_records_only(tmp_path):
+    # unlike `.name`, `p["name"]` needs a mapping underneath: a dataclass or any other object won't do
+    verdicts = checker(
+        """\
+        from dataclasses import dataclass
+        @dataclass
+        class D:
+            age: int
+        def age_of(p: (..., age: int)) -> int:
+            return p.age
+        age_of(D(age=1))
+        age_of(3)
+        def anything(p: (...)) -> None: ...
+        anything(3)
+        anything((a=1))
+        """,
+        tmp_path,
+    )
+    assert sorted(verdicts) == [7, 8, 10]
 
 
 def test_a_record_type_is_read_by_name_too(tmp_path):
@@ -814,4 +859,4 @@ def test_a_record_spreads_into_a_call_by_name_not_position(tmp_path):
         tmp_path,
     )
     assert sorted(verdicts) == [2]
-    assert 'is not iterable' in verdicts[2]
+    assert "is not iterable" in verdicts[2]

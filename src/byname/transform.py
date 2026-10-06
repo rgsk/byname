@@ -82,7 +82,7 @@ PRELUDE = (
 CHECKER_DIRECTIVE = "# pyright: strictListInference=true, strictDictionaryInference=true, strictSetInference=true\n"
 TYPED_PRELUDE = (  # checker-facing typing: typed methods, record types as Protocols
     "import typing as _t\n"
-    "from typing import TypedDict as _TD, Protocol as _PR, Literal as _L, Self as _S, Final as _Fi\n"
+    "from typing import TypedDict as _TD, Protocol as _PR, Literal as _L, Self as _S, Final as _Fi, Any as _Ay\n"
 )
 # Spreads: `**rec` in a call or dict display, and records built from spreads, `(**u, **r, age=27)`.
 # At runtime records are mappings by field name (`keys()` and `rec["name"]`), so Python's own `**` works
@@ -202,8 +202,15 @@ def dict_class(fields: tuple[str, ...]) -> str:
 
 
 def type_class(fields: tuple[str, ...], is_open: bool) -> str:
-    """An explicit record type: `(name: str, age: int)` is _typ_..., `(name: str, age: int, ...)` is _opn_..."""
+    """An explicit record type: `(name: str, age: int)` is _typ_..., `(..., name: str, age: int)` is _opn_...,
+    `(...)` is _opn_ (no fields)."""
     return ("_opn_" if is_open else "_typ_") + "__".join(fields)
+
+
+def key_alias(fields: tuple[str, ...]) -> str:
+    """The key type of `rec["name"]`: str, aliased per field set so that the checker's complaint about
+    `rec[0]` names the record's fields (see POSITIONAL_RE in lsp.py)."""
+    return "_key_" + "__".join(fields)
 
 
 def tuple_class(labels: tuple[str, ...]) -> str:
@@ -239,24 +246,26 @@ def dict_def(fields: tuple[str, ...]) -> str:
 def type_def(fields: tuple[str, ...], is_open: bool, portable: bool = False) -> str:
     """An explicit record type as a Protocol, so field order doesn't matter: inferred records keep their
     written order, explicit types match any order. Exact types also require the same field set (FIELDSET),
-    so an extra field is an error; open types (`...`) accept any object with at least these fields."""
+    so an extra field is an error; open types (`...`) accept records with at least these fields.
+    `rec["name"]` is the unchecked read: any string key, typed Any; `rec.name` is the checked one."""
     name = type_class(fields, is_open)
     if portable:  # annotations are evaluated on old Pythons: a subscriptable stand-in is all they need
         return f"class {name}: __class_getitem__ = classmethod(lambda cls, _: cls)\n"
     params = ", ".join(f"T{i}" for i in range(len(fields)))
-    out = f"class {name}[{params}](_PR):\n"
+    out = f"class {name}[{params}](_PR):\n" if fields else f"class {name}(_PR):\n"
     # read-only fields, so records (immutable) match; Final rather than @property, so `p.age` is coloured
     # like a record field (see remap_tokens). Checkers object to a type variable in Final: silenced.
     for i, f in enumerate(fields):
         out += f"    {f}: _Fi[T{i}]  # pyright: ignore\n"
+    out += f"    def __getitem__(self, k: {key_alias(fields)}, /) -> _Ay: ...\n"  # a str key, never a position
+    out += "    def __contains__(self, k: object, /) -> bool: ...\n"  # a field name
+    out += "    def keys(self) -> tuple[str, ...]: ...\n"  # what `**rec` reads
     if is_open:
         return out
     kw = ", ".join(f"{f}: T{i} = ..." for i, f in enumerate(fields))
-    return out + (  # no __iter__ / __getitem__: a record is read by name (see record_def)
+    return out + (  # no __iter__, and __getitem__ takes no position: a record is read by name (see record_def)
         f"    @property\n    def {FIELDSET}(self) -> _L[{fieldset(fields)!r}]: ...\n"
         f"    def __len__(self) -> int: ...\n"
-        "    def __contains__(self, k: object, /) -> bool: ...\n"  # a field name
-        "    def keys(self) -> tuple[str, ...]: ...\n"
         "    @property\n    def _fields(self) -> tuple[str, ...]: ...\n"
         f"    def _replace(self, *, {kw}) -> _S: ...\n"
         f"    def _asdict(self) -> {dict_class(fields)}[{params}]: ...\n"
@@ -862,6 +871,30 @@ def transform(
                 edits.append(Edit(whole[1], whole[1], ")", whole))
         return found
 
+    def is_def_params(o: int) -> bool:  # `(` of `def f(...)` / `def f[T](...)`
+        head = rpair[o - 1] - 1 if o and toks[o - 1].string == "]" else o - 1
+        return head >= 1 and toks[head - 1].string == "def" and is_name(toks[head])
+
+    def type_slot(i: int) -> bool:
+        """Whether the group at `i` stands where a type does: after `->`, an annotation's `:` (a parameter,
+        a record type's field, `target: T` at a statement's start) or `type X =`."""
+        prev = toks[i - 1] if i else None
+        if prev is None:
+            return False
+        if prev.string == "->":
+            return True
+        if prev.string == "=":  # `type X = (...)`
+            return i >= 3 and toks[i - 3].string == "type" and (i == 3 or toks[i - 4].type in STMT_START)
+        if prev.string != ":":
+            return False
+        if i - 1 in parent:  # inside brackets: a parameter's annotation, or a field of a record type
+            o = parent[i - 1]
+            return toks[o].string == "(" and (is_def_params(o) or o in type_groups)
+        j = i - 2  # `name: T` / `a.b: T`, from the statement's start
+        while j >= 1 and toks[j - 1].string == "." and is_name(toks[j - 2]):
+            j -= 2
+        return is_name(toks[j]) and (j == 0 or toks[j - 1].type in STMT_START or toks[j - 1].string == ";")
+
     for i, t in enumerate(toks):
         if t.type == tokenize.OP and t.string == "{" and i in pair:  # dict display: `{**u, **r}`
             wrap_kw(items(i))
@@ -895,12 +928,19 @@ def transform(
             continue
         close = pair[i]
 
-        # record type, e.g. `-> (height: int, diameter: int)`: every item is `name: type` (plus an optional
-        # trailing `...` for an open type), never valid Python. Becomes a Protocol, R[int, int]; separate small
-        # edits, so nested types work
-        is_open = len(its) > 1 and len(its[-1]) == 1 and toks[its[-1][0]].string == "..."
-        named = its[:-1] if is_open else its
-        if named and all(len(it) >= 3 and is_name(toks[it[0]]) and toks[it[1]].string == ":" for it in named):
+        # record type, e.g. `-> (height: int, diameter: int)`: every item is `name: type` (after an optional
+        # leading `...` for an open type), never valid Python. Becomes a Protocol, R[int, int]; separate small
+        # edits, so nested types work. `(...)` alone is valid Python, so it's a type only where a type stands
+        dots = [k for k, it in enumerate(its) if len(it) == 1 and toks[it[0]].string == "..."]
+        is_open = dots[:1] == [0]
+        named = its[1:] if is_open else its
+        is_field = [len(it) >= 3 and is_name(toks[it[0]]) and toks[it[1]].string == ":" for it in its]
+        if any(is_field) and all(f or k in dots for k, f in enumerate(is_field)) and dots not in ([], [0]):
+            bad = toks[its[dots[1] if is_open else dots[0]][0]]
+            raise err("`...` goes first in an open record type: (..., name: str)", bad)
+        if is_open and not named and not type_slot(i):
+            continue
+        if (is_open or named) and all(is_field[1:] if is_open else is_field):
             fields = tuple(toks[it[0]].string for it in named)
             for it in named:
                 name = toks[it[0]]
@@ -911,16 +951,19 @@ def transform(
             types[(fields, is_open)] = None
             type_groups.add(i)
             group = span(i, close)
-            edits.append(Edit(group[0], group[0] + 1, type_class(fields, is_open) + "[", group))
-            edits.append(Edit(group[1] - 1, group[1], "]", group))
             standins.append((group[0], group[0] + 1, TYP + "["))
             standins.append((group[1] - 1, group[1], "]"))
+            if not fields:  # `(...)`: a record with any fields, a class with no type parameters
+                edits.append(Edit(*group, type_class(fields, is_open), group))
+                continue
+            edits.append(Edit(group[0], group[0] + 1, type_class(fields, is_open) + "[", group))
+            edits.append(Edit(group[1] - 1, group[1], "]", group))
             for it in named:
                 edits.append(Edit(off(toks[it[0]].start), off(toks[it[2]].start), "", span(it[0])))
                 field_spans.append(span(it[0]))
-            if is_open:  # drop `, ...`: the Protocol's name says it's open
-                dots = its[-1][0]
-                edits.append(Edit(off(toks[named[-1][-1]].end), off(toks[dots].end), "", span(dots)))
+            if is_open:  # drop `..., `: the Protocol's name says it's open
+                d = its[0][0]
+                edits.append(Edit(off(toks[d].start), off(toks[named[0][0]].start), "", span(d)))
             continue
         # a record built from spreads: `(**u, **r, age=27)`
         if any(toks[it[0]].string == "**" for it in its):
@@ -1042,6 +1085,8 @@ def transform(
             types = {**types, **dict.fromkeys((f, False) for f in records)}
         # types first: a record's checker function returns its type, and before Python 3.14 an annotation
         # naming a class defined further down is an undefined name (every record would be Unknown)
+        if not portable:
+            prelude += "".join(f"type {key_alias(f)} = str\n" for f in dict.fromkeys(f for f, _ in types))
         prelude += "".join(type_def(f, o, portable) for f, o in types)
         prelude += "".join(record_def(f, portable) for f in records)
     if builds or kw_used:

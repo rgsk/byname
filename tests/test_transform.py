@@ -573,12 +573,42 @@ def test_record_type_annotation():
 
 
 def test_open_record_type():
-    # a trailing `...`: any object with at least these fields; no field-set marker, no tuple access
-    out = to_python("def f(p: (age: int, ...)) -> int:\n    return p.age\n")
+    # a leading `...`: any record with at least these fields; no field-set marker, no tuple access
+    out = to_python("def f(p: (..., age: int)) -> int:\n    return p.age\n")
     assert "def f(p: _opn_age[int]) -> int:" in out
     assert "class _opn_age[T0](_PR):" in out
     assert "_byname_fieldset" not in out.split("class _opn_age")[1]
-    assert to_python("x = (...)\n") == "x = (...)\n"  # just Ellipsis
+    # read unchecked by any str key, never a position
+    assert "    def __getitem__(self, k: _key_age, /) -> _Ay: ..." in out.split("class _opn_age")[1]
+    assert "type _key_age = str" in out
+    assert "    def keys(self) -> tuple[str, ...]: ..." in out.split("class _opn_age")[1]  # `**p`, `dict(p)`
+    # split over lines, as ruff leaves a long one
+    out = to_python("def f(\n    p: (\n        ...,\n        age: int,\n    ),\n): ...\n")
+    assert "p: _opn_age[\n" in out and "..." not in out.split("p: _opn_age[")[1].split("]")[0]
+
+
+def test_open_record_type_with_no_fields():
+    # `(...)`: a record with any fields, where a type stands; `(...,)` too
+    for src, want in [
+        ("x: (...) = (a=1)\n", "x: _opn_ = "),
+        ("x: (...,) = (a=1)\n", "x: _opn_ = "),
+        ("self.x: (...) = (a=1)\n", "self.x: _opn_ = "),
+        ("def f(p: (...)) -> (...): ...\n", "def f(p: _opn_) -> _opn_: ..."),
+        ("def f(p: (q: (...))): ...\n", "def f(p: _typ_q[_opn_]): ..."),
+        ("type R = (...)\n", "type R = _opn_"),
+    ]:
+        out = to_python(src)
+        assert want in out, src
+        assert "class _opn_(_PR):" in out
+    # elsewhere it's Python's Ellipsis, left as written
+    for src in ["x = (...)\n", "y = (..., 1)\n", "a[(...)]\n", "f(x=(...))\n", "if x: (...)\n", "d = {1: (...)}\n"]:
+        assert to_python(src) == src
+
+
+def test_open_record_type_dots_go_first():
+    for src in ["def f(p: (age: int, ...)): ...\n", "def f(p: (..., a: int, ...)): ...\n", "x: (a: int, ..., b: int)\n"]:
+        with pytest.raises(SyntaxError, match="`...` goes first in an open record type"):
+            to_python(src)
 
 
 def test_records_carry_their_sorted_field_set():
@@ -593,7 +623,7 @@ def test_record_type_runs_on_old_pythons():
     from byname.output import render
 
     src = (
-        "def f() -> (a: int):\n    return (a=1)\n\n\ndef g(p: (a: int, ...)) -> int:\n    return p.a\n\n\n"
+        "def f() -> (a: int):\n    return (a=1)\n\n\ndef g(p: (..., a: int)) -> int:\n    return p.a\n\n\n"
         "print(f(), f.__annotations__['return'].__name__, g(f()))\n"
     )
     out = render(src, Path("f.pyn"))
