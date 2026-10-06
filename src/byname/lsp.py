@@ -35,6 +35,11 @@ WRITE_OUTPUT = "byname.server.writeOutput"  # executeCommand: write <file>.pyn.p
 PLACEHOLDER = "__byname_slot"  # stands in for an empty pattern item while completing
 EXTRA_TRIGGERS = ["(", ","]  # pop completion in pattern slots, like TS does after `{` / `,`
 FIX_ALL_KIND, ORGANIZE_KIND = "source.fixAll", "source.organizeImports"  # ruff code actions, served by us
+# whole-notebook actions, asked on save once, on the first cell (notebook.codeActionsOnSave's `notebook.*`
+# kinds; notebook.defaultFormatter picks among `notebook.format` ones, which it doesn't do for cells: they go
+# to the cell language's default formatter). The first cell may be markdown, so the VS Code extension offers
+# them and asks us on the first code cell. Ruff sees the whole notebook: an import used in a later cell is used
+NOTEBOOK_FORMAT, NOTEBOOK_FIX_ALL, NOTEBOOK_ORGANIZE = "notebook.format", "notebook.source.fixAll", "notebook.source.organizeImports"
 METHOD = 2  # CompletionItemKind
 # a cell that makes the notebook's cells .pyn (IPython takes one module per %load_ext)
 LOAD_EXT_RE = re.compile(r"^[ \t]*%load_ext[ \t]+byname[ \t]*(?:#.*)?$", re.MULTILINE)
@@ -324,6 +329,8 @@ class Proxy:
         self.cell_text: dict[str, str] = {}  # every open notebook cell's text, by uri
         self.cell_version: dict[str, int | None] = {}  # its editor version
         self.cell_nb: dict[str, str] = {}  # its notebook's uri
+        self.py_text: dict[str, str] = {}  # open .py files' text, by uri: they go to the checker as they are,
+        # but we format them and run Ruff's fixes, as for .pyn
         self.pending: dict = {}  # editor request id -> (method, Doc)
         self.own_actions: dict = {}  # codeAction request id -> byname's quick fixes, added to the checker's
         self.server_requests: dict = {}  # checker request id -> configuration items
@@ -556,12 +563,33 @@ class Proxy:
         td = params.get("textDocument") or {}
         uri = td.get("uri")
         key = self.key(uri)
+        only = params.get("context", {}).get("only") or []
+        if method == "textDocument/codeAction" and uri in self.cell_text and (kind := next((k for k in (NOTEBOOK_FORMAT, NOTEBOOK_FIX_ALL, NOTEBOOK_ORGANIZE) if k in only), None)):
+            self.client.send({"jsonrpc": "2.0", "id": mid, "result": self.notebook_action(self.notebooks[self.cell_nb[uri]], kind)})
+            return
+        if uri in self.cell_text and method == "textDocument/codeAction" and source_kind(params):
+            # a cell's own fixAll / organizeImports: nothing, the notebook-wide actions do it (a cell alone
+            # can't say which imports are unused: later cells may use them)
+            self.client.send({"jsonrpc": "2.0", "id": mid, "result": []})
+            return
         if key is None:
-            if method == "textDocument/formatting" or (method == "textDocument/codeAction" and source_kind(params)):
-                # .py files and plain notebooks: we advertise formatting and Ruff's source actions for
-                # .pyn; the checker has neither. Nothing to do here, so the editor's own formatter is it
+            own = method == "textDocument/formatting" or (method == "textDocument/codeAction" and source_kind(params))
+            if method == "textDocument/formatting" and uri in self.cell_text:  # a plain notebook's cell: Ruff on it as it is
+                self.client.send(self.cell_action(msg, Doc(uri, self.cell_text[uri], None), uri_to_path(self.cell_nb[uri])))
+                return
+            if own and uri in self.py_text:  # a .py file: Ruff on it (its translation is itself)
+                doc, path = Doc(uri, self.py_text[uri], None), uri_to_path(uri)
+                kind = source_kind(params)
+                self.client.send(self.format(mid, path, doc) if method == "textDocument/formatting" else self.fix(mid, path, doc, kind))
+                return
+            if own:  # nothing of ours (an untitled buffer): the checker has neither
                 self.client.send({"jsonrpc": "2.0", "id": mid, "result": []})
                 return
+            if isinstance(uri, str) and uri.startswith("file:") and uri.endswith(".py"):
+                if method in ("textDocument/didOpen", "textDocument/didChange"):  # full sync: the whole text
+                    self.py_text[uri] = td["text"] if method == "textDocument/didOpen" else params["contentChanges"][-1]["text"]
+                elif method == "textDocument/didClose":
+                    self.py_text.pop(uri, None)
             if method == "workspace/didChangeWatchedFiles":
                 msg = {**msg, "params": {"changes": [self.watched(c) for c in params.get("changes", [])]}}
             elif mid is not None:  # e.g. workspace/symbol: results may still point into shadows
@@ -580,13 +608,14 @@ class Proxy:
             self.pending[mid] = (method, doc)
         if method == "textDocument/completion" and self.complete_slot(msg, key, doc):
             return
+        if isinstance(key, str) and (method == "textDocument/formatting" or (method == "textDocument/codeAction" and source_kind(params))):
+            self.client.send(self.cell_action(msg, doc, path))
+            return
         if method == "textDocument/formatting":
             self.client.send(self.format(mid, path, doc))
             return
         if method == "textDocument/codeAction" and (kind := source_kind(params)):
-            # a cell alone can't say which imports are unused: later cells may use them
-            ok = isinstance(key, Path)
-            self.client.send(self.fix(mid, path, doc, kind) if ok else {"jsonrpc": "2.0", "id": mid, "result": []})
+            self.client.send(self.fix(mid, path, doc, kind))
             return
         if method == "textDocument/codeAction" and mid is not None and (actions := self.by_name_actions(params, doc)):
             self.own_actions[mid] = actions
@@ -824,6 +853,49 @@ class Proxy:
         edit = {"changes": {doc.uri: [{"range": whole, "newText": out}]}}
         return {"jsonrpc": "2.0", "id": mid, "result": [{"title": title, "kind": kind + ".byname", "edit": edit}]}
 
+    def cell_action(self, msg: dict, doc: Doc, path: Path) -> dict:
+        """Formatting for one notebook cell, byname's or plain (a plain cell's translation is the cell
+        itself). A cell Ruff can't parse alone (a magic: `%time x = 1`) is left as it is rather than
+        failing the save."""
+        mid = msg["id"]
+        reply = self.format(mid, path, doc) if msg["method"] == "textDocument/formatting" else {"jsonrpc": "2.0", "id": mid, "result": []}
+        if "error" in reply:
+            return {"jsonrpc": "2.0", "id": mid, "result": []}
+        if not doc.tr.source.endswith("\n"):  # a cell's last line has no newline, as Ruff writes notebooks
+            for item in reply["result"]:
+                for edit in [item] if "newText" in item else [e for es in item["edit"]["changes"].values() for e in es]:
+                    edit["newText"] = edit["newText"].removesuffix("\n")
+            if any(item.get("newText") == doc.tr.source for item in reply["result"]):  # only that newline changed
+                return {"jsonrpc": "2.0", "id": mid, "result": []}
+        return reply
+
+    def notebook_action(self, nb: Notebook, kind: str) -> list[dict]:
+        """A whole-notebook code action (NOTEBOOK_*), as one edit over its code cells."""
+        from .fix import ORGANIZE, FixError, fix_notebook
+
+        path = uri_to_path(nb.uri)
+        code = [u for u in nb.cells if u in self.cell_text]  # not markdown cells
+        changes = {}
+        if kind == NOTEBOOK_FORMAT:
+            for u in code:
+                doc = self.docs[u][-1] if u in self.docs else Doc(u, self.cell_text[u], None)
+                if (reply := self.cell_action({"id": None, "method": "textDocument/formatting"}, doc, path))["result"]:
+                    changes[u] = reply["result"]
+        else:
+            texts = [self.cell_text[u] for u in code]
+            try:
+                fixed = fix_notebook(texts, nb.byname, str(path), cwd=self.root, select=ORGANIZE if kind == NOTEBOOK_ORGANIZE else None)
+            except (FixError, ValueError):
+                fixed = texts  # mid-edit code: offer nothing rather than fail the save
+            for u, old, new in zip(code, texts, fixed):
+                if new != old:
+                    whole = {"start": {"line": 0, "character": 0}, "end": LineIndex(old).position(len(old))}
+                    changes[u] = [{"range": whole, "newText": new}]
+        if not changes:
+            return []
+        title = {NOTEBOOK_FORMAT: "format notebook", NOTEBOOK_FIX_ALL: "fix all", NOTEBOOK_ORGANIZE: "organize imports"}[kind]
+        return [{"title": f"byname: {title} (ruff)", "kind": kind + ".byname", "edit": {"changes": changes}}]
+
     def by_name_actions(self, params: dict, doc: Doc) -> list[dict]:
         """Quick fixes for records read by position (diagnostics carrying `bynameFields`): read them by name."""
         out = []
@@ -930,6 +1002,7 @@ class Proxy:
                     kinds = cap.get("codeActionKinds", []) if isinstance(cap, dict) else (["quickfix"] if cap else [])
                     caps["codeActionProvider"] = {
                         **(cap if isinstance(cap, dict) else {}),
+                        # not the NOTEBOOK_* kinds: the extension offers those itself, on every cell (see notebookAction)
                         "codeActionKinds": [*kinds, *(k for k in (FIX_ALL_KIND, ORGANIZE_KIND) if k not in kinds)],
                     }
                     ecp = caps.setdefault("executeCommandProvider", {"commands": []})

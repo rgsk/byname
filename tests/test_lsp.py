@@ -779,7 +779,8 @@ def test_byname_notebook_cells_are_translated_and_chained(lsp):
     # Names flow from cell to cell, and positions are the cell's own
     c, root, uri = lsp
     nb, cells = open_notebook(c, root, "byname.ipynb", CELLS)
-    assert errors(c.wait_diags(cells[2])) == [(1, 'Cannot access attribute "nme" for class "(name: str, age: int, greeting: str)"')]
+    want = [(1, 'Cannot access attribute "nme" for class "(name: str, age: int, greeting: str)"')]
+    assert wait_errors(c, cells[2], want) == want
     assert errors(c.wait_diags(cells[1])) == []
     assert "years: int" in hover_text(c, cells[2], pos(CELLS[2], "years"))
     assert "-> (name: str, age: int, greeting: str)" in hover_text(c, cells[1], pos(CELLS[1], "make", 1))
@@ -804,3 +805,75 @@ def test_loading_byname_in_a_cell_translates_the_notebook(lsp):
     # and an edit inside a byname cell is applied where it was typed
     edit_cell(c, nb, cells[1], 3, (1, 2), (1, 3), "a")
     assert wait_errors(c, cells[1], []) == []
+
+
+def format_cell(c, uri) -> list:
+    return c.request("textDocument/formatting", {"textDocument": {"uri": uri}, "options": {"tabSize": 4, "insertSpaces": True}})
+
+
+def organize_cell(c, uri, text) -> list:
+    rng = {"start": {"line": 0, "character": 0}, "end": pos(text, text[-1])}
+    ctx = {"diagnostics": [], "only": ["source.organizeImports"], "triggerKind": 2}
+    actions = c.request("textDocument/codeAction", {"textDocument": {"uri": uri}, "range": rng, "context": ctx})
+    return [e for a in actions for es in a["edit"]["changes"].values() for e in es]
+
+
+def test_notebook_cells_are_formatted(lsp):
+    # byname formats notebooks (notebook.defaultFormatter): Ruff on each cell, through the translation in a
+    # byname notebook, as it is in a plain one. A cell's last line keeps having no newline
+    c, root, uri = lsp
+    nb, cells = open_notebook(c, root, "fmt.ipynb", ["%load_ext byname", "import sys\nimport os\nr=(a=os.sep,b= sys.argv)"])
+    assert [e["newText"] for e in format_cell(c, cells[1])] == ["import sys\nimport os\n\nr = (a=os.sep, b=sys.argv)"]
+    assert organize_cell(c, cells[1], "import sys\nimport os\nr=(a=os.sep,b= sys.argv)") == []  # the notebook-wide action does it
+    assert format_cell(c, cells[0]) == []  # a magic: Ruff can't parse the cell alone, so it's left as it is
+    nb, cells = open_notebook(c, root, "fmt_plain.ipynb", ["x=1"])
+    assert [e["newText"] for e in format_cell(c, cells[0])] == ["x = 1"]
+
+
+def test_format_notebook_on_save_is_one_code_action(lsp):
+    # VS Code formats a notebook on save through a `notebook.format` code action, asked on its first cell
+    # (notebook.defaultFormatter picks among those); the edit covers every cell
+    c, root, uri = lsp
+    nb, cells = open_notebook(c, root, "save.ipynb", ["%load_ext byname", "r=(a=1)", "y = 2"])
+    ctx = {"diagnostics": [], "only": ["notebook.format"], "triggerKind": 2}
+    rng = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}
+    actions = c.request("textDocument/codeAction", {"textDocument": {"uri": cells[0]}, "range": rng, "context": ctx})
+    assert [a["kind"] for a in actions] == ["notebook.format.byname"]
+    changes = actions[0]["edit"]["changes"]
+    assert {u: [e["newText"] for e in es] for u, es in changes.items()} == {cells[1]: ["r = (a=1)"]}
+
+
+def notebook_action(c, uri, kind) -> dict:
+    ctx = {"diagnostics": [], "only": [kind], "triggerKind": 2}
+    rng = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}
+    actions = c.request("textDocument/codeAction", {"textDocument": {"uri": uri}, "range": rng, "context": ctx})
+    assert [a["kind"] for a in actions] == [kind + ".byname"]
+    return {u: [e["newText"] for e in es] for u, es in actions[0]["edit"]["changes"].items()}
+
+
+def test_notebook_fix_all_and_organize_imports_see_the_whole_notebook(lsp):
+    # notebook.source.fixAll / organizeImports: Ruff on the whole notebook, so `os` (used in the last cell)
+    # stays and `sys` goes; in a byname notebook, through each cell's translation
+    c, root, uri = lsp
+    nb, cells = open_notebook(c, root, "fix.ipynb", ["%load_ext byname", "import sys\nimport os", "r = (a=os.sep)"])
+    assert notebook_action(c, cells[0], "notebook.source.fixAll") == {cells[1]: ["import os"]}
+    nb, cells = open_notebook(c, root, "sort.ipynb", ["import sys\nimport os", "print(os.sep, sys.argv)"])
+    assert notebook_action(c, cells[0], "notebook.source.organizeImports") == {cells[0]: ["import os\nimport sys"]}
+
+
+def test_py_files_are_formatted_and_fixed_by_byname(lsp):
+    # byname is the workspace's Python server: Ruff's formatting and fixes on .py too (the file is its own
+    # translation), so the Ruff extension isn't needed
+    c, root, uri = lsp
+    text = "import sys\nimport os\nfrom typing import List\nx: List[int]=[1]\nprint(os.sep, x)\n"
+    py = (root / "fixme.py").as_uri()
+    c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": py, "languageId": "python", "version": 1, "text": text}}})
+    assert [e["newText"] for e in format_cell(c, py)] == [text.replace("List\nx: List[int]=[1]", "List\n\nx: List[int] = [1]")]
+    rng = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}
+    for kind, want in (
+        ("source.fixAll", "import os\n\nx: list[int]=[1]\nprint(os.sep, x)\n"),
+        ("source.organizeImports", "import os\nimport sys\nfrom typing import List\n\nx: List[int]=[1]\nprint(os.sep, x)\n"),
+    ):
+        ctx = {"diagnostics": [], "only": [kind], "triggerKind": 2}
+        actions = c.request("textDocument/codeAction", {"textDocument": {"uri": py}, "range": rng, "context": ctx})
+        assert [e["newText"] for a in actions for es in a["edit"]["changes"].values() for e in es] == [want], kind

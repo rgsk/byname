@@ -2,12 +2,12 @@
   "name": "byname",
   "displayName": "byname (.pyn)",
   "description": "Language support for .pyn files, and .py files and Jupyter notebooks alongside them: bind-by-name Python, type-checked through basedpyright.",
-  "version": "0.4.0",
+  "version": "0.4.2",
   "publisher": "rgsk",
   "private": true,
   "license": "MIT",
   "engines": {
-    "vscode": "^1.75.0"
+    "vscode": "^1.82.0"
   },
   "categories": [
     "Programming Languages"

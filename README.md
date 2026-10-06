@@ -224,10 +224,33 @@ notebooks without `%load_ext byname` go to basedpyright as they are. In a notebo
 `%load_ext byname`, every cell is checked as `.pyn` (see [Notebooks](#notebooks)). In a plain Python
 project, use any language server you like.
 
-basedpyright's own settings apply to every file: `basedpyright.analysis.typeCheckingMode` (`standard`
-if unset) and the rest, overridden by a project config (`[tool.basedpyright]` in `pyproject.toml`,
-`pyrightconfig.json`). Formatting and Ruff's fixes on save are served for `.pyn` and byname notebook
-cells; `.py` files keep your Python formatter.
+**Tool config lives in `pyproject.toml`, editor behaviour in `.vscode/settings.json`.** Ruff and
+basedpyright read their own config, `[tool.ruff]` and `[tool.basedpyright]` (or `ruff.toml`,
+`pyrightconfig.json`), the same for the editor, `byname tool` and CI. VS Code `ruff.*` settings do
+nothing (byname runs the project's `ruff`), and `basedpyright.analysis.*` ones apply only in the editor
+(basedpyright's mode is `standard` if nothing sets it), so keep both in `pyproject.toml`:
+
+```toml
+[tool.basedpyright]
+typeCheckingMode = "standard"
+
+[tool.ruff]
+line-length = 100
+``` Formatting and Ruff's fixes on save are served for `.pyn` and `.py` (the project's
+Ruff and `[tool.ruff]` config), and for notebooks (byname or plain) as notebook-wide actions: Ruff sees
+the whole notebook, so an import used in a later cell isn't removed. The Ruff extension isn't needed;
+disable it in the workspace so its fixes don't run alongside. In VS Code:
+
+```jsonc
+"[python]": {
+  "editor.defaultFormatter": "rgsk.byname",
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": { "source.fixAll": "explicit", "source.organizeImports": "explicit" }
+},
+"notebook.defaultFormatter": "rgsk.byname",
+"notebook.formatOnSave.enabled": true,
+"notebook.codeActionsOnSave": { "notebook.source.fixAll": "explicit", "notebook.source.organizeImports": "explicit" }
+```
 
 **What you get in `.pyn` files:**
 - **Navigation and editing:** hover, completion, go to definition, rename, outline, and colours from semantic highlighting.

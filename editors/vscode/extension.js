@@ -69,8 +69,41 @@ async function writeOutput() {
   }
 }
 
+// Notebook actions on save (notebook.format, notebook.source.fixAll / organizeImports): VS Code asks for them
+// once, on the notebook's first cell (notebook.defaultFormatter picks among `notebook.format` ones), which
+// may be markdown, outside the server's selector. So they're offered here for every cell, and asked of the
+// server on the first code cell; the edit covers every cell
+const NOTEBOOK_KINDS = ["format", "source.fixAll", "source.organizeImports"].map((k) => vscode.CodeActionKind.Notebook.append(k));
+
+async function notebookAction(document, range, context, token) {
+  const kind = client && context.only && NOTEBOOK_KINDS.find((k) => context.only.contains(k));
+  if (!kind) return [];
+  const uri = document.uri.toString();
+  const nb = vscode.workspace.notebookDocuments.find((n) => n.getCells().some((c) => c.document.uri.toString() === uri));
+  const cell = nb?.getCells().find((c) => c.kind === vscode.NotebookCellKind.Code);
+  if (!cell) return [];
+  const zero = { line: 0, character: 0 };
+  const result = await client.sendRequest(
+    "textDocument/codeAction",
+    {
+      textDocument: { uri: client.code2ProtocolConverter.asUri(cell.document.uri) },
+      range: { start: zero, end: zero },
+      context: { diagnostics: [], only: [kind.value], triggerKind: 2 },
+    },
+    token
+  );
+  return client.protocol2CodeConverter.asCodeActionResult(result || [], token);
+}
+
 exports.activate = async (context) => {
   context.subscriptions.push(vscode.commands.registerCommand("byname.writeOutput", writeOutput));
+  context.subscriptions.push(
+    vscode.languages.registerCodeActionsProvider(
+      { notebookType: "jupyter-notebook" },
+      { provideCodeActions: notebookAction },
+      { providedCodeActionKinds: NOTEBOOK_KINDS }
+    )
+  );
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(async (e) => {
       if (!e.affectsConfiguration("byname")) return;

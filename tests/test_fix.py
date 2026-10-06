@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from byname.fix import ORGANIZE, FixError, fix_pyn
+from byname.fix import ORGANIZE, FixError, fix_notebook, fix_pyn
 
 pytestmark = pytest.mark.skipif(not (Path(sys.executable).parent / "ruff").exists() and not shutil.which("ruff"), reason="ruff not installed")
 
@@ -36,3 +36,18 @@ def test_organize_imports_sorts_only():
 def test_unfinished_code_is_an_error():
     with pytest.raises(FixError):
         fix_pyn("(a=, = r\n")
+
+
+def test_notebook_imports_used_in_a_later_cell_stay():
+    # Ruff sees the whole notebook: `os` is used two cells down, `sys` nowhere. Each cell keeps its own
+    # ending (no newline after the last line)
+    cells = ["import sys\nimport os", "x = 1", "print(os.sep, x)"]
+    assert fix_notebook(cells, byname=False) == ["import os", "x = 1", "print(os.sep, x)"]
+    assert fix_notebook(["import sys\nimport os", "print(os.sep, sys.argv)"], byname=False, select=ORGANIZE) == ["import os\nimport sys", "print(os.sep, sys.argv)"]
+
+
+def test_byname_notebook_cells_are_fixed_through_their_translation():
+    # `%load_ext byname`: Ruff checks each cell's translation; `os` is used only through a record field's
+    # value two cells down, and the record cell itself comes back as written apart from List -> list
+    cells = ["%load_ext byname", "import sys\nimport os\nfrom typing import List", "x: List[int] = [1]\nr = (a=os.sep, b=x)"]
+    assert fix_notebook(cells, byname=True) == ["%load_ext byname", "import os", "x: list[int] = [1]\nr = (a=os.sep, b=x)"]

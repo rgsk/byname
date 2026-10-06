@@ -78,3 +78,50 @@ def fix_pyn(src: str, filename: str = "file.pyn", cwd: Path | None = None, selec
         for s, e, text in sorted(edits, reverse=True):
             src = src[:s] + text + src[e:]
     return src
+
+
+def fix_notebook(cells: list[str], byname: bool, filename: str = "notebook.ipynb", cwd: Path | None = None, select: list[str] | None = None) -> list[str]:
+    """A notebook's code cells with Ruff's safe fixes applied, Ruff seeing the whole notebook: an import
+    used in a later cell isn't unused. byname: the cells are .pyn (`%load_ext byname`), so Ruff checks each
+    one's translation and only edits on text the user wrote are kept, as in fix_pyn. Ruff reports each
+    finding's cell, its edits at positions within that cell. A cell's last line keeps having no newline."""
+    original = cells
+    for _ in range(10):
+        trs = [Translation(c) for c in cells] if byname else [None] * len(cells)
+        if bad := next((tr.error for tr in trs if tr is not None and tr.error is not None), None):
+            raise FixError(f"can't translate: {bad}")
+        sources = [tr.hidden if tr is not None else c for tr, c in zip(trs, cells)]
+        nb = {
+            "cells": [{"cell_type": "code", "metadata": {}, "source": s, "outputs": [], "execution_count": None} for s in sources],
+            "metadata": {"language_info": {"name": "python"}}, "nbformat": 4, "nbformat_minor": 5,
+        }
+        p = subprocess.run(
+            [resolve("ruff"), "check", *(select or []), "--output-format", "json", "--exit-zero", "--stdin-filename", str(Path(filename).with_suffix(".ipynb")), "-"],
+            input=json.dumps(nb),
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            check=False,
+        )
+        if p.returncode != 0:
+            raise FixError(p.stderr.strip() or "ruff check failed")
+        edits: list[list[tuple[int, int, str]]] = [[] for _ in cells]
+        for d in json.loads(p.stdout):
+            fix, k = d.get("fix"), (d.get("cell") or 0) - 1
+            if not fix or fix.get("applicability") != "safe" or not 0 <= k < len(cells):
+                continue
+            if trs[k] is not None:
+                mine = source_edits(trs[k], fix)
+            else:
+                starts = char_offsets(cells[k])
+                mine = [(starts[e["location"]["row"] - 1] + e["location"]["column"] - 1, starts[e["end_location"]["row"] - 1] + e["end_location"]["column"] - 1, e["content"]) for e in fix["edits"]]
+            taken = edits[k]
+            if mine and not any(s < e2 and s2 < e or s == s2 for s, e, _ in mine for s2, e2, _ in taken):
+                taken += mine
+        if not any(edits):
+            break
+        cells = list(cells)
+        for k, taken in enumerate(edits):
+            for s, e, text in sorted(taken, reverse=True):
+                cells[k] = cells[k][:s] + text + cells[k][e:]
+    return [c if o.endswith("\n") else c.removesuffix("\n") for c, o in zip(cells, original)]
