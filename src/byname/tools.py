@@ -17,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .lsp import LOAD_EXT_RE, explain_fields, pretty
+from .lsp import LOAD_EXT_RE, explain_fields, has_pyright_config, pretty
 from .srcmap import Translation, generated
 
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
@@ -107,13 +107,6 @@ def mirror(root: Path) -> Path:
                     p.unlink()
     out.mkdir(parents=True, exist_ok=True)
     return out
-
-
-def has_pyright_config(root: Path) -> bool:
-    if (root / "pyrightconfig.json").exists():
-        return True
-    pp = root / "pyproject.toml"
-    return pp.exists() and re.search(r"^\[tool\.(based)?pyright", pp.read_text(), re.MULTILINE) is not None
 
 
 def remap(line: str, root: Path, out: Path, cache: dict) -> tuple[str | None, bool]:

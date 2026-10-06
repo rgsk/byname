@@ -225,19 +225,33 @@ def test_definition_of_destructured_local_covers_the_word(lsp):
     assert snippet(MAIN, rng) == "greeting"
 
 
-def test_mode_is_the_editors_basedpyright_setting_standard_by_default():
-    # byname serves .py, .pyn and notebooks alike, so one setting: basedpyright.analysis.typeCheckingMode.
-    # Unset, "standard" rather than basedpyright's noisy "recommended"
+def test_without_a_project_config_the_editors_mode_applies_standard_by_default(tmp_path):
+    # no [tool.basedpyright] / pyrightconfig.json: basedpyright.analysis.typeCheckingMode from the editor,
+    # "standard" if unset rather than basedpyright's noisy "recommended"
     from types import SimpleNamespace
 
     from byname.lsp import Proxy
 
-    fake = SimpleNamespace(extra_paths=lambda: [])
+    fake = SimpleNamespace(extra_paths=lambda: [], root=tmp_path)
     items = [{"section": "basedpyright"}, {"section": "basedpyright.analysis"}]
     for editor, want in (("off", "off"), ("strict", "strict"), (None, "standard")):
         sent = {"analysis": {"typeCheckingMode": editor}} if editor else None
         out = Proxy.inject_config(fake, items, [sent, {"typeCheckingMode": editor} if editor else None])
         assert out[0]["analysis"]["typeCheckingMode"] == out[1]["typeCheckingMode"] == want
+
+
+def test_a_project_config_decides_over_the_editors_settings(tmp_path):
+    # with [tool.basedpyright], the editor's analysis settings aren't passed on (a global "off" would win
+    # otherwise, the checker merging them over the project's config); only byname's own paths are
+    from types import SimpleNamespace
+
+    from byname.lsp import Proxy
+
+    (tmp_path / "pyproject.toml").write_text('[tool.basedpyright]\ntypeCheckingMode = "standard"\n')
+    fake = SimpleNamespace(extra_paths=lambda: ["/shadow"], root=tmp_path)
+    items = [{"section": "basedpyright"}, {"section": "python"}]
+    out = Proxy.inject_config(fake, items, [{"analysis": {"typeCheckingMode": "off", "extraPaths": ["x"]}}, {}])
+    assert out[0]["analysis"] == out[1]["analysis"] == {"extraPaths": ["/shadow"]}
 
 
 def test_checker_commands_are_advertised_with_ours(lsp):

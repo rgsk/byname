@@ -227,8 +227,9 @@ project, use any language server you like.
 **Tool config lives in `pyproject.toml`, editor behaviour in `.vscode/settings.json`.** Ruff and
 basedpyright read their own config, `[tool.ruff]` and `[tool.basedpyright]` (or `ruff.toml`,
 `pyrightconfig.json`), the same for the editor, `byname tool` and CI. VS Code `ruff.*` settings do
-nothing (byname runs the project's `ruff`), and `basedpyright.analysis.*` ones apply only in the editor
-(basedpyright's mode is `standard` if nothing sets it), so keep both in `pyproject.toml`:
+nothing (byname runs the project's `ruff`), and `basedpyright.analysis.*` ones are ignored once the project
+has a basedpyright config (without one they apply, in the editor only, `standard` mode if unset), so keep
+both in `pyproject.toml`:
 
 ```toml
 [tool.basedpyright]

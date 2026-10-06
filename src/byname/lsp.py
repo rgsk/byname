@@ -274,6 +274,14 @@ def is_position(v) -> bool:
     return isinstance(v, dict) and "line" in v and "character" in v and len(v) == 2
 
 
+def has_pyright_config(root: Path) -> bool:
+    """The project configures the checker itself: pyrightconfig.json, or [tool.basedpyright] / [tool.pyright]."""
+    if (root / "pyrightconfig.json").exists():
+        return True
+    pp = root / "pyproject.toml"
+    return pp.exists() and re.search(r"^\[tool\.(based)?pyright", pp.read_text(), re.MULTILINE) is not None
+
+
 def resolve_checker(cmd: list[str]) -> list[str]:
     """Find the checker next to this interpreter first, so a venv's basedpyright works without PATH."""
     local = Path(sys.executable).parent / cmd[0]
@@ -982,9 +990,16 @@ class Proxy:
         """Add our extraPaths (and defaults) to the checker's settings, whichever shape it asks in:
         pyright asks for `python.analysis`, basedpyright for `python` / `basedpyright` with a nested `analysis`."""
 
+        project = self.root is not None and has_pyright_config(self.root)
+
         def analysis(cfg: dict, based: bool) -> dict:
-            cfg = dict(cfg or {})
             self.sent_paths = self.extra_paths()
+            if project:
+                # the project's config decides, as for `byname tool`: the editor's analysis settings would
+                # otherwise win (the checker merges them over it, started on the root alone), e.g. a global
+                # basedpyright.analysis.typeCheckingMode "off" silencing every .py
+                return {"extraPaths": self.sent_paths}
+            cfg = dict(cfg or {})
             cfg["extraPaths"] = list(cfg.get("extraPaths") or []) + self.sent_paths
             if based:
                 cfg.setdefault("typeCheckingMode", "standard")  # pyright's default; "recommended" is noisy
