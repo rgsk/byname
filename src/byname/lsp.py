@@ -129,6 +129,37 @@ URI_KEYS = {"uri", "targetUri", "document", "oldUri", "newUri"}
 URI_SCHEMES = ("file:", "vscode-notebook-cell:")
 
 
+def call_after_comma(src: str, cursor: int) -> int | None:
+    """The offset of the call's `(` if `cursor` is an empty argument right after a comma in a call,
+    `f(a=1, |)`; else None. Brackets in strings and comments before the cursor can mislead it."""
+    j = cursor
+    while j > 0 and src[j - 1] in " \t":
+        j -= 1
+    if j == 0 or src[j - 1] != ",":
+        return None
+    depth, k = 0, j - 1
+    while k > 0:
+        k -= 1
+        ch = src[k]
+        if ch in ")]}":
+            depth += 1
+        elif ch in "([{":
+            if depth == 0:
+                break
+            depth -= 1
+    else:
+        return None
+    if src[k] != "(":
+        return None
+    before = src[:k].rstrip()
+    if not before or not (before[-1].isidentifier() or before[-1].isdigit() or before[-1] in ")]"):
+        return None  # a tuple or a group, not a call
+    words = before.split()
+    if len(words) >= 2 and words[-2] in ("def", "class"):
+        return None  # a signature, not a call
+    return k
+
+
 def pretty(text: str) -> str:
     """Display form of record types: _rec_name__age[str, int] -> (name: str, age: int), and of the
     TypedDict a record's `_asdict()` returns: _dct_name__age[str, int] -> {name: str, age: int}, and of
@@ -824,9 +855,17 @@ class Proxy:
         slot = pattern_slot(tr.source, cursor)
         ctx = params.get("context") or {}
         if slot is None:
+            if (open_at := call_after_comma(tr.source, cursor)) is not None:
+                # basedpyright offers nothing at an empty argument right after a comma, even when asked
+                # (`f(a=1, |)`, `rec._replace(x=1, |)`), but right after the call's `(` it offers the
+                # same names and the keyword parameters not yet used: ask there, answer at the cursor
+                at_paren = {**params, "position": tr.src_lines.position(open_at + 1)}
+                self.pending[mid] = ("after_comma", (doc, params["position"]))
+                self.send_server({**msg, "params": self.to_checker(at_paren, doc)})
+                return True
             if ctx.get("triggerKind") == 2 and ctx.get("triggerCharacter") in self.own_triggers:
                 self.client.send({"jsonrpc": "2.0", "id": mid, "result": {"isIncomplete": False, "items": []}})
-                return True  # our extra trigger outside a pattern: nothing to offer
+                return True  # our extra trigger outside a pattern and a call: nothing to offer
             return False
         ws, we, close, listed = slot
         src = tr.source
@@ -848,6 +887,26 @@ class Proxy:
         sent = {"textDocument": {"uri": self.editor_uri(key)}, "position": hpos}
         self.send_server({**msg, "params": sent})
         return True
+
+    def finish_after_comma(self, result, doc: Doc, cursor: dict) -> dict:
+        """Items asked for right after the call's `(`, inserted at the cursor instead."""
+        mapped = self.to_editor(result, doc) if result else None
+        if isinstance(mapped, dict):
+            items = mapped.get("items", [])
+        elif isinstance(mapped, list):
+            items = mapped
+        else:  # no result, or DROP
+            items = []
+        at = {"start": cursor, "end": cursor}
+        out = []
+        for item in items:
+            if not isinstance(item, dict):  # a CompletionItem is always an object
+                continue
+            edit = item.get("textEdit") or {}
+            it = {k: v for k, v in item.items() if k not in ("textEdit", "insertText")}
+            it["textEdit"] = {"range": at, "newText": edit.get("newText") or it.get("label", "")}
+            out.append(it)
+        return {"isIncomplete": False, "items": out}
 
     def finish_slot(self, result, key: Path | str, doc: Doc, rng: dict, listed: set[str]) -> dict:
         latest = self.docs.get(key, [doc])[-1]
@@ -1042,6 +1101,10 @@ class Proxy:
             if method_doc and method_doc[0] == "slot":
                 key, doc, rng, listed = method_doc[1]
                 self.client.send({**msg, "result": self.finish_slot(msg.get("result"), key, doc, rng, listed)})
+                return
+            if method_doc and method_doc[0] == "after_comma":
+                doc, cursor = method_doc[1]
+                self.client.send({**msg, "result": self.finish_after_comma(msg.get("result"), doc, cursor)})
                 return
             if (own := self.own_actions.pop(mid, None)) and "result" in msg:
                 result = self.to_editor(msg["result"], method_doc[1]) if msg["result"] else []

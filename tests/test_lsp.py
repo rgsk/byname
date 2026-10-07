@@ -545,16 +545,35 @@ def test_explicit_record_type_errors_in_the_editor(lsp):
     assert mine[0]["message"].endswith("extra field: po") and "_byname_fieldset" not in mine[0]["message"]
 
 
-def test_comma_trigger_only_inside_patterns(lsp):
-    # `,` pops completion in a pattern; in an ordinary call it returns nothing instead of noise
+def test_comma_trigger_only_inside_patterns_and_calls(lsp):
+    # `,` pops completion in a pattern or a call; anywhere else (a tuple) it returns nothing instead of noise
     c, root, uri = lsp
     assert "," in c.init["capabilities"]["completionProvider"]["triggerCharacters"]
-    text = MAIN + "print(1,)\n"
+    text = MAIN + "t = (1,)\n"
     c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 500}, "contentChanges": [{"text": text}]}})
-    p = pos(text, "print(1,", delta=8)
+    p = pos(text, "t = (1,", delta=7)
     ctx = {"triggerKind": 2, "triggerCharacter": ","}
     res = c.request("textDocument/completion", {"textDocument": {"uri": uri}, "position": p, "context": ctx})
     assert res["items"] == []
+
+
+def test_completion_right_after_a_comma_in_a_call_offers_the_unused_keywords(lsp):
+    # basedpyright offers nothing at `f(a=1, |)`, even when asked; we ask it right after `(` instead,
+    # where it offers the keyword parameters not yet used, and insert them at the cursor
+    c, _, uri = lsp
+    for typed in [", ", ","]:  # asked for (Ctrl+Space), with and without a space
+        text, items = complete(c, uri, MAIN + f"res._replace(name='x'{typed}|)\n")
+        keywords = {i["label"] for i in items if i["label"].endswith("=")}
+        assert keywords == {"age=", "greeting="}  # name= is already given
+        cursor = pos(text, f"name='x'{typed}", delta=len(f"name='x'{typed}"))
+        assert all(i["textEdit"]["range"] == {"start": cursor, "end": cursor} for i in items)
+    # popped by typing `,`: our own trigger character
+    text = MAIN + "res._replace(name='x',)\n"
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 980}, "contentChanges": [{"text": text}]}})
+    p = pos(text, "name='x',", delta=len("name='x',"))
+    ctx = {"triggerKind": 2, "triggerCharacter": ","}
+    res = c.request("textDocument/completion", {"textDocument": {"uri": uri}, "position": p, "context": ctx})
+    assert {"age=", "greeting="} <= {i["label"] for i in res["items"]}
 
 
 def test_temporary_completion_text_leaves_no_diagnostics(lsp):
