@@ -126,6 +126,29 @@ like `x.surnme` is an error. Otherwise (a name bound twice, from a call, an impo
 `f((**u, **r))`.
 A field can't be called `keys`: records have a `keys()` method, which is what lets `**` work.
 
+**From a dict:** `record(T, d)` turns a mapping into a record of type `T`, checked at runtime. Data loaded
+from a file arrives as a dict, and `(**d)` can't be checked: the checker rejects it, and at runtime it builds
+whatever keys `d` has.
+
+```python
+from byname import record
+
+type ModelConfig = (n_layer: int, dropout: float)
+
+cfg = record(ModelConfig, json.loads(text))      # typed as ModelConfig
+record(ModelConfig, {"n_layer": "4", "dropuot": 0.2})
+# TypeError: ModelConfig: field 'n_layer': expected int, got str ('4'); missing field 'dropout'; unexpected field 'dropuot'
+record(ModelConfig, {"dropout": 0.0, **saved})    # a file older than the dropout field: the left is the default
+record(ModelConfig, {**saved, "dropout": 0.0})    # one field changed: the right wins
+```
+
+- **Names:** every field of `T` must be there, and no others. An open type, `(..., n_layer: int)`, keeps extra keys.
+- **Types,** by the checker's rules: `isinstance` for classes (an `int` is a `float`, a `bool` is an `int`), unions,
+  `None`, `Literal`. A nested record type takes a dict too, and is built into a record. Generics are checked
+  shallowly: `list[int]` checks for a `list`, not its elements.
+- **Every problem in one `TypeError`,** with dotted paths into nested records (`field 'cfg.lr'`).
+- **Not in output files:** it needs byname at runtime, which output files don't have.
+
 **Destructuring** is plain attribute access, so it works on any object, not only records:
 
 ```python

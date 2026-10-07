@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from byname import source_ast, to_code, to_python, transform
+from byname.srcmap import SourceMap
 from byname.transform import pattern_slot
 
 
@@ -768,3 +769,51 @@ def test_no_shorthand_in_def_signatures():
         transform("def f(user=(name=, age=30)): pass\n")
     with pytest.raises(SyntaxError, match=r"city= in a def signature"):
         transform("def f(user=(id=1, addr=(city=))): pass\n")
+
+
+# --- record(T, d) -------------------------------------------------------------
+
+RECORD_CALL = """\
+from byname import record
+type C = (a: int)
+c = record(C, saved)
+"""
+
+
+def test_record_call_is_cast_to_its_type_for_the_checker():
+    # a record type alias isn't a `type[T]` to the checker, so the translation names the result's type
+    body = transform(RECORD_CALL, checker=True).body
+    assert "c = _cast(C, record(C, saved))" in body
+
+
+def test_record_call_keeps_the_written_type_in_the_cast():
+    # the cast's first argument is a type position: hover there shows the record type, not TypeAliasType
+    r = transform(RECORD_CALL, checker=True)
+    m = SourceMap(r.edits)
+    src_type = RECORD_CALL.index("record(C") + len("record(")
+    assert r.body[m.to_body(src_type) : m.to_body(src_type) + 9] == "C, record"
+    src_name = RECORD_CALL.index("record(C")
+    assert r.body[m.to_body(src_name) :].startswith("record(C, saved))")
+
+
+def test_record_call_runs_as_written():
+    body = transform(RECORD_CALL).body
+    assert "c = record(C, saved)" in body and "_cast" not in body
+
+
+def test_record_call_follows_an_import_alias():
+    src = RECORD_CALL.replace("import record", "import record as rec").replace("= record(", "= rec(")
+    assert "_cast(C, rec(C, saved))" in transform(src, checker=True).body
+
+
+def test_a_record_not_imported_from_byname_is_left_alone():
+    for src in [
+        "def record(a, b): ...\nc = record(C, saved)\n",
+        "from byname import record\nc = db.record(C, saved)\n",
+    ]:
+        assert "_cast" not in transform(src, checker=True).body
+
+
+def test_record_call_is_an_error_in_output_files():
+    with pytest.raises(SyntaxError, match="record\\(\\) needs byname at runtime"):
+        to_python(RECORD_CALL, portable=True)

@@ -1064,6 +1064,44 @@ def transform(
         standins.append((at, at, PAT))
         expand_shorthand(its)
 
+    # `record(T, d)` with `from byname import record`: the checker sees `_cast(T, record(T, d))`, so the call
+    # is a T (a record type alias isn't a `type[T]` to the checker, so a generic signature can't say it).
+    # The T written stays real text in the cast, a type position, so hover shows the record type; the one
+    # passed to `record` is a copy, and `record` itself is marked back to the name written.
+    # Output files run without byname, so they can't call it.
+    record_names: set[str] = set()
+    for k in range(len(toks) - 2):
+        if [toks[k].string, toks[k + 1].string, toks[k + 2].string] == ["from", "byname", "import"]:
+            j = k + 3
+            while toks[j].type not in (tokenize.NEWLINE, tokenize.ENDMARKER):
+                if toks[j].string == "record" and toks[j - 1].string != "as":
+                    record_names.add(toks[j + 2].string if toks[j + 1].string == "as" else "record")
+                j += 1
+    record_used = False
+    for k, t in enumerate(toks):
+        if t.string not in record_names or toks[k + 1].string != "(":
+            continue
+        if k > 0 and toks[k - 1].string in (".", "def", "class"):
+            continue
+        if portable:
+            raise err("record() needs byname at runtime, and output files run without it", t)
+        if not checker:
+            continue
+        its = items(k + 1)
+        if not its:
+            continue  # `record()` is a call error already
+        first = its[0]
+        a, b = off(toks[first[0]].start), off(toks[first[-1]].end)
+        at, end = off(t.start), off(toks[pair[k + 1]].end)
+        call = (at, end)
+        name_end = off(t.end)
+        edits.append(Edit(at, off(toks[k + 1].end), "_cast(", call))  # `record(` -> `_cast(`
+        moved = f", {t.string}({one_line(src[a:b])}"  # `, record(T` after the T written
+        mark = Mark(2, 2 + len(t.string), at, name_end)
+        edits.append(Edit(b, b, moved, call, [mark]))
+        edits.append(Edit(end, end, ")", call))
+        record_used = True
+
     tuples = label_returns() if checker else {}
 
     # apply edits back-to-front
@@ -1101,6 +1139,8 @@ def transform(
             prelude += CTX_PRELUDE if checker else ""
     if tuples:
         prelude += "".join(tuple_def(t) for t in tuples)
+    if record_used:
+        prelude += "from typing import cast as _cast\n"
     standins.sort()
     return Result(prelude, body, edits, problems, standins, sorted(field_spans), sorted(inserted), sorted(label_spans))
 

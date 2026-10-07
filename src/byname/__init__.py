@@ -1,4 +1,5 @@
 from .hook import install
+from .runtime import record
 from .transform import source_ast, to_ast, to_code, to_python, transform
 
 install()
@@ -17,4 +18,4 @@ def unload_ipython_extension(shell) -> None:
     unload(shell)
 
 
-__all__ = ["install", "source_ast", "to_ast", "to_code", "to_python", "transform"]
+__all__ = ["install", "record", "source_ast", "to_ast", "to_code", "to_python", "transform"]

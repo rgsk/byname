@@ -170,6 +170,24 @@ def test_hover_destructured_local_has_field_type(lsp):
     assert "greeting: str" in hover_text(c, uri, pos(MAIN, "greeting="))
 
 
+RECORD_CALL = """\
+from byname import record
+type Config = (n_layer: int, dropout: float)
+cfg = record(Config, {"n_layer": 4, "dropout": 0.2})
+"""
+
+
+def test_hover_in_a_record_call_shows_the_record_type_and_the_function(lsp):
+    # the T written is the cast's (a type position), not record's argument, which would show TypeAliasType
+    c, root, _ = lsp
+    path = root / "rec_call.pyn"
+    path.write_text(RECORD_CALL)
+    rec_uri = c.open(path)
+    assert "Config = (n_layer: int, dropout: float)" in hover_text(c, rec_uri, pos(RECORD_CALL, "Config,"))
+    assert "def record(" in hover_text(c, rec_uri, pos(RECORD_CALL, "record(C"))
+    assert "cfg: Config" in hover_text(c, rec_uri, pos(RECORD_CALL, "cfg ="))  # named by its alias, as with cast
+
+
 def test_hover_renamed_local(lsp):
     c, root, uri = lsp
     assert "years: int" in hover_text(c, uri, pos(MAIN, "years", nth=0))

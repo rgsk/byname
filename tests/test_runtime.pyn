@@ -1,0 +1,65 @@
+# runtime.py's record(T, data) case by case; test_exhaustive.pyn section 11 shows it in use
+from typing import Literal
+
+import pytest
+
+from byname import record
+
+type Config = (n_layer: int, lr: float, name: str)
+type Run = (cfg: Config, seed: int)
+type Tagged = (..., name: str)
+type Ids = list[int]
+type Batch = (ids: Ids)
+type Opt = (window: int | None, mode: Literal["train", "eval"])
+
+
+def test_takes_a_record_as_well_as_a_dict():
+    cfg = (name="small", lr=1e-3, n_layer=4)
+    assert record(Config, cfg) == cfg
+
+
+def test_an_int_is_a_float_and_a_bool_is_an_int():
+    # the checker's rules: `lr: float = 1` and `n_layer: int = True` type-check
+    cfg = record(Config, {"n_layer": True, "lr": 1, "name": "x"})
+    assert cfg.lr == 1
+
+
+def test_fields_come_out_in_the_types_written_order():
+    cfg = record(Config, {"name": "small", "lr": 1e-3, "n_layer": 4})
+    assert repr(cfg) == "(n_layer=4, lr=0.001, name='small')"
+
+
+def test_a_nested_record_type_builds_the_inner_record_too():
+    saved = {"cfg": {"n_layer": 4, "lr": 1e-3, "name": "small"}, "seed": 0}
+    run = record(Run, saved)
+    assert run.cfg == (n_layer=4, lr=1e-3, name="small")
+
+
+def test_a_nested_problem_names_its_dotted_path():
+    with pytest.raises(TypeError, match="field 'cfg.lr': expected float, got str"):
+        record(Run, {"cfg": {"n_layer": 4, "lr": "fast", "name": "x"}, "seed": 0})
+
+
+def test_an_open_type_keeps_extra_fields():
+    tagged = record(Tagged, {"name": "a", "size": 3})
+    assert tagged == (name="a", size=3)
+
+
+def test_unions_none_and_literals():
+    assert record(Opt, {"window": None, "mode": "eval"}).window is None
+    with pytest.raises(TypeError, match="field 'mode': expected Literal\\['train', 'eval'\\], got 'test'"):
+        record(Opt, {"window": 3, "mode": "test"})
+
+
+def test_generics_are_checked_shallowly():
+    # the container's type, not its elements
+    assert record(Batch, {"ids": ["not", "ints"]}).ids == ["not", "ints"]
+    with pytest.raises(TypeError, match="field 'ids': expected list\\[int\\], got tuple"):
+        record(Batch, {"ids": (1, 2)})
+
+
+def test_needs_a_record_type_and_a_mapping():
+    with pytest.raises(TypeError, match="record\\(\\) needs a record type, got int"):
+        record(int, {})
+    with pytest.raises(TypeError, match="record\\(\\) needs a mapping of field names, got list"):
+        record(Config, [("n_layer", 4)])

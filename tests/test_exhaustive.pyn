@@ -15,7 +15,7 @@ from typing import overload
 
 import pytest
 
-from byname import to_code, transform
+from byname import record, to_code, transform
 
 # ============================================================================
 # 1. CALLS: pass locals by name
@@ -860,3 +860,59 @@ def test_a_record_spreads_into_a_call_by_name_not_position(tmp_path):
     )
     assert sorted(verdicts) == [2]
     assert "is not iterable" in verdicts[2]
+
+
+# ============================================================================
+# 11. FROM A DICT: `record(T, d)`, checked at runtime
+# ============================================================================
+
+# A dict's keys aren't known statically, so the checker rejects `(**d)` into a record type, and at runtime
+# it would build whatever keys `d` has. Data loaded from a file arrives as a dict: `record(T, d)` turns it
+# into a T, checking every field at runtime, and the checker types the call as T.
+
+type ModelConfig = (n_layer: int, dropout: float)
+
+
+def test_record_builds_the_record_its_literal_would():
+    saved = {"n_layer": 4, "dropout": 0.2}  # say, from torch.load or json.loads
+    cfg = record(ModelConfig, saved)
+    assert cfg == (n_layer=4, dropout=0.2)
+
+
+def test_record_is_typed_as_the_type_it_names(tmp_path):
+    verdicts = checker(
+        """\
+        from byname import record
+        type ModelConfig = (n_layer: int, dropout: float)
+        cfg = record(ModelConfig, {"n_layer": 4, "dropout": 0.2})
+        reveal_type(cfg)
+        cfg.n_layr
+        """,
+        tmp_path,
+    )
+    assert verdicts[4] == 'Type of "cfg" is "(n_layer: int, dropout: float)"'
+    assert verdicts[5].startswith('Cannot access attribute "n_layr"')
+
+
+def test_record_names_every_bad_field_at_once():
+    saved = {"n_layer": "4", "dropuot": 0.2}
+    with pytest.raises(TypeError) as e:
+        record(ModelConfig, saved)
+    assert str(e.value) == (
+        "ModelConfig: field 'n_layer': expected int, got str ('4'); "
+        "missing field 'dropout'; unexpected field 'dropuot'"
+    )
+
+
+def test_a_file_saved_before_a_field_existed_gets_it_from_the_left():
+    saved = {"n_layer": 4}  # written before ModelConfig had dropout
+    # dict order: the left is the default, the right (what the file holds) wins
+    cfg = record(ModelConfig, {"dropout": 0.0, **saved})
+    assert cfg == (n_layer=4, dropout=0.0)
+
+
+def test_a_field_can_be_overridden_from_the_right():
+    saved = {"n_layer": 4, "dropout": 0.2}  # trained with dropout
+    # the right wins: reuse a saved config with one field changed, say fine-tuning without dropout
+    cfg = record(ModelConfig, {**saved, "dropout": 0.0})
+    assert cfg == (n_layer=4, dropout=0.0)
