@@ -749,15 +749,18 @@ def transform(
             consumed.add(g)
             tree = pattern(g)
             group = span(g, pair[g])
+            # a pattern over several lines keeps its line breaks (valid inside the def's parentheses),
+            # so every line after it keeps its number: tracebacks, source_ast
             if named:  # `user=(...)` -> `user`
                 name = toks[it[0]].string
-                edits.append(Edit(off(toks[it[1]].start), group[1], "", group))
+                gone = off(toks[it[1]].start)
+                edits.append(Edit(gone, group[1], "\n" * src.count("\n", gone, group[1]), group))
                 # formatter: `user: (__D, __P[...], T)`, or `user: (__D, __P[...])` with no annotation
                 standins.append((*span(it[1]), f": ({PARAM}, "))
             else:
                 name = f"{PARAM_NAME}{params}"
                 params += 1
-                edits.append(Edit(*group, name, group))
+                edits.append(Edit(*group, name + "\n" * src.count("\n", *group), group))
                 # formatter: `__D: (__P[...], T)`, or `__D: (__P[...],)` with no annotation
                 standins.append((group[0], group[0], f"{PARAM}: ("))
             if rest and toks[rest[0]].string == ":":

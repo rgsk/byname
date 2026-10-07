@@ -154,6 +154,33 @@ def test_body_keeps_line_count():
     assert r.body.count("\n") == src.count("\n")
 
 
+MULTILINE_PATTERNS = """\
+def f(
+    (
+        a=, b=,
+    ): T,
+    *,
+    user=(
+        name=,
+    ): U,
+):
+    return a
+def g():
+    raise ValueError("line 12")
+g()
+"""
+
+
+def test_a_parameter_pattern_over_several_lines_keeps_later_line_numbers():
+    # a pattern's line breaks stay in the translation: `g` and its raise keep their lines
+    tree = source_ast(MULTILINE_PATTERNS)
+    g = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "g")
+    assert g.lineno == 11
+    with pytest.raises(ValueError) as e:
+        exec(to_code(MULTILINE_PATTERNS.replace("T", "object").replace("U", "object"), "<x>"), {})  # noqa: S102
+    assert e.traceback[-1].lineno + 1 == 12  # pytest's lineno is 0-based
+
+
 
 
 # --- nested patterns ----------------------------------------------------------
