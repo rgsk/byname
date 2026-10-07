@@ -576,6 +576,22 @@ def test_completion_right_after_a_comma_in_a_call_offers_the_unused_keywords(lsp
     assert {"age=", "greeting="} <= {i["label"] for i in res["items"]}
 
 
+def test_completion_in_an_annotated_record_literal_offers_the_types_fields(lsp):
+    # `user: User = (|)`: the record literal's fields come from the annotation, minus those given
+    c, _, uri = lsp
+    pre = MAIN + "type User = (name: str, age: int, sex: str)\n"
+    _, items = complete(c, uri, pre + "user: User = (|)\n")
+    assert {i["label"] for i in items} == {"name=", "age=", "sex="}
+    _, items = complete(c, uri, pre + "user: User = (name='x', |)\n")
+    assert {i["label"] for i in items} == {"age=", "sex="}
+    # on one line, right after a comma, as on a line of its own
+    _, items = complete(c, uri, pre + "u = (name='r', age=1)\nuser: User = (**u, name='x', age=2, |)\n")
+    assert {i["label"] for i in items} == {"sex="}
+    # an ordinary parenthesized value is left alone: names in scope, not fields
+    _, items = complete(c, uri, pre + "n: int = (1 + |)\n")
+    assert "print" in {i["label"] for i in items}
+
+
 def test_temporary_completion_text_leaves_no_diagnostics(lsp):
     # the placeholder text is never shown to the user as errors
     c, root, uri = lsp

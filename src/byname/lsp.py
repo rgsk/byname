@@ -160,6 +160,71 @@ def call_after_comma(src: str, cursor: int) -> int | None:
     return k
 
 
+RECORD_TARGET_RE = re.compile(r"^\s*[A-Za-z_][\w.]*\s*:(?P<annotation>[^=]+)=\s*$")
+RECORD_ITEM_RE = re.compile(r"^\s*(\*\*\s*[\w.]+|[A-Za-z_]\w*\s*=.*)\s*$", re.DOTALL)
+
+
+def record_type_slot(src: str, cursor: int) -> tuple[int, str, int, int] | None:
+    """(the `(`, the annotation, word start, word end) if `cursor` is at a field position of a record literal
+    that is the whole value of an annotated assignment, `user: User = (name=, |)`; else None. Every other
+    item must be `name=...` or `**spread`, so a parenthesized expression is left alone."""
+    ws = cursor
+    while ws > 0 and (src[ws - 1].isalnum() or src[ws - 1] == "_"):
+        ws -= 1
+    we = cursor
+    while we < len(src) and (src[we].isalnum() or src[we] == "_"):
+        we += 1
+    depth, k = 0, ws
+    while k > 0:
+        k -= 1
+        ch = src[k]
+        if ch in ")]}":
+            depth += 1
+        elif ch in "([{":
+            if depth == 0:
+                break
+            depth -= 1
+    else:
+        return None
+    if src[k] != "(":
+        return None
+    m = RECORD_TARGET_RE.match(src[src.rfind("\n", 0, k) + 1 : k])
+    if m is None:
+        return None
+    depth, close = 0, None
+    for j in range(k + 1, len(src)):
+        ch = src[j]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                close = j
+                break
+            depth -= 1
+    if close is None:
+        return None
+    inner = src[k + 1 : ws] + "\0" + src[we:close]  # \0: the item being typed
+    items, depth, cur = [], 0, ""
+    for ch in inner:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            items.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    items.append(cur)
+    for it in items:
+        if "\0" in it:
+            if it.strip() != "\0":
+                return None  # typing a value, not a field name
+        elif it.strip() and not RECORD_ITEM_RE.match(it):
+            return None
+    return k, m["annotation"].strip(), ws, we
+
+
 def pretty(text: str) -> str:
     """Display form of record types: _rec_name__age[str, int] -> (name: str, age: int), and of the
     TypedDict a record's `_asdict()` returns: _dct_name__age[str, int] -> {name: str, age: int}, and of
@@ -863,9 +928,11 @@ class Proxy:
                 self.pending[mid] = ("after_comma", (doc, params["position"]))
                 self.send_server({**msg, "params": self.to_checker(at_paren, doc)})
                 return True
+            if (rec := record_type_slot(tr.source, cursor)) is not None and self.complete_record_type(msg, key, doc, rec):
+                return True
             if ctx.get("triggerKind") == 2 and ctx.get("triggerCharacter") in self.own_triggers:
                 self.client.send({"jsonrpc": "2.0", "id": mid, "result": {"isIncomplete": False, "items": []}})
-                return True  # our extra trigger outside a pattern and a call: nothing to offer
+                return True  # our extra trigger outside a pattern, a call and a record literal: nothing to offer
             return False
         ws, we, close, listed = slot
         src = tr.source
@@ -887,6 +954,35 @@ class Proxy:
         sent = {"textDocument": {"uri": self.editor_uri(key)}, "position": hpos}
         self.send_server({**msg, "params": sent})
         return True
+
+    def complete_record_type(self, msg: dict, key: Path | str, doc: Doc, rec: tuple[int, str, int, int]) -> bool:
+        """Field names in `user: User = (name=, |)`. The checker is shown `_t.cast(User, None)._replace(name=, |)`,
+        so `_replace` offers User's fields not yet given (`user._replace` won't do: `user` is unbound in its own
+        assignment). `_t` is the prelude's `import typing as _t`, in every file with a record type."""
+        open_at, annotation, ws, we = rec
+        tr = doc.tr
+        src = tr.source
+        prefix = f"_t.cast({annotation}, None)._replace"
+        temp = src[:open_at] + prefix + src[open_at:]
+        ttr = Translation(temp)
+        if ttr.error is not None:
+            return False
+        # nothing typed yet: ask right after `_replace(`, as in call_after_comma (basedpyright offers
+        # nothing right after a comma); it still leaves out the fields already given
+        at = ws + len(prefix) if ws < we else open_at + len(prefix) + 1
+        h = ttr._to_hidden(at, False, touch=True)
+        self.send_text(key, ttr.hidden, None)
+        rng = {"start": tr.src_lines.position(ws), "end": tr.src_lines.position(we)}
+        self.pending[msg["id"]] = ("record_type", (key, doc, rng))
+        sent = {"textDocument": {"uri": self.editor_uri(key)}, "position": LineIndex(ttr.hidden).position(h)}
+        self.send_server({**msg, "params": sent})
+        return True
+
+    def finish_record_type(self, result, key: Path | str, doc: Doc, rng: dict) -> dict:
+        """The field items (`name=`); everything, if the type had none (not a record type)."""
+        out = self.finish_slot(result, key, doc, rng, set())
+        fields = [it for it in out["items"] if it.get("label", "").endswith("=")]
+        return {"isIncomplete": False, "items": fields or out["items"]}
 
     def finish_after_comma(self, result, doc: Doc, cursor: dict) -> dict:
         """Items asked for right after the call's `(`, inserted at the cursor instead."""
@@ -1101,6 +1197,10 @@ class Proxy:
             if method_doc and method_doc[0] == "slot":
                 key, doc, rng, listed = method_doc[1]
                 self.client.send({**msg, "result": self.finish_slot(msg.get("result"), key, doc, rng, listed)})
+                return
+            if method_doc and method_doc[0] == "record_type":
+                key, doc, rng = method_doc[1]
+                self.client.send({**msg, "result": self.finish_record_type(msg.get("result"), key, doc, rng)})
                 return
             if method_doc and method_doc[0] == "after_comma":
                 doc, cursor = method_doc[1]
