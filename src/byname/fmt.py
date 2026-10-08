@@ -169,17 +169,15 @@ def _items(toks: list[tokenize.TokenInfo], o: int, c: int, pair: dict[int, int])
     return items if items and first is None else None
 
 
-def grid(src: str) -> str:
-    """Tag each grid-shaped bracket with a GRID comment (see the module docstring). Anything under
-    `# fmt: off`, or in a statement marked `# fmt: skip`, is left alone."""
+def _grids(src: str) -> tuple[list[tokenize.TokenInfo], list[tuple[int, int, bool]]] | None:
+    """src's tokens and its grid-shaped brackets as (opening token, items on the first line, whether
+    the first line starts right after the bracket). Anything under `# fmt: off`, or in a statement
+    marked `# fmt: skip`, is left out. None if src doesn't tokenize."""
     try:
         toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
     except (tokenize.TokenError, SyntaxError):
-        return src  # broken code: ruff reports it
+        return None  # broken code: ruff reports it
     pair = _pairs(toks)
-    starts = [0]
-    for line in src.splitlines(keepends=True):
-        starts.append(starts[-1] + len(line))
     skip: set[int] = set()
     off, stmt = False, 0
     for i, t in enumerate(toks):
@@ -192,7 +190,7 @@ def grid(src: str) -> str:
             skip.add(i)
         if t.type == tokenize.NEWLINE:
             stmt = i + 1
-    inserts: list[tuple[int, str]] = []
+    grids: list[tuple[int, int, bool]] = []
     for o, c in pair.items():
         if o in skip or toks[c].start[0] == toks[o].start[0]:
             continue
@@ -203,12 +201,64 @@ def grid(src: str) -> str:
         row = toks[items[0][0]].start[0]
         k = sum(1 for _, b in items if toks[b].end[0] == row)
         if k >= 2 and toks[items[k - 1][1] + 1].type == tokenize.NL:  # k whole items, nothing after
-            r, col = toks[o].end
-            inserts.append((starts[r - 1] + col, f"  {GRID}{k}" + "\n" * hug))  # a hugged first line moves below the tag
+            grids.append((o, k, hug))
+    return toks, grids
+
+
+def _tag(src: str, toks: list[tokenize.TokenInfo], tags: list[tuple[int, int, bool]]) -> str:
+    """src with `# __grid:k` after each (opening token, k, hug) bracket; a hugged first line moves below the tag."""
+    starts = [0]
+    for line in src.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+    inserts = []
+    for o, k, hug in tags:
+        r, col = toks[o].end
+        inserts.append((starts[r - 1] + col, f"  {GRID}{k}" + "\n" * hug))
     out = src
     for at, text in sorted(inserts, reverse=True):
         out = out[:at] + text + out[at:]
     return out
+
+
+def grid(src: str) -> str:
+    """Tag each grid-shaped bracket with a GRID comment (see the module docstring)."""
+    if (found := _grids(src)) is None:
+        return src
+    return _tag(src, *found)
+
+
+def _import_from(toks: list[tokenize.TokenInfo], o: int) -> str | None:
+    """The module of `from <module> import (`, if toks[o] is that bracket."""
+    if o < 2 or toks[o - 1].string != "import":
+        return None
+    j = o - 2
+    while j >= 0 and toks[j].string != "from":
+        if toks[j].type != tokenize.NAME and toks[j].string not in (".", "..."):
+            return None
+        j -= 1
+    return "".join(t.string for t in toks[j + 1 : o - 1]) if j >= 0 else None
+
+
+def regrid_imports(before: str, after: str) -> str:
+    """after (before with Ruff's import sorting applied, which writes one name per line) with each
+    `from m import (` that was a grid in before packed again, keeping its first line's item count."""
+    if (old := _grids(before)) is None:
+        return after
+    toks, grids = old
+    counts: dict[str, int] = {}
+    for o, k, _ in grids:
+        if (m := _import_from(toks, o)) is not None:
+            counts.setdefault(m, k)
+    if not counts:
+        return after
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(after).readline))
+    except (tokenize.TokenError, SyntaxError):
+        return after
+    pair = _pairs(toks)
+    tags = [(o, counts[m], False) for o, c in pair.items()
+            if toks[c].start[0] != toks[o].start[0] and (m := _import_from(toks, o)) in counts and toks[o + 1].type == tokenize.NL]
+    return ungrid(_tag(after, toks, tags)) if tags else after
 
 
 def ungrid(code: str) -> str:

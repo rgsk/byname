@@ -32,6 +32,7 @@ NB_HEADER = re.compile(r"^(?P<path>\S+\.ipynb)(?P<rest> - cell \d+)$")  # basedp
 GENERATED_STYLE = re.compile(r"\bE70[123]\b")
 HELPER = re.compile(r"`_byname_\w*`")
 TOO_LONG = re.compile(r"\bE501 Line too long \(\d+ > (\d+)\)")  # measured on the translation's longer line
+UNSORTED = re.compile(r"\bI001\b")  # import block un-sorted or un-formatted
 
 
 def has_pyright_config(root: Path) -> bool:
@@ -182,6 +183,8 @@ def remap(line: str, root: Path, out: Path, cache: dict) -> tuple[str | None, bo
     pyn = root / rel.with_suffix(".pyn")
     if p.is_absolute() and not p.is_relative_to(out):
         return line, True  # outside the project (site-packages, ...)
+    if UNSORTED.search(line) and only_grids(pyn if pyn.exists() else root / rel, out / rel, out, cache):
+        return None, True
     if not pyn.exists():  # an ordinary .py file: the project's path, not the mirror's
         return f"{m['pre']}{rel}:{m['line']}" + (f":{m['col']}" if m["col"] else "") + m["rest"], True
     if pyn not in cache:
@@ -236,6 +239,28 @@ def imports_lead_to(tr: Translation, line: int) -> bool:
     return True
 
 
+def only_grids(src: Path, mirrored: Path, out: Path, cache: dict) -> bool:
+    """Organizing src's imports changes nothing: Ruff's I001 there is only about names packed several to
+    a line (a grid, see fmt.py), which byname's organize imports keeps."""
+    from .fix import ORGANIZE, FixError, fix_notebook, fix_pyn
+
+    if ("only_grids", src) not in cache:
+        same = False
+        try:
+            text = src.read_text(encoding="utf-8")
+            if src.suffix == ".ipynb":
+                nb = json.loads(text)
+                byname = byname_cells(nb) is not None
+                cells = ["".join(c["source"]) if isinstance(c.get("source"), list) else c.get("source", "") for c in nb.get("cells", []) if c.get("cell_type") == "code"]
+                same = fix_notebook(cells, byname, str(mirrored), out, select=ORGANIZE) == cells
+            else:
+                same = fix_pyn(text, str(mirrored), out, select=ORGANIZE) == text
+        except (OSError, ValueError, FixError):
+            pass
+        cache["only_grids", src] = same
+    return cache["only_grids", src]
+
+
 def remap_notebook(line: str, root: Path, out: Path, cache: dict) -> tuple[str | None, bool]:
     """A notebook location: the mirror's path as the project's, and in a byname notebook the cell's
     translated position as its source one. Cells are numbered as the tool numbers them."""
@@ -246,6 +271,8 @@ def remap_notebook(line: str, root: Path, out: Path, cache: dict) -> tuple[str |
     if "line" not in m.groupdict():  # header
         return f"{rel}{m['rest']}", False
     nb_path = root / rel
+    if UNSORTED.search(line) and only_grids(nb_path, out / rel, out, cache):
+        return None, True
     if nb_path not in cache:
         try:
             nb = json.loads(nb_path.read_text(encoding="utf-8"))
@@ -327,7 +354,7 @@ def main(argv: list[str]) -> int:
         lines = recount(lines, located_lines)
     if os.environ.get("BYNAME_DEBUG"):
         if dropped:
-            lines.append(f"byname: hid {dropped} diagnostic(s) on generated code")
+            lines.append(f"byname: hid {dropped} diagnostic(s) on generated code or gridded imports")
         if quiet:
             lines.append(f"byname: hid {quiet} unused-variable warning(s) on walrus labels in returns")
     print("\n".join(lines))

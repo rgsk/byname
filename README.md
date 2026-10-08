@@ -351,6 +351,10 @@ then swaps them back:
   )
   ```
 
+  A `from m import (` grid survives organize imports: Ruff sorts the names, and they're packed again
+  with as many on the first line. Ruff's I001 calls a grid "un-formatted"; `byname tool ruff check` hides
+  that finding when organizing the file would change nothing.
+
 `byname fix` runs `ruff check` on the translation, so `f(os=)` counts as a use of `os`, and applies
 the safe fixes whose edits fall on code you wrote. Fixes that would touch generated code are skipped.
 

@@ -33,6 +33,24 @@ def test_organize_imports_sorts_only():
     assert fix_pyn(src, select=ORGANIZE) == "import os\nimport sys\nfrom typing import List\n\nprint(os.sep, sys.argv, List)\n"
 
 
+def test_organize_imports_keeps_a_gridded_import():
+    # Ruff writes a parenthesized import one name per line; a grid (several names on the first line, see
+    # fmt.py) is packed again, so a sorted one is left alone and an unsorted one keeps its shape
+    grid = "from model import (\n    GPT, Block, FeedForward,\n    apply_rope, rope_angles,\n)\n\nprint(GPT, Block, FeedForward, apply_rope, rope_angles)\n"
+    assert fix_pyn(grid, select=ORGANIZE) == grid
+    src = "import sys\nfrom m import (\n    d, b,\n    c, a,\n)\nimport os\n\nprint(sys, os, a, b, c, d)\n"
+    out = "import os\nimport sys\n\nfrom m import (\n    a, b,\n    c, d,\n)\n\nprint(sys, os, a, b, c, d)\n"
+    assert fix_pyn(src, select=ORGANIZE) == out
+    assert fix_pyn(out, select=ORGANIZE) == out
+    one_per_line = "from m import (\n    a,\n    b,\n)\n\nprint(a, b)\n"
+    assert fix_pyn(one_per_line, select=ORGANIZE) == one_per_line
+
+
+def test_organize_imports_keeps_a_gridded_import_in_a_notebook():
+    cells = ["from m import (\n    b, a,\n    c,\n)", "print(a, b, c)"]
+    assert fix_notebook(cells, byname=False, select=ORGANIZE) == ["from m import (\n    a, b,\n    c,\n)", "print(a, b, c)"]
+
+
 def test_unfinished_code_is_an_error():
     with pytest.raises(FixError):
         fix_pyn("(a=, = r\n")

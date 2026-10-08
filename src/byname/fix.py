@@ -4,13 +4,16 @@ Ruff checks the hidden translation, where `f(os=)` is `f(os=os)`, so it sees rea
 stand-ins would hide them: `f(os=__p)` makes `import os` look unused). Each fix is kept only if every
 edit lands on text the user wrote, verbatim; fixes touching generated code or the record prelude are
 dropped. Some fixes unlock others (`List[int]` -> `list[int]` leaves `from typing import List` unused),
-so it repeats until nothing changes, like `ruff check --fix`.
+so it repeats until nothing changes, like `ruff check --fix`. Ruff writes a sorted `from m import (`
+one name per line; one the user wrote as a grid (see fmt.py) is packed again, so I001 sorts its names
+but keeps its layout.
 """
 
 import json
 import subprocess
 from pathlib import Path
 
+from .fmt import regrid_imports
 from .srcmap import Translation, generated
 from .tools import resolve
 
@@ -50,6 +53,7 @@ def source_edits(tr: Translation, fix: dict) -> list[tuple[int, int, str]] | Non
 def fix_pyn(src: str, filename: str = "file.pyn", cwd: Path | None = None, select: list[str] | None = None) -> str:
     """src with Ruff's safe fixes applied. filename (as .py) lets ruff find the project's config;
     select: extra ruff arguments, e.g. ORGANIZE."""
+    original = src
     for _ in range(10):  # each round applies the fixes that don't overlap; later rounds pick up the rest
         tr = Translation(src)
         if tr.error is not None:
@@ -74,10 +78,10 @@ def fix_pyn(src: str, filename: str = "file.pyn", cwd: Path | None = None, selec
             if mine and not any(s < e2 and s2 < e or s == s2 for s, e, _ in mine for s2, e2, _ in edits):
                 edits += mine
         if not edits:
-            return src
+            break
         for s, e, text in sorted(edits, reverse=True):
             src = src[:s] + text + src[e:]
-    return src
+    return regrid_imports(original, src) if src != original else src
 
 
 def fix_notebook(cells: list[str], byname: bool, filename: str = "notebook.ipynb", cwd: Path | None = None, select: list[str] | None = None) -> list[str]:
@@ -124,4 +128,5 @@ def fix_notebook(cells: list[str], byname: bool, filename: str = "notebook.ipynb
         for k, taken in enumerate(edits):
             for s, e, text in sorted(taken, reverse=True):
                 cells[k] = cells[k][:s] + text + cells[k][e:]
+    cells = [regrid_imports(o, c) if c != o else c for c, o in zip(cells, original)]
     return [c if o.endswith("\n") else c.removesuffix("\n") for c, o in zip(cells, original)]

@@ -332,6 +332,21 @@ def test_ruff_findings_on_byname_layout_are_hidden_and_real_ones_kept(project):
     ]
 
 
+def test_ruff_i001_on_a_gridded_import_alone_is_hidden(project):
+    # Ruff calls an import packed several names to a line "un-formatted"; byname's organize imports keeps
+    # that layout, so I001 is shown only where organizing would change something
+    grid = "from os.path import (\n    basename, dirname,\n    join,\n)\n\nprint(basename, dirname, join)\n"
+    (project / "grid.pyn").write_text(grid)
+    (project / "grid.py").write_text(grid)
+    (project / "unsorted.py").write_text("import sys\nimport os\n\nprint(os, sys)\n")
+    (project / "nb.ipynb").write_text(notebook([("code", grid)]))
+    out, rc = tool(project, "ruff", "check", "--select", "I001", "--output-format=concise", "grid.pyn", "grid.py", "unsorted.py", "nb.ipynb")
+    assert [ln for ln in out.splitlines() if "I001" in ln] == ["unsorted.py:1:1: I001 [*] Import block is un-sorted or un-formatted"]
+    assert rc == 1
+    out, rc = tool(project, "ruff", "check", "--select", "I001", "--output-format=concise", "grid.pyn")
+    assert "All checks passed!" in out and rc == 0
+
+
 def test_totals_count_what_is_shown(project):
     # byname hides findings on its own generated code; the tool's totals are recounted to match, and what it
     # hid is only said with BYNAME_DEBUG=1
