@@ -109,3 +109,110 @@ byname favours keyword-only functions, and `Callable` can only describe position
 function passed as a value, or held in a record field, has no type short of a hand-written Protocol with
 `def __call__(self, *, name: str, age: int) -> None: ...` (measured: that checks calls, missing `age` included).
 Plan in DEVELOPMENT.md, "Designed, not built": translate `(params) -> T` to that Protocol for the checker.
+
+## `conftest.pyn` is never loaded
+
+```python
+# src/conftest.pyn
+@pytest.fixture(autouse=True)
+def _seed():
+    torch.manual_seed(0)
+```
+
+The fixture silently never runs: no error, no warning, and tests that don't depend on it still pass. Found in
+llm-final, where a probe test saw `torch.initial_seed() == 2669112705319434512` instead of 0. pytest finds
+conftest files by the literal name `conftest.py` (`_getconftestmodules` / `_try_load_conftest`), and
+`pytest_plugin.py` only hooks `pytest_collect_file`, which sees test modules, not conftests. Likely fix: in the
+plugin, on `pytest_collect_directory` (or `pytest_sessionstart` for the rootdir), translate a `conftest.pyn` the
+way `PynModule._getobj` does and hand the module to `config.pluginmanager._importconftest`-equivalent
+registration (`config.pluginmanager.consider_conftest(mod, registration_name=...)`), scoped to its folder so
+its fixtures only reach tests below it. At the least, warn when a `conftest.pyn` is present. Workaround: keep
+conftests as `conftest.py` (they rarely need byname syntax).
+
+## `byname tool ruff check` without `--output-format=concise` shows findings on the generated header
+
+```
+$ byname tool ruff check src            # ruff's default (full) output format
+I001 [*] Import block is un-sorted or un-formatted
+ --> src/data.py:1:1
+...
+PYI042 Type alias `_key_train__val` should be CamelCase
+ --> src/data.py:37:6
+...
+All checks passed!                      # and exit 0
+```
+
+Any file with a record shows I001 twice and PYI042 once on the record header (seen on llm-final's `data.pyn`
+and llm's `records/second.pyn`). The Alt+L task passes `--output-format=concise` and is clean. Typed by hand,
+ruff's default output gives:
+- **Generated-code findings shown:** `LOCATION` matches a line that starts with `path.py:line:col`.
+  In the full format, the location is on its own line, ` --> src/data.py:1:1`, below the `CODE message` line.
+  So nothing is remapped, nothing is dropped, and the path shown is the mirror's `.py` rather than the `.pyn`.
+- **A clean summary under them:** the snippet lines pass through too. `located_lines` stays empty, so when anything
+  else was hidden (here 3 walrus labels), `recount` turns the summary into "All checks passed!" and
+  `main` returns 0, right under the findings.
+
+Likely fix: in `main`, add `--output-format=concise` to `ruff check` when the user didn't pass an output
+format, as it already adds `--pythonpath` for basedpyright. Or parse the full format: a `CODE message` line,
+then a ` --> path:line:col` line, then the snippet, all mapped or dropped together.
+
+## Spreading a parameter whose record type is imported gives `Unknown`
+
+```python
+# tests/test_x.pyn                         # model.pyn: type GPTConfig = (vocab_size: int, ..., n_layer: int)
+from model import GPTConfig
+
+def test_x(cfg: GPTConfig):
+    named = (**cfg, name="small")
+    reveal_type(named)                     # Unknown
+```
+
+The same code with the alias defined in the same file reveals `(a: int, b: int, name: str)`, for a
+parameter and for an annotated local alike. So the spread seems to find a name's fields only through
+aliases defined in the file being translated; an imported alias sends it down the generic path (the same path as the B008 entry above), which types the result
+`Unknown`. Nothing errors: `named` just has no type, so `named.name` and `GPT(named)` go unchecked
+and the editor shows the names white. Found in llm-final (`tests/test_model.pyn`) by
+`scripts/any_check.py`. Other uses of the imported alias (`cfg.n_layer`, destructuring, passing `cfg`
+to a function typed with it) are checked fine; only the spread loses it. Workaround: write the record
+out literally. Likely fix: resolve the parameter's annotation through the import (the checker already
+knows the alias) before falling back to the generic path.
+
+## With `reportAny` / `reportUnknownVariableType` on, a generic-path spread reports errors in generated code
+
+Turn the two rules on (`# pyright: reportAny=true, reportUnknownVariableType=true`, which is what
+llm-final's `scripts/any_check.py` does) on the file above, and `byname tool basedpyright` prints:
+
+```
+    Argument corresponds to parameter "default" in function "pop" (reportAny)
+    Type of "r" is "bool | Unknown | NotImplementedType" (reportUnknownVariableType)
+    Type of "c" is "Unknown | None" (reportUnknownVariableType)
+  tests/test_x.pyn:6:13 - error: Return type of lambda is Any (reportAny)
+```
+
+`pop`, `r`, `c` and the lambda are byname's helpers (the record header and the spread's
+`lambda _byname_t, ...`), not user code. The first three print as indented detail lines with no
+location line above them: their parent, on the generated header, looks dropped while its detail lines
+are kept; the lambda one is moved onto the user's line,
+on purpose (see the B008 entry), but here it describes byname's code, not the user's. Likely fix: type
+the helpers so the strict rules have nothing to say (`_byname_kw` and friends returning concrete
+types), and drop a diagnostic's detail lines when their parent was dropped.
+
+## Hover shows a destructured parameter as `(...)`, which is open-record syntax
+
+```python
+class GPT(nn.Module):
+    def __init__(self, (vocab_size=, block_size=, n_embed=, n_head=, n_layer=, dropout=): GPTConfig): ...
+
+model = GPT(cfg)    # hover on GPT: class GPT((...): GPTConfig)
+```
+
+Nothing in this code is open. `(...)` is how byname writes an open record type with no fields
+(`_opn_ -> (...)`, and `(..., name: str)` with fields), so the hover reads as "GPT takes an open
+record" when the parameter is really a closed `GPTConfig` destructured into names. `pretty()` in
+`lsp.py` prints `(...)` for three different things: the empty open type, a spread record with unknown
+fields (`_byname_AnyRec`), and a parameter pattern's parameter (`PARAM_RE`, `_byname_p0`). `fmt.py`
+writes the same placeholder for a pattern (`__D: (__P[...], T)` -> `(...): T`). Found in llm-final, hovering
+`GPT(cfg)` in `src/generate.pyn`. Likely fix: show the pattern itself, `(vocab_size=, block_size=, ...): GPTConfig`,
+by mapping `_byname_pN` back to the Nth pattern's source text in the def. Or, if that's too much, use a
+placeholder that isn't record-type syntax (say `(=…): GPTConfig`, which reads as a pattern). The unknown-fields spread
+has its own problem: `(...)` there claims "open" when the truth is "unknown".
