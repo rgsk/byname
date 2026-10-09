@@ -5,7 +5,7 @@ Found while writing `tests/test_exhaustive.pyn`; to look at later.
 ## Ruff B008 on a record default
 
 ```python
-def welcome_or_guest((name=): Person = (name="guest", age=0)) -> str: ...
+def welcome_or_guest(person: Person = (name="guest", age=0)) -> str: ...
 ```
 
 `byname tool ruff check` reports `B008 Do not perform function call `(name, age)` in argument defaults`.
@@ -13,7 +13,7 @@ The translation turns the record into a class call, `_rec_name__age(name="guest"
 any call in a default. Records are immutable NamedTuples, so the default is as safe as a tuple one: B008's
 concern (one mutable object shared across calls) doesn't apply. Every record default in user code hits
 this. Likely fix: `byname tool` / the lint pass drops B008 when its range is a record literal (the same
-mapping that already hides diagnostics on generated code). Suppressed with `# noqa: B008` in the test for now.
+mapping that already hides diagnostics on generated code). 
 
 ## Ruff B008 on spreads that take the generic path (regression from dfb09f7)
 
@@ -196,23 +196,3 @@ are kept; the lambda one is moved onto the user's line,
 on purpose (see the B008 entry), but here it describes byname's code, not the user's. Likely fix: type
 the helpers so the strict rules have nothing to say (`_byname_kw` and friends returning concrete
 types), and drop a diagnostic's detail lines when their parent was dropped.
-
-## Hover shows a destructured parameter as `(...)`, which is open-record syntax
-
-```python
-class GPT(nn.Module):
-    def __init__(self, (vocab_size=, block_size=, n_embed=, n_head=, n_layer=, dropout=): GPTConfig): ...
-
-model = GPT(cfg)    # hover on GPT: class GPT((...): GPTConfig)
-```
-
-Nothing in this code is open. `(...)` is how byname writes an open record type with no fields
-(`_opn_ -> (...)`, and `(..., name: str)` with fields), so the hover reads as "GPT takes an open
-record" when the parameter is really a closed `GPTConfig` destructured into names. `pretty()` in
-`lsp.py` prints `(...)` for three different things: the empty open type, a spread record with unknown
-fields (`_byname_AnyRec`), and a parameter pattern's parameter (`PARAM_RE`, `_byname_p0`). `fmt.py`
-writes the same placeholder for a pattern (`__D: (__P[...], T)` -> `(...): T`). Found in llm-final, hovering
-`GPT(cfg)` in `src/generate.pyn`. Likely fix: show the pattern itself, `(vocab_size=, block_size=, ...): GPTConfig`,
-by mapping `_byname_pN` back to the Nth pattern's source text in the def. Or, if that's too much, use a
-placeholder that isn't record-type syntax (say `(=…): GPTConfig`, which reads as a pattern). The unknown-fields spread
-has its own problem: `(...)` there claims "open" when the truth is "unknown".

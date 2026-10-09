@@ -221,22 +221,25 @@ def test_spread_record_picks_the_overload_that_takes_a_record(project):
     assert "ov.pyn:13" not in out and "2 errors," in out and "ov.pyn:10:1 - error: No overloads" in out
 
 
-def test_parameter_patterns_are_typed(project):
+def test_destructured_parameters_are_typed(project):
     # each local gets its field's type; an unknown field is reported on the pattern; calls are checked
     (project / "params.pyn").write_text(
         "type User = (name: str, age: int)\n"
-        "def f((name=, age=): User):\n"
+        "def f(user: User):\n"
+        "    (name=, age=) = user\n"
         "    if age > 1:\n"
         "        return name + 1\n"          # str + int
         "    return name\n"
-        "def g((nme=): User): return nme\n"  # no such field
+        "def g(user: User):\n"
+        "    (nme=) = user\n"                # no such field
+        "    return nme\n"
         "f((name='r', age=5))\n"
         "f((name='r',))\n"                   # missing age
     )
     out, rc = tool(project, "basedpyright", "params.pyn")
-    assert 'params.pyn:4:16 - error: Operator "+" not supported for types "str" and "Literal[1]"' in out
-    assert 'params.pyn:6:8 - error: Cannot access attribute "nme" for class "User"' in out
-    assert "params.pyn:7" not in out and "params.pyn:8:3 - error" in out and "missing field: age" in out
+    assert 'params.pyn:5:16 - error: Operator "+" not supported for types "str" and "Literal[1]"' in out
+    assert 'params.pyn:8:6 - error: Cannot access attribute "nme" for class "User"' in out
+    assert "params.pyn:10" not in out and "params.pyn:11:3 - error" in out and "missing field: age" in out
     assert "_byname" not in out and out.count(" - error") == 3
 
 

@@ -580,81 +580,42 @@ def test_the_checker_infers_a_written_record_type(tmp_path):
     }
 
 
-# ============================================================================
-# 7. PARAMETER PATTERNS: destructure a parameter, like TS `{ name, age }: Person`
+# 7. PARAMETERS: give the parameter a name, destructure it in the body
+#    (no pattern in a signature: there `name=` is a default and nothing else; Python dropped tuple
+#    parameters too, PEP 3113)
 # ============================================================================
 
 
-def intro((name=, age=): Person, loud: bool = False) -> str:
+def intro(person: Person, loud: bool = False) -> str:
+    (name=, age=) = person
     if loud:
         return f"{name.upper()}, {age}!"
     return f"{name}, {age}"
 
 
-def intro_untyped((name=, age=), loud: bool = False) -> str:  # hover: name and age are Unknown
-    if loud:
-        return f"{name.upper()}, {age}!"
-    return f"{name}, {age}"
+def test_a_parameter_is_destructured_first_in_the_body():
+    assert intro((name="gil", age=30)) == "gil, 30"
+    assert intro(person=(age=7, name="ivy"), loud=True) == "IVY, 7!"  # it has a name, so it passes by keyword
 
 
-def test_a_parameter_destructures_the_record_passed_in():
-    assert intro((name="gil", age=30)) == intro_untyped((name="gil", age=30)) == "gil, 30"
-    assert intro((age=7, name="ivy"), loud=True) == intro_untyped((age=7, name="ivy"), loud=True) == "IVY, 7!"
+@pytest.mark.parametrize(
+    "src",
+    [
+        "def f((name=, age=): Person): ...",
+        "def f(x, (name=)): ...",
+        "def f((id=, user=(name=n))): ...",
+        "def f((name=) = (name='u')): ...",
+        "def f[T]((name=): T): ...",
+    ],
+)
+def test_a_pattern_in_a_signature_is_an_error(src):
+    with pytest.raises(SyntaxError, match=r"can't destructure a parameter: give it a name and destructure it in the body"):
+        transform(src)
 
 
-def test_it_is_a_plain_parameter_plus_one_unpacking_line():
-    src = "def intro((name=, age=): Person):\n    return name\n"
-    assert transform(src).body == "def intro(_byname_p0: Person):\n    _ds = _byname_p0; name = _ds.name; age = _ds.age\n    return name\n"
-
-
-def label((id=, user=(name=who))) -> str:
-    return f"{id}:{who}"
-
-
-def label_typed((id=, user=(name=who)): (id: int, user: (name: str))) -> str:
-    return f"{id}:{who.title()}"
-
-
-def test_patterns_nest_rename_and_take_an_inline_type():
-    assert label((id=7, user=(name="kim"))) == "7:kim"  # no type: id and who are untyped
-    assert label_typed((id=7, user=(name="kim"))) == "7:Kim"  # who is a str
-
-
-def welcome(*, user: Person, note: str = "") -> str:  # to pass it by keyword: name the parameter, destructure inside
-    (name=, age=) = user
-    return f"{name} ({age}) {note}".strip()
-
-
-def test_to_pass_a_record_by_keyword_name_the_parameter():
-    assert welcome(user=(name="ann", age=30)) == "ann (30)"
+def test_shorthand_in_a_default_is_still_an_error():
     with pytest.raises(SyntaxError, match=r"name= in a parameter's default would take the outer 'name': write name=name"):
-        transform("def welcome(user=(name=)): ...")  # not a pattern: a default, and shorthand there is an error
-
-
-def welcome_or_guest((name=): Person = (name="guest", age=0)) -> str:  # noqa: B008 -- see open_issues.md
-    return name
-
-
-def welcome_or_guest_untyped((name=) = (name="guest", age=0)) -> str:  # noqa: B008 -- hover: name is str | Unknown, the default's type counts
-    return name
-
-
-def test_a_pattern_takes_a_default_after_its_type():
-    assert welcome_or_guest() == welcome_or_guest_untyped() == "guest"
-    assert welcome_or_guest((name="bo", age=1)) == welcome_or_guest_untyped((name="bo", age=1)) == "bo"
-
-
-def test_a_misspelled_field_in_a_pattern_is_an_error_on_the_pattern(tmp_path):
-    verdicts = checker(
-        """\
-        type Person = (name: str, age: int)
-        def greet((nme=, age=): Person) -> str:
-            return f"{nme} {age}"
-        """,
-        tmp_path,
-    )
-    assert sorted(verdicts) == [2]
-    assert 'Cannot access attribute "nme"' in verdicts[2]
+        transform("def welcome(user=(name=)): ...")
 
 
 # ============================================================================

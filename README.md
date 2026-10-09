@@ -178,32 +178,28 @@ A pattern is also written the way the record is built: `r = (images=x0)` puts `x
 `(images=x0) = r` takes it back out. Rust (`let Point { x: a, .. } = p`) and JS (`const { images: x0 } = obj`)
 put the field first too; they use `:`, which in Python is an annotation.
 
-**In parameters,** like TypeScript's `function f({ name, age }: User)`:
+**Parameters** are destructured in the body: give the parameter a name, then unpack it.
 
 ```python
 type User = (name: str, age: int)
 
-def greet((name=, age=): User, loud: bool = False) -> str:
-    ...                                # name: str, age: int; a typo like (nme=) is an error on the pattern
-def f((id=, user=(name=n))): ...       # nested, renamed, or with no type
-def f((name=, age=): User = (name="anon", age=0)): ...   # a default goes after the type
+def greet(user: User, loud: bool = False) -> str:
+    (name=, age=) = user               # name: str, age: int; a typo like (nme=) is an error
 ```
 
-A pattern parameter has no name, so it can't be passed by keyword; hovers show it as `(...)`. To take a
-record by keyword, name the parameter and destructure it on the body's first line:
-
-```python
-def send(*, user: User):
-    (name=, age=) = user
-```
-
-`user=(name="x")` in a signature is a default record, as in Python, never a pattern.
+In a signature `name=` is always a default: `user=(name="x")` is a default record, as in Python.
 
 **Not planned:**
 - **Dict keys:** destructuring reads attributes, not keys. Dict syntax would buy nothing over records,
   and dicts lose per-key types (`dict[str, str | int]`).
 - **Positional items in a pattern,** like `(a, b=) = r`. Fields are read by name so field order never
   matters; positional items would bring that fragility back.
+- **Patterns in parameters,** like TypeScript's `function f({ name, age }: User)`: `def f((name=, age=): User)`
+  is an error: give the parameter a name and destructure it in the body, `(name=, age=) = user`. In a signature
+  `=` means a default and nothing else; a pattern there reads like one (`user=(name=n)`, `(id=, user=(name=n))`).
+  Python dropped tuple parameters for the same reasons ([PEP 3113](https://peps.python.org/pep-3113/)):
+  the parameter has no name, so it can't be passed by keyword, and hover and signature help have
+  nothing to show for it. A named parameter costs one line and has none of those problems.
 - **Shorthand in a parameter's default,** like `def f(name=)`, `def f(user=(name=))` or
   `lambda x=g(name=): x`, at any depth. A default is evaluated where the function is defined, so `name=`
   there would quietly take the outer `name`, though in a signature it reads as the parameter. Write

@@ -21,7 +21,6 @@ The body keeps the input's line count; record classes go in a separate prelude.
 """
 
 import ast
-import bisect
 import io
 import keyword
 import tokenize
@@ -29,8 +28,6 @@ from dataclasses import dataclass, field
 
 DS = "_ds"
 SHORT, PAT, TYP = "__p", "__P", "__T"  # formatting stand-ins: `x=` -> `x=__p`, record `(` -> `__P(`, pattern -> `__P[...]`, record type -> `__T[...]`
-PARAM = "__D"  # formatting stand-in for a parameter pattern: `(a=): T` -> `__D: (__P[a:__p], T)`
-PARAM_NAME = "_byname_p"  # + index: the parameter a parameter pattern stands for
 REPR = "_byname_repr"
 ORDER = "_byname_order"  # a record class's fields in the order written; `_fields` is the sorted storage order
 PRELUDE = (
@@ -187,7 +184,6 @@ class Result:
     problems: list[tuple[int, int, str]] = field(default_factory=list)  # (start, end, message), tolerant mode
     standins: list[tuple[int, int, str]] = field(default_factory=list)  # (start, end, text): plain-Python stand-ins, for formatting
     fields: list[tuple[int, int]] = field(default_factory=list)  # source spans of record field names, for highlighting
-    inserted: list[int] = field(default_factory=list)  # source lines that got a generated line before them (see to_code)
     labels: list[tuple[int, int]] = field(default_factory=list)  # source spans of walrus names labelling a returned tuple
 
 
@@ -742,9 +738,6 @@ def transform(
             text = access([*chain, it[0]], text, marks)
         return text
 
-    params = 0  # parameter patterns so far: each becomes PARAM_NAME + its index
-    inserted: list[int] = []
-
     def no_default_shorthand(its: list[list[int]], level: int | None) -> None:
         """No shorthand in a parameter's default (`def` or `lambda`), however deep: a default is evaluated
         where the function is defined, so `name=` there would quietly take the outer `name`, though in a
@@ -775,67 +768,15 @@ def transform(
                 k = pair.get(k, k) + 1
             no_default_shorthand(split(l + 1, k), parent.get(l))
 
-    def parameter_patterns(o: int) -> None:
-        """`def f((name=, age=): User, n=0):` -> `def f(_byname_p0: User, n=0):` with `_ds = _byname_p0;
-        name = _ds.name; age = _ds.age` on a line of its own before the body (after a docstring), or before
-        a one-line body. Python 3 has no destructuring parameters (PEP 3113). to_code puts line numbers back."""
-        nonlocal params
+    def no_parameter_patterns(o: int) -> None:
+        """No pattern in a signature: `def f((name=, age=): User)` is an error.
+        In a signature `name=` means a default and nothing else; Python 3 removed tuple parameters too
+        (PEP 3113): the parameter would have no name, so it couldn't be passed by keyword or shown."""
         no_default_shorthand(items(o), o)
-        found = []
         for it in items(o):
             g = it[0]
-            if toks[g].string != "(" or g not in pair or pattern_items(g) is None:
-                continue
-            rest = it[it.index(pair[g]) + 1 :]
-            if rest and toks[rest[0]].string not in (":", "="):
-                continue
-            consumed.add(g)
-            tree = pattern(g)
-            group = span(g, pair[g])
-            # a pattern over several lines keeps its line breaks (valid inside the def's parentheses),
-            # so every line after it keeps its number: tracebacks, source_ast
-            name = f"{PARAM_NAME}{params}"
-            params += 1
-            edits.append(Edit(*group, name + "\n" * src.count("\n", *group), group))
-            # formatter: `__D: (__P[...], T)`, or `__D: (__P[...],)` with no annotation
-            standins.append((group[0], group[0], f"{PARAM}: ("))
-            if rest and toks[rest[0]].string == ":":
-                ann_end = next((k for k in rest if toks[k].string == "=" and parent.get(k) == o), None)
-                last = rest[rest.index(ann_end) - 1] if ann_end is not None else rest[-1]
-                standins.append((*span(rest[0]), ","))
-                standins.append((off(toks[last].end), off(toks[last].end), ")"))
-            else:  # a 1-tuple needs its comma; ruff would keep a 2-tuple with one split over lines
-                standins.append((group[1], group[1], ",)"))
-            found.append((name, tree, group))
-        if not found:
-            return
-        # the body: after the `:` that ends the signature (skipping a `-> T`)
-        c = pair[o] + 1
-        while toks[c].string != ":":
-            c = pair.get(c, c) + 1
-        marks: list[Mark] = []
-        text = ""
-        for name, tree, group in found:
-            text += ("; " if text else "") + f"{DS} = "
-            text = bindings(tree, [], text + name, marks)
-        display = (found[0][2][0], found[-1][2][1])
-        first = c + 1
-        if toks[first].type != tokenize.NEWLINE:  # one-line body: `def f((a=)): return a`
-            at = off(toks[first].start)
-            edits.append(Edit(at, at, text + "; ", display, marks))
-            return
-        indent = toks[first + 1].string  # INDENT
-        stmt = first + 2
-        if toks[stmt].type == tokenize.STRING and toks[stmt + 1].type == tokenize.NEWLINE:  # after a docstring
-            line = toks[stmt + 1].start[0] + 1
-        else:
-            line = toks[stmt].start[0]
-        at = line_starts[line - 1] if line - 1 < len(line_starts) - 1 else len(src)
-        lead = "" if at == 0 or src[at - 1] == "\n" else "\n"
-        for m in marks:
-            m.ts, m.te = m.ts + len(lead) + len(indent), m.te + len(lead) + len(indent)
-        edits.append(Edit(at, at, lead + indent + text + "\n", display, marks))
-        inserted.append(line)
+            if toks[g].string == "(" and g in pair and pattern_items(g) is not None:
+                raise err("can't destructure a parameter: give it a name and destructure it in the body", toks[g])
 
     def label_returns() -> dict[tuple[str, ...], None]:
         """Checker only: `return x, y` in a function with no return annotation -> `return _byname_tup_x__y(x, y)`,
@@ -946,11 +887,11 @@ def transform(
         prev = toks[i - 1] if i else None
         its = items(i)
 
-        # def f(...) / def f[T](...) / class C(...): parameter lists, left alone but for parameter patterns
+        # def f(...) / def f[T](...) / class C(...): parameter lists, left alone
         head = rpair[i - 1] - 1 if prev is not None and prev.string == "]" else i - 1  # the name, past `[T]`
         if head >= 1 and toks[head - 1].string in ("def", "class") and is_name(toks[head]):
             if toks[head - 1].string == "def":
-                parameter_patterns(i)
+                no_parameter_patterns(i)
             continue
 
         # building a record type: `(name: str, age: int)(**u, **r)`
@@ -1182,12 +1123,12 @@ def transform(
     if record_used:
         prelude += "from typing import cast as _cast\n"
     standins.sort()
-    return Result(prelude, body, edits, problems, standins, sorted(field_spans), sorted(inserted), sorted(label_spans))
+    return Result(prelude, body, edits, problems, standins, sorted(field_spans), sorted(label_spans))
 
 
 def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:
-    """If offset `at` is a field position in a destructuring pattern `(...) = expr`, `for (...) in xs` or a
-    parameter `def f((...): T)` (an empty item, or the field name being typed):
+    """If offset `at` is a field position in a destructuring pattern `(...) = expr` or `for (...) in xs`
+    (an empty item, or the field name being typed):
     (word_start, word_end, close_paren, fields_already_listed).
     Used for completion; also matches `(x|) = y`, which is plain Python but a pattern in the making."""
     try:
@@ -1206,11 +1147,8 @@ def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:
         return starts[rc[0] - 1] + rc[1]
 
     pair: dict[int, int] = {}
-    parent: dict[int, int] = {}
     stack: list[int] = []
     for i, t in enumerate(toks):
-        if stack:
-            parent[i] = stack[-1]
         if t.type == tokenize.OP and t.string in "([{":
             stack.append(i)
         elif t.type == tokenize.OP and t.string in ")]}" and stack:
@@ -1255,11 +1193,7 @@ def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:
         close = pair[i]
         if close + 1 >= len(toks):
             continue
-        o = parent.get(i)
-        if o is not None and o >= 2 and toks[o - 2].string == "def" and prev is not None and prev.string in ("(", ","):
-            if toks[close + 1].string not in (":", ",", ")", "="):  # def f((...): T)
-                continue
-        elif prev is not None and prev.string == "for":  # for (...) in xs
+        if prev is not None and prev.string == "for":  # for (...) in xs
             if toks[close + 1].string != "in":
                 continue
         elif not (prev is None or prev.type in STMT_START or prev.string == ";") or toks[close + 1].string != "=":
@@ -1293,32 +1227,14 @@ def prelude_index(tree: ast.Module) -> int:
 def source_ast(src: str, path: str = "<pyn>") -> ast.Module:
     """The translation's AST with the .pyn file's own line numbers, without the prelude. For tools that
     match checker output back to source constructs (e.g. which function a line is in)."""
-    return _body_ast(transform(src, path), path)
-
-
-def _body_ast(r: Result, path: str) -> ast.Module:
-    tree = ast.parse(r.body, path)
-    if r.inserted:  # generated lines (parameter patterns): count as the line before them, the `def`
-        extra = [line + k for k, line in enumerate(r.inserted)]
-
-        def source_line(n: int) -> int:
-            while n in extra:
-                n -= 1
-            return n - bisect.bisect_left(extra, n)
-
-        for node in ast.walk(tree):
-            if isinstance(getattr(node, "lineno", None), int):
-                node.lineno = source_line(node.lineno)
-                if isinstance(getattr(node, "end_lineno", None), int):
-                    node.end_lineno = source_line(node.end_lineno)
-    return tree
+    return ast.parse(transform(src, path).body, path)
 
 
 def to_ast(src: str, path: str) -> ast.Module:
     """The module that runs, as an AST, prelude included: what to_code compiles. Body line numbers match
     the .pyn file exactly. For tools that rewrite it first (the pytest plugin rewrites asserts)."""
     r = transform(src, path)
-    tree = _body_ast(r, path)
+    tree = ast.parse(r.body, path)
     if r.prelude:
         k = prelude_index(tree)
         tree.body[k:k] = ast.parse(r.prelude).body

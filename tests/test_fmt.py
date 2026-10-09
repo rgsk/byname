@@ -41,29 +41,9 @@ def test_spreads_format(tmp_path):
     assert format_pyn(want, cwd=tmp_path) == want
 
 
-def test_parameter_patterns_format(tmp_path):
-    # `(a=): T` stands in as `__D: (__P[a:__p], T)`: a valid parameter
-    src = "def f( (name= ,age = a) :User ,n:int=0)->int:\n    return a\ndef h((name=,age=)): return name\n"
-    want = "def f((name=, age=a): User, n: int = 0) -> int:\n    return a\n\n\ndef h((name=, age=)):\n    return name\n"
-    assert format_pyn(src, cwd=tmp_path) == want
-    assert format_pyn(want, cwd=tmp_path) == want
-    # split over lines: the stand-in's tuple indent is taken back out
-    (tmp_path / "ruff.toml").write_text("line-length = 40\n")
-    src = "def f((first_name=, nested=(city=, zip_code=)): User, other: int = 0):\n    pass\n"
-    want = (
-        "def f(\n    (\n        first_name=,\n        nested=(\n            city=, zip_code=\n"
-        "        ),\n    ): User,\n    other: int = 0,\n):\n    pass\n"
-    )
-    assert format_pyn(src, cwd=tmp_path) == want
-    assert format_pyn(want, cwd=tmp_path) == want
-
-
-def test_parameter_patterns_with_defaults_format(tmp_path):
-    src = "def f(*,user=( name='x' ,age=1)):\n    pass\ndef g((name=)=(name='u')): pass\ndef h((name=):Args=(name='u')): pass\n"
-    want = (
-        "def f(*, user=(name=\"x\", age=1)):\n    pass\n\n\ndef g((name=) = (name=\"u\")):\n    pass\n\n\n"
-        "def h((name=): Args = (name=\"u\")):\n    pass\n"
-    )
+def test_record_defaults_format(tmp_path):
+    src = "def f(*,user=( name='x' ,age=1)):\n    pass\n"
+    want = "def f(*, user=(name=\"x\", age=1)):\n    pass\n"
     assert format_pyn(src, cwd=tmp_path) == want
     assert format_pyn(want, cwd=tmp_path) == want
 

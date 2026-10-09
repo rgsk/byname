@@ -178,38 +178,26 @@ def oldest(people: list[Person]) -> Person:
 assert oldest([someone, (name="Hal", age=40)]).name == "Hal"
 
 
-def intro((name=, age=): Person, loud: bool = False) -> str:  # destructure a parameter, like TS `{ name, age }: Person`
-    if loud:  # the body can start with anything
+def intro(person: Person, loud: bool = False) -> str:  # destructure a parameter: name it, unpack it first
+    (name=, age=) = person
+    if loud:
         return f"{name.upper()}, {age}!"
     return f"{name}, {age}"
 
 
-assert intro(someone) == "Gil, 30" and intro((name="Ivy", age=7), loud=True) == "IVY, 7!"
+assert intro(someone) == "Gil, 30" and intro(person=(name="Ivy", age=7), loud=True) == "IVY, 7!"
 
 
-def label((id=, user=(name=n))) -> str:  # nested and renamed; no annotation: untyped
-    return f"{id}:{n}"
-
-
-assert label((id=7, user=(name="Kim"))) == "7:Kim"
-
-
-def label_typed((id=, user=(name=n)): (id: int, user: (name: str))) -> str:  # the same, typed inline: n is a str
+def label(item: (id: int, user: (name: str))) -> str:  # nested and renamed
+    (id=, user=(name=n)) = item
     return f"{id}:{n.title()}"
 
 
-assert label_typed((id=7, user=(name="kim"))) == "7:Kim"
+assert label((id=7, user=(name="kim"))) == "7:Kim"
 
 
-def welcome(*, user: Person, note: str = "") -> str:  # passed by keyword: name it, destructure inside
-    (name=, age=) = user
-    return f"{name} ({age}) {note}".strip()
-
-
-assert welcome(user=(name="Ann", age=30)) == "Ann (30)"
-
-
-def welcome_or_guest((name=): Person = (name="guest", age=0)) -> str:  # with a default (no shorthand in it)
+def welcome_or_guest(person: Person = (name="guest", age=0)) -> str:  # a record default (no shorthand in it)
+    (name=) = person
     return name
 
 

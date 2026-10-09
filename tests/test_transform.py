@@ -154,35 +154,6 @@ def test_body_keeps_line_count():
     assert r.body.count("\n") == src.count("\n")
 
 
-MULTILINE_PATTERNS = """\
-def f(
-    (
-        a=, b=,
-    ): T,
-    c,
-    (
-        name=,
-    ): U,
-):
-    return a
-def g():
-    raise ValueError("line 12")
-g()
-"""
-
-
-def test_a_parameter_pattern_over_several_lines_keeps_later_line_numbers():
-    # a pattern's line breaks stay in the translation: `g` and its raise keep their lines
-    tree = source_ast(MULTILINE_PATTERNS)
-    g = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "g")
-    assert g.lineno == 11
-    with pytest.raises(ValueError) as e:
-        exec(to_code(MULTILINE_PATTERNS.replace("T", "object").replace("U", "object"), "<x>"), {})  # noqa: S102
-    assert e.traceback[-1].lineno + 1 == 12  # pytest's lineno is 0-based
-
-
-
-
 # --- nested patterns ----------------------------------------------------------
 
 
@@ -680,83 +651,14 @@ def test_field_spans_cover_every_field_name():
     assert all(src[s - 1] == "(" or src[s - 2] == "," for s, _ in r.fields)
 
 
-PARAMS = '''type User = (name: str, age: int)
-
-
-def f((name=, age=): User):
-    if age > 1:
-        return name + "!"
-    return name
-
-
-def g(self, (name=n, addr=(city=)): (name: str, addr: (city: str)), k: int = 0) -> str:
-    """doc"""
-    return f"{n} {city} {k}"
-
-
-def h((name=, age=)): return name
-
-
-def two((name=): User, (age=) = (age=3)):
-    return (name, age)
-
-
-def bad((nme=): User):
-    return nme
-'''
-
-
-def test_parameter_patterns_destructure_arguments():
-    ns = {}
-    calls = "u = (name='r', age=5)\nout = f(u), h(u), g(0, (name='a', addr=(city='b'))), two(u), two(u, (age=9))\n"
-    exec(compile_pyn(PARAMS + calls), ns)
-    assert ns["out"] == ("r!", "r", "a b 0", ("r", 3), ("r", 9))
-    assert ns["g"].__doc__ == "doc"  # the unpacking goes after a docstring
-
-
-def test_parameter_patterns_translation():
-    body = transform(PARAMS).body
-    # a line of its own before the body, so it may start with `if`/`for`/`try`; before a one-line body
-    assert "def f(_byname_p0: User):\n    _ds = _byname_p0; name = _ds.name; age = _ds.age\n    if age > 1:" in body
-    assert '    """doc"""\n    _ds = _byname_p1; n = _ds.name; city = _ds.addr.city\n' in body
-    assert "def h(_byname_p2): _ds = _byname_p2; name = _ds.name; age = _ds.age; return name" in body
-    assert "def two(_byname_p3: User, _byname_p4 = _rec_age(age=3)):\n    _ds = _byname_p3; name = _ds.name; _ds = _byname_p4; age = _ds.age\n" in body
-    assert transform("def f[T]((a=): T): return a\n").body == "def f[T](_byname_p0: T): _ds = _byname_p0; a = _ds.a; return a\n"
-
-
-def test_parameter_patterns_keep_line_numbers():
-    # the generated lines count as the `def` line: tracebacks point into the .pyn as written
-    ns = {}
-    src = PARAMS + "bad((name='r', age=1))\n"
-    with pytest.raises(AttributeError) as e:
-        exec(to_code(src, "p.pyn"), ns)
-    lines = [fr.lineno for fr in e.traceback if fr.frame.code.path == "p.pyn"]
-    assert [ln + 1 for ln in lines] == [src.splitlines().index("bad((name='r', age=1))") + 1, src.splitlines().index("def bad((nme=): User):") + 1]
-    code = to_code("def f((a=)):\n    x = 1\n    raise ValueError(a)\n\n\nf((a=1))\n", "q.pyn")
-    with pytest.raises(ValueError) as e:
-        exec(code, {})
-    assert [fr.lineno + 1 for fr in e.traceback if fr.frame.code.path == "q.pyn"] == [6, 3]
-
-
 def test_source_ast_has_the_pyn_line_numbers():
-    # for tools matching checker output to source: the parameter pattern's generated line counts as
-    # the `def`, so the function spans its .pyn lines and the statements after it keep theirs
-    src = "x = 1\ndef f((a=, b=)):\n    y = a\n    return y\n\n\nz: int = f((a=1, b=2))\n"
+    # for tools matching checker output to source: the body as translated, without the prelude
+    src = "x = 1\ndef f(r):\n    (a=, b=) = r\n    return a\n\n\nz: int = f((a=1, b=2))\n"
     tree = source_ast(src)
     f = tree.body[1]
     assert isinstance(f, ast.FunctionDef) and (f.lineno, f.end_lineno) == (2, 4)
-    assert [s.lineno for s in f.body][-2:] == [3, 4]
     assert tree.body[2].lineno == 7 and isinstance(tree.body[2], ast.AnnAssign)
     assert not any(isinstance(s, ast.ImportFrom) for s in tree.body)  # no prelude
-
-
-def test_parameter_pattern_runs_on_old_pythons():
-    from byname.output import render
-
-    out = render(PARAMS.replace("type User = ", "User = ") + "print(f((name='r', age=5)), two((name='t', age=1)))\n", Path("p.pyn"))
-    ast.parse(out, feature_version=(3, 8))
-    p = subprocess.run([sys.executable, "-c", out], capture_output=True, text=True, check=True)
-    assert p.stdout == "r! ('t', 3)\n"
 
 
 def test_a_keyword_parameter_with_a_record_is_a_default():
@@ -780,8 +682,6 @@ def test_no_shorthand_in_parameter_defaults():
     # though it reads as the parameter; `name=name` says it. Any depth, def or lambda
     for src, field in [
         ("def f(user=(name=)): pass\n", "name"),
-        ("def f((name=) = (name=)): pass\n", "name"),
-        ("def f((name=): object = (name=, age=1)): pass\n", "name"),
         ("def f(user=(id=1, addr=(city=))): pass\n", "city"),
         ("def f(*, x: dict = dict(name=)): pass\n", "name"),
         ("f = lambda x=(name=): x\n", "name"),

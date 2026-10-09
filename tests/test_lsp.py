@@ -478,25 +478,6 @@ def test_completion_on_a_class_instance_offers_methods(lsp):
     assert {i["label"] for i in items} == {"encode", "n", "vocab_size"}
 
 
-def test_completion_in_parameter_patterns(lsp):
-    # `def f((name=, |): T)` offers T's other fields, annotated inline or with an alias
-    c, root, uri = lsp
-    _, items = complete(c, uri, MAIN + "def f((name=, |): (name: str, age: int, city: str)): pass\n")
-    assert {i["label"] for i in items} == {"age", "city"}
-    _, items = complete(c, uri, MAIN + "type U = (name: str, age: int)\ndef f(n: int, (ag|): U): pass\n")
-    assert [i["label"] for i in items] == ["age"]
-
-
-def test_parameter_pattern_shows_as_a_pattern(lsp):
-    # the generated parameter name doesn't leak into hovers: `(...)`
-    c, root, uri = lsp
-    text = MAIN + "type U = (name: str, age: int)\ndef greet((name=, age=): U) -> str:\n    return name\ngreet\n"
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 300}, "contentChanges": [{"text": text}]}})
-    res = c.request("textDocument/hover", {"textDocument": {"uri": uri}, "position": pos(text, "greet\n")})
-    value = res["contents"]["value"]
-    assert "def greet((...): U) -> str" in value
-
-
 def test_replace_completes_and_checks_fields(lsp):
     # `_replace(` offers the record's fields; a stale `**cfg._asdict()` is an error in the editor
     c, root, uri = lsp
@@ -641,6 +622,16 @@ def test_a_broken_byname_rule_shows_only_its_own_error(lsp):
     want = [(1, "v= in a parameter's default would take the outer 'v': write v=v to mean that")]
     got = wait_errors(c, uri, want)
     c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 905}, "contentChanges": [{"text": MAIN}]}})
+    assert got == want
+
+
+def test_a_pattern_in_a_signature_is_an_error(lsp):
+    c, root, uri = lsp
+    text = "type U = (name: str, age: int)\ndef f((name=, age=): U):\n    return name\n"
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 906}, "contentChanges": [{"text": text}]}})
+    want = [(1, "can't destructure a parameter: give it a name and destructure it in the body")]
+    got = wait_errors(c, uri, want)
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 907}, "contentChanges": [{"text": MAIN}]}})
     assert got == want
 
 
