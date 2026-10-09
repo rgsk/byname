@@ -523,10 +523,10 @@ def test_spread_records_of_known_names_are_plain_records():
         "w2 = (**w,)\n"
         "w = (**w, c=3)\n"               # reads the `w` before it
         "def g():\n"
-        "    return (**w,)\n"            # may run after any binding of `w`: unknown
+        "    return (**w,)\n"            # may run after any binding of `w`, and they differ: unknown
         "if t.a:\n"
         "    w = (a=1,)\n"
-        "w3 = (**w,)\n"                  # bound in a branch: unknown
+        "w3 = (**w,)\n"                  # the branch's `w` or the one before it, which differ: unknown
         "k = [(**t,) for t in [w]]\n"    # the comprehension's `t`: unknown
         "m = [(**t,) for _ in [w]]\n"    # the module's `t`, read there and then
     )

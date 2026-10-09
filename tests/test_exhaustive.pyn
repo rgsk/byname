@@ -734,6 +734,52 @@ def test_spreading_back_into_the_same_name_keeps_its_type(tmp_path):
     assert verdicts[15] == 'Type of "w" is "(name: str, age: int)"'  # an annotation
 
 
+def test_a_spread_is_typed_when_every_binding_that_may_reach_it_has_the_same_fields(tmp_path):
+    # a name bound in a branch, a loop or `try`, rebound and read from a function, or rebound through `global`:
+    # any of its bindings may be the one that ran, so the spread is typed only when they all have the same
+    # fields (the field types are the checker's union). When they differ it's Unknown: annotate it
+    verdicts = checker(
+        """\
+        import random
+        c = random.random() > 0.5
+        q = (name="a", age=1)
+        if c:
+            q = (name="b", age="x")
+        e1 = (**q)
+        try:
+            t = (name="a", age=1)
+        except Exception:
+            t = (name="b", age=2, adult=False)
+        e2 = (**t)
+        cfg = (lr=1e-3, steps=100)
+        cfg = (lr=3e-4, steps=200)
+        def train():
+            return (**cfg, seed=0)
+        g = (name="gil", age=30)
+        def bump():
+            global g
+            g = (name="gil", age=31)
+        e3 = (**g)
+        w = (a=1)
+        e4 = w
+        while c:
+            e4 = (**w)
+            w = (b=1)
+        reveal_type(e1)
+        reveal_type(e2)
+        reveal_type(train())
+        reveal_type(e3)
+        reveal_type(e4)
+        """,
+        tmp_path,
+    )
+    assert verdicts[26] == 'Type of "e1" is "(name: str, age: str | int)"'  # field types: a union
+    assert verdicts[27] == 'Type of "e2" is "Unknown"'  # the `except` adds a field
+    assert verdicts[28] == 'Type of "train()" is "(lr: float, steps: int, seed: int)"'
+    assert verdicts[29] == 'Type of "e3" is "(name: str, age: int)"'
+    assert verdicts[30] == 'Type of "e4" is "(a: int) | Unknown"'  # the loop's next pass reads `w = (b=1)`
+
+
 def test_replace_updates_a_record_and_a_spread_builds_a_new_one(tmp_path):
     # both copy with a field changed; _replace keeps the record's type, a spread makes whatever it's given
     r = (name="rahul", age=26)

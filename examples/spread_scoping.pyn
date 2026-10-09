@@ -1,0 +1,81 @@
+# How `(**r)` with no annotation gets its type: before vs after the scoping change.
+# Hover each `a*` name. "before" is the old "bound once in the file" rule; "now" is the scoping change.
+
+
+# 1. Rebinding in the same block: the nearest earlier binding wins, as pyright tracks `r.sex`
+r = (name="rahul", age=25)
+a1 = (**r)  # before: Unknown (r bound twice)    now: (name: str, age: int)
+r = (name="rahul", age=25, sex="male")
+a2 = (**r)  # before: Unknown                    now: (name: str, age: int, sex: str)
+a3 = (**r, city="delhi")  # before: Unknown    now: (name: str, age: int, sex: str, city: str)
+
+
+# 2. Another function's local doesn't touch the module's name
+def fn():
+    r = 2  # a different variable: fn's own `r`
+    print(r)
+
+
+u = 1
+u = (name="ann", age=30)
+a4 = (**u)  # before: (name: str, age: int) only if no other `u` in the file    now: always
+
+
+# 3. Lambda parameters and comprehension variables are their own scopes
+people = [(name="ann", age=30), (name="bob", age=40)]
+oldest = max(people, key=lambda p: p.age)
+names = [p.name for p in people]
+p = (name="cy", age=50)
+a5 = (**p)  # before: Unknown (the lambda's and the comprehension's p count)    now: (name: str, age: int)
+
+
+# 4. A function reading a module name: it can run after any module binding, so they must agree on fields
+cfg = (lr=1e-3, steps=100)
+cfg = (lr=3e-4, steps=200)  # same fields, other values
+
+
+def train():
+    return (**cfg, seed=0)  # before: Unknown    now: typed, the bindings agree
+
+
+# ...but when a binding adds a field, it stays Unknown (the function may run after either)
+opt = (lr=1e-3, steps=100)
+opt = (lr=3e-4, steps=200, warmup=10)  # an extra field
+
+
+def tune():
+    return (**opt, seed=0)  # before: Unknown    now: Unknown (annotate tune's return type)
+
+
+# 5. Bound in one branch only: no single binding reaches the spread; fields agree, so still known
+q = (name="dee", age=20)
+if q.age > 18:
+    q = (name="dee", age=21)
+a6 = (**q)  # before: Unknown    now: typed, the bindings agree
+
+# ...but when the branches differ, it stays Unknown (it's one of two shapes; a wrong field set is worse)
+s = (name="eve", age=20)
+if s.age > 18:
+    s = (name="eve", age=21, adult=True)
+a7 = (**s)  # before: Unknown    now: Unknown (annotate a7 to check it against a type)
+
+
+# 6. A rebinding after the spread doesn't matter: it can't have run yet
+t = (name="fay", age=33)
+a8 = (**t)  # before: Unknown    now: (name: str, age: int)
+t = (name="fay", age=34, city="pune")
+
+
+# 7. A `global` elsewhere can rebind it on any call: stays Unknown
+g = (name="gil", age=30)
+
+
+def bump():
+    global g
+    g = (name="gil", age=31, bumped=True)
+
+
+a9 = (**g)  # before: Unknown    now: Unknown
+
+
+print(a1, a2, a3, a4, a5, a6, a7, a8, a9, oldest, names, train(), tune(), sep="\n")

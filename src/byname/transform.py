@@ -331,12 +331,14 @@ class _Bind:
     """One binding of a name in a scope (known_fields). at: the index of the scope's statement it's in (-1 for
     parameters); straight: that statement is simple (no `if`, loop, `try`, ...), so the binding has run once
     the scope reaches the next statement; source: ("value" | "type", node) when it shows the fields (a
-    parameter's annotation is read where the function is defined)."""
+    parameter's annotation is read where the function is defined); anywhere: a function's binding of a
+    `global` name, which can run before any read of it."""
 
     at: int
     straight: bool
     source: tuple[str, ast.expr] | None
     where: tuple["_Scope", int]  # the scope and statement the source is read in
+    anywhere: bool = False
 
 
 @dataclass(eq=False)
@@ -349,6 +351,7 @@ class _Scope:
     now: bool = False
     is_class: bool = False
     binds: dict[str, list[_Bind]] = field(default_factory=dict)
+    globals: set[str] = field(default_factory=set)  # names in its `global` statements
 
 
 COMPOUND = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.TryStar, ast.With, ast.AsyncWith, ast.Match)
@@ -359,16 +362,14 @@ def known_fields(body: str) -> dict[tuple[str, int], Known]:
     """The record fields of names read in the translation, by (name, line), where a binding shows them: a
     record literal, a spread record of such names, an annotation with a record type (inline, a `type`
     alias, or a parameter's), or `x._asdict()` of such a name (a TypedDict: its keys can't be removed, so
-    its fields stay). Names are scoped as in Python (function, lambda, comprehension, class). A read sees
-    the binding that reaches it: the scope's only binding of the name, or, when every binding up to the read
-    is a simple statement at the scope's top level, the nearest one before the read's statement. Anything less
-    clear (bound in a branch or loop, a module name rebound and read from a function, `global`) is
-    unknown: a wrong field set would be worse than the generic spread path. Checker translation only
-    (see known_build)."""
+    its fields stay). Names are scoped as in Python (function, lambda, comprehension, class). A read is
+    known when every binding that may reach it shows the same fields (reaching): any of them may be the
+    one that ran, and a wrong field set would be worse than the generic spread path. Checker translation
+    only (see known_build)."""
     tree = parse_around_errors(body)
     if tree is None:
         return {}
-    shared: set[str] = set()  # names in a `global` / `nonlocal`: rebound across scopes, never known
+    shared: set[str] = set()  # names in a `nonlocal`: rebound across scopes, never known
     sources: dict[int, tuple[str, ast.expr]] = {}  # id(Name target) -> its binding's source
     reads: list[tuple[str, int, _Scope, int]] = []  # name, line, scope, statement index
 
@@ -376,6 +377,11 @@ def known_fields(body: str) -> dict[tuple[str, int], Known]:
         scope: _Scope, name: str, at: int, straight: bool, source: tuple[str, ast.expr] | None = None,
         where: tuple[_Scope, int] | None = None,
     ) -> None:
+        if name in scope.globals:  # the module's name, rebound whenever the function runs
+            while scope.parent is not None:
+                scope = scope.parent
+            scope.binds.setdefault(name, []).append(_Bind(at, False, source, where or (scope, at), anywhere=True))
+            return
         scope.binds.setdefault(name, []).append(_Bind(at, straight, source, where or (scope, at)))
 
     def body_of(stmts: list[ast.stmt], scope: _Scope) -> None:
@@ -434,13 +440,15 @@ def known_fields(body: str) -> dict[tuple[str, int], Known]:
             else:
                 bind(scope, node.id, at, straight, sources.get(id(node)))
         elif isinstance(node, ast.NamedExpr):
-            bind(scope, node.target.id, at, False)  # rebinds mid-statement: never the nearest binding
+            bind(scope, node.target.id, at, False)  # rebinds mid-statement: never the nearest one alone
             visit(node.value, scope, at, straight)
             return
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for a in node.names:
                 bind(scope, (a.asname or a.name).split(".")[0], at, straight)
-        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+        elif isinstance(node, ast.Global):
+            scope.globals.update(node.names)
+        elif isinstance(node, ast.Nonlocal):
             shared.update(node.names)
         elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
             bind(scope, node.name, at, straight)
@@ -459,31 +467,34 @@ def known_fields(body: str) -> dict[tuple[str, int], Known]:
     module = _Scope(None)
     body_of(tree.body, module)
 
-    def reaching(name: str, scope: _Scope, at: int) -> _Bind | None:
-        """The binding a read of `name` in `scope` at statement `at` sees, if it's clear."""
+    def reaching(name: str, scope: _Scope, at: int) -> list[_Bind]:
+        """The bindings that may reach a read of `name` in `scope` at statement `at`. Read from a function
+        (or a user's lambda), which can run after any of them: every binding of the name. Read where it
+        stands: the nearest straight binding in an earlier statement, and every binding after it in a
+        branch, loop, `try`, ... up to and in the read's own statement (a loop runs its later lines
+        before the next pass), plus a function's `global` ones. A later statement's can't have run yet."""
         if name in shared:
-            return None
+            return []
         s, now = scope, True  # now: no function between the read and the scope binding it
         while s is not None and (name not in s.binds or (s is not scope and s.is_class)):  # classes don't enclose
             now, at, s = now and s.now, s.at, s.parent
         if s is None:
-            return None
+            return []
         bs = s.binds[name]
-        if len(bs) == 1:
-            return bs[0]
-        # a later statement's binding can't have run yet (a loop is one statement: its bindings aren't straight)
-        if not now or not all(b.straight for b in bs if b.at <= at):
-            return None
-        before = [b for b in bs if b.at < at]
-        if not before or (len(before) > 1 and before[-2].at == before[-1].at):
-            return None
-        return before[-1]
+        if len(bs) == 1 or not now:
+            return bs
+        up = [b for b in bs if not b.anywhere and (b.at < at or (b.at == at and not b.straight))]
+        last = max((b.at for b in up if b.straight), default=-2)
+        return [b for b in up if b.at >= last] + [b for b in bs if b.anywhere]
 
     memo: dict[int, Known | None] = {}
 
     def resolve(name: str, scope: _Scope, at: int) -> Known | None:
-        b = reaching(name, scope, at)
-        if b is None or b.source is None:
+        got = [of_bind(b) for b in reaching(name, scope, at)]
+        return got[0] if got and all(k is not None and k == got[0] for k in got) else None
+
+    def of_bind(b: _Bind) -> Known | None:
+        if b.source is None:
             return None
         if id(b) in memo:
             return memo[id(b)]
