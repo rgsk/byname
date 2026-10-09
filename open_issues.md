@@ -83,6 +83,8 @@ literal), but only for TypedDicts: records are Protocols for the checker, so aft
 overload per field name narrows records in both branches (measured), but the translation can't tell whether
 the right side of `in` is a record, so it would rewrite every `in` (or every `"literal" in x`), and those lose
 basedpyright's own checks on `in` and TypedDict narrowing. Dropped for now; `user["name"]` (unchecked, `Any`) reads it meanwhile.
+A `Literal` tag field does narrow, checked: `if s.kind == "square":` or `match s.kind:` (DEVELOPMENT.md, "Narrowing a
+record by a field").
 
 ## A labelled tuple widens literal values
 

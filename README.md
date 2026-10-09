@@ -46,7 +46,7 @@ record is built and nothing that reads it changes meaning.
   type, open types and unions of records included. It's the way around the checker when you know better
   (`if "title" in p: p["title"]`); a field that isn't there is a `KeyError` at runtime.
 - **Copies are checked:** records are immutable, so change one with `rec = rec._replace(age=27)`. The editor
-  completes and checks `_replace`'s field names and types, and checks `f(**rec._asdict())` against `f`'s
+  completes and checks `_replace`'s field names and types, and checks `f(**rec)` against `f`'s
   parameters, so a field `f` doesn't take is flagged.
 - **Equality** is by name and value: the same fields with the same values, in any written order, are equal
   and hash alike, so `(x=1, y=2) == (y=2, x=1)`. A record never equals a plain tuple.
@@ -83,10 +83,13 @@ The written order is only for display: hover, printing, `_asdict()` and `**rec` 
 wrote them. To a checker, records with the same fields are the same type whatever the order, so
 `rs.append((age=1, name="a"))` on a list of `(name=, age=)` records is fine.
 
-You rarely need a record type, since return types are inferred. Two cases where you do:
+You rarely need a record type, since return types are inferred. Three cases where you do:
 - **Recursive functions:** checkers can't infer through the recursive call, so its fields come out `Unknown`.
+- **Spreading back into the same name:** `u = (**user)` with `user = u._asdict()` makes `u` a name bound
+  twice, so the spread is `Unknown`. Annotate the first binding, `u: (name: str, age: int) = (...)`, or use
+  a new name, `u2 = (**user)`.
 - **Functions that take part of a config:** `def get_batch(cfg: (..., batch_size: int, block_size: int))`
-  accepts any config with those fields, while `f(**cfg._asdict())` requires an exact match.
+  accepts any config with those fields, while `f(**cfg)` requires an exact match.
 
 Annotating a recursive function's return type:
 

@@ -11,7 +11,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
-from typing import overload
+from typing import Literal, overload
 
 import pytest
 
@@ -402,6 +402,14 @@ def test_comprehensions_destructure_the_same_way():
     assert {name: age for (name=, age=) in people} == {"rahul": 26, "tasha": 23}
 
 
+def test_a_pattern_is_written_like_the_record_it_takes_apart():
+    local_name = "rahul"
+    r = (user=(name=local_name))  # build
+    del local_name
+    (user=(name=local_name)) = r  # take apart, the same text on the other side
+    assert local_name == "rahul"
+
+
 def test_a_nested_pattern_reads_through_the_outer_field():
     (user=(name=, age=years), ok=) = (user=(name="rahul", age=26), ok=True)
     assert (name, years, ok) == ("rahul", 26, True)
@@ -444,6 +452,27 @@ def test_a_record_type_is_written_the_way_hover_shows_it():
     gil: Person = (age=30, name="gil")
     assert (gil.name, gil.age) == ("gil", 30)
     assert transform("type Person = (name: str, age: int)").body == "type Person = _typ_name__age[str, int]"
+
+
+def test_an_inline_record_type_can_be_called_but_a_type_alias_cannot(tmp_path):
+    # `type` makes a TypeAliasType, which Python doesn't call, so an alias types a record with an annotation.
+    # An inline type is a type and a constructor in one, so it can be called with the fields
+    a: Person = (name="gil", age=30)
+    b = (name: str, age: int)(name="gil", age=30)
+    assert a == b
+    with pytest.raises(TypeError, match="not callable"):
+        Person(name="gil", age=30)  # pyright: ignore[reportCallIssue]
+    verdicts = checker(
+        """\
+        type Person = (name: str, age: int)
+        a: Person = (name="gil", age=30)
+        b = (name: str, age: int)(name="gil", age=30)
+        c = Person(name="gil", age=30)
+        """,
+        tmp_path,
+    )
+    assert sorted(verdicts) == [4]
+    assert verdicts[4].startswith('Object of type "TypeAliasType" is not callable')
 
 
 def test_a_record_type_takes_any_field_order_but_exactly_its_fields(tmp_path):
@@ -677,6 +706,36 @@ def test_a_record_s_asdict_is_a_typed_mutable_copy_that_spreads_back(tmp_path):
     assert (**d, city="Pune") == (name="rahul", age=27, city="Pune")
 
 
+def test_spreading_back_into_the_same_name_needs_its_type_written(tmp_path):
+    # a spread is typed from its names only when each is bound once. Spreading back into the name it came from
+    # binds that name a second time, so the spread is Unknown, the same whether it spreads the record itself or
+    # its `_asdict()` dict. A new name or an annotation keeps the type
+    verdicts = checker(
+        """\
+        r = (name="rahul", age=26)
+        r = (**r)
+        reveal_type(r)
+        u = (name="rahul", age=26)
+        u_mutable = u._asdict()
+        u = (**u_mutable)
+        reveal_type(u)
+        v = (name="rahul", age=26)
+        v_mutable = v._asdict()
+        v2 = (**v_mutable)
+        reveal_type(v2)
+        w: (name: str, age: int) = (name="rahul", age=26)
+        w_mutable = w._asdict()
+        w = (**w_mutable)
+        reveal_type(w)
+        """,
+        tmp_path,
+    )
+    assert verdicts[3] == 'Type of "r" is "Unknown"'  # the record itself
+    assert verdicts[7] == 'Type of "u" is "Unknown"'  # its dict
+    assert verdicts[11] == 'Type of "v2" is "(name: str, age: int)"'  # a new name
+    assert verdicts[15] == 'Type of "w" is "(name: str, age: int)"'  # an annotation
+
+
 def test_replace_updates_a_record_and_a_spread_builds_a_new_one(tmp_path):
     # both copy with a field changed; _replace keeps the record's type, a spread makes whatever it's given
     r = (name="rahul", age=26)
@@ -821,6 +880,82 @@ def test_a_spread_record_picks_the_overload_that_takes_a_record(tmp_path):
         tmp_path,
     )
     assert verdicts[9].endswith('is "str"')  # the Contact overload; the quoted call is generated code, see open_issues.md
+
+
+# Records can't be told apart at runtime, so `isinstance` can't narrow a union of them, and neither can `in`
+# (open_issues.md). A field typed with a different Literal in each record can, like `kind` below
+type Square = (kind: Literal["square"], side: float)
+type Circle = (kind: Literal["circle"], radius: float)
+
+
+@overload
+def describe(shape: Square) -> int: ...
+@overload
+def describe(shape: Circle) -> str: ...
+def describe(shape: Square | Circle) -> int | str:
+    if shape.kind == "square":  # shape is Square here, and Circle after
+        return round(shape.side**2)
+    return f"circle of radius {shape.radius}"
+
+
+def test_overloads_on_two_record_types_pick_by_shape(tmp_path):
+    sq: Square = (kind="square", side=3.0)
+    ci: Circle = (kind="circle", radius=2.0)
+    assert describe(sq) == 9
+    assert describe(ci) == "circle of radius 2.0"
+    verdicts = checker(
+        """\
+        from typing import Literal, overload
+        type Square = (kind: Literal["square"], side: float)
+        type Circle = (kind: Literal["circle"], radius: float)
+        @overload
+        def describe(shape: Square) -> int: ...
+        @overload
+        def describe(shape: Circle) -> str: ...
+        def describe(shape: Square | Circle) -> int | str: ...
+        sq: Square = (kind="square", side=3.0)
+        reveal_type(describe(sq))
+        reveal_type(describe((kind="circle", radius=2.0)))
+        loose = (kind="circle", radius=2.0)
+        describe(loose)
+        """,
+        tmp_path,
+    )
+    assert sorted(verdicts) == [10, 11, 13]
+    assert verdicts[10].endswith('is "int"')
+    assert verdicts[11].endswith('is "str"')  # a literal passed straight in is read as the parameter's type
+    # a literal stored first is widened to kind: str, so it fits neither; annotate it, `loose: Circle = ...`
+    assert "No overloads" in verdicts[13]
+
+
+def test_a_literal_tag_narrows_a_union_of_records(tmp_path):
+    shapes: list[Square | Circle] = [(kind="square", side=3.0), (kind="circle", radius=2.0)]
+    assert [describe(shape) for shape in shapes] == [9, "circle of radius 2.0"]
+    verdicts = checker(
+        """\
+        from typing import Literal
+        type Square = (kind: Literal["square"], side: float)
+        type Circle = (kind: Literal["circle"], radius: float)
+        shapes: list[Square | Circle] = [(kind="square", side=3.0), (kind="circle", radius=2.0)]
+        for shape in shapes:
+            if shape.kind == "square":
+                reveal_type(shape)
+            else:
+                reveal_type(shape)
+            match shape.kind:
+                case "square":
+                    print(shape.side)
+                case "circle":
+                    print(shape.radius)
+            if "side" in shape:
+                print(shape.side)
+        """,
+        tmp_path,
+    )
+    assert sorted(verdicts) == [7, 9, 16]  # nothing from the match, because each case narrows too
+    assert verdicts[7].endswith("is \"(kind: Literal['square'], side: float)\"")
+    assert verdicts[9].endswith("is \"(kind: Literal['circle'], radius: float)\"")
+    assert 'Cannot access attribute "side"' in verdicts[16]  # `in` doesn't narrow, see open_issues.md
 
 
 def pair(name: str, age: int) -> str:
