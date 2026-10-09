@@ -159,8 +159,8 @@ def f(
     (
         a=, b=,
     ): T,
-    *,
-    user=(
+    c,
+    (
         name=,
     ): U,
 ):
@@ -759,43 +759,43 @@ def test_parameter_pattern_runs_on_old_pythons():
     assert p.stdout == "r! ('t', 3)\n"
 
 
-NAMED = """type User = (name: str, age: int)
-
-
-def fn(*, user=(name=, age=): User):
-    return (name, age, user.age)
-
-
-def h(user=(name=): User = (name="rahul", age=1)): return name
-
-
-def k(user=(name=n) = (name="untyped")): return n
-
-
-def rec(user=(name="x", age=30)): return user.age
-"""
-
-
-def test_named_parameter_patterns():
-    # `user=(...)`: a parameter called `user`, destructured; it can be passed by keyword
+def test_a_keyword_parameter_with_a_record_is_a_default():
+    # `user=(name=name)` is a default record, as in Python: evaluated once, when the def runs, so it holds
+    # the outer `name` at that moment. Destructuring a parameter takes the unnamed form, `(name=): User`
+    src = (
+        'name = n = "outer"\n'
+        "def fn(user=(name=name)): return user\n"
+        "def k(user=(name=n)): return user\n"  # not a rename pattern: a record whose name is n
+        'name = n = "changed"\n'
+        "out = fn(), fn(user=(name='passed')), k()\n"
+    )
     ns = {}
-    exec(compile_pyn(NAMED + "out = fn(user=(name='r', age=5)), h(), h(user=(name='z', age=2)), k(), rec()\n"), ns)
-    assert ns["out"] == (("r", 5, 5), "rahul", "z", "untyped", 30)
-    body = transform(NAMED).body
-    assert "def fn(*, user: User):\n    _ds = user; name = _ds.name; age = _ds.age\n" in body
-    assert 'def h(user: User = _rec_name__age(name="rahul", age=1)): _ds = user; name = _ds.name; return name' in body
-    assert 'def k(user = _rec_name(name="untyped")): _ds = user; n = _ds.name; return n' in body
-    # values that can't be pattern targets: a default record, as in Python
-    assert 'def rec(user=_rec_name__age(name="x", age=30)): return user.age' in body
+    exec(compile_pyn(src), ns)
+    assert [r.name for r in ns["out"]] == ["outer", "passed", "outer"]
+    assert "def fn(user=_rec_name(name=name)): return user" in transform(src).body
 
 
-def test_no_shorthand_in_def_signatures():
-    # in a signature `name=` would mean the outer `name`: a group of pattern items is a pattern, and a
-    # record default mixing `name=` with values is an error
-    with pytest.raises(SyntaxError, match=r"name= in a def signature: give the value"):
-        transform("def f(user=(name=, age=30)): pass\n")
-    with pytest.raises(SyntaxError, match=r"city= in a def signature"):
-        transform("def f(user=(id=1, addr=(city=))): pass\n")
+def test_no_shorthand_in_parameter_defaults():
+    # a default is evaluated where the function is defined, so `name=` there would take the outer `name`
+    # though it reads as the parameter; `name=name` says it. Any depth, def or lambda
+    for src, field in [
+        ("def f(user=(name=)): pass\n", "name"),
+        ("def f((name=) = (name=)): pass\n", "name"),
+        ("def f((name=): object = (name=, age=1)): pass\n", "name"),
+        ("def f(user=(id=1, addr=(city=))): pass\n", "city"),
+        ("def f(*, x: dict = dict(name=)): pass\n", "name"),
+        ("f = lambda x=(name=): x\n", "name"),
+        ("f = lambda a, x=g(b=1, name=): x\n", "name"),
+        ("f = lambda g=lambda y=(age=): y: g\n", "age"),
+        # inside a lambda that is a default too: it runs later, but its `name` is still the outer one,
+        # not f's parameter
+        ("def f(name, g=lambda: h(name=)): pass\n", "name"),
+    ]:
+        with pytest.raises(SyntaxError, match=rf"{field}= in a parameter's default would take the outer '{field}': write {field}={field}"):
+            transform(src)
+    # shorthand in a body is the usual kind: it reads the name where the call runs
+    for src in ["f = lambda name: g(name=)\n", "h(key=lambda r: g(r=))\n", "def f(x=1, y=lambda: 2): return g(x=)\n", "f = lambda x=1: (x=)\n"]:
+        transform(src)
 
 
 # --- record(T, d) -------------------------------------------------------------

@@ -5,7 +5,7 @@ Found while writing `tests/test_exhaustive.pyn`; to look at later.
 ## Ruff B008 on a record default
 
 ```python
-def welcome_or_guest(user=(name=): Person = (name="guest", age=0)) -> str: ...
+def welcome_or_guest((name=): Person = (name="guest", age=0)) -> str: ...
 ```
 
 `byname tool ruff check` reports `B008 Do not perform function call `(name, age)` in argument defaults`.

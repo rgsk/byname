@@ -240,20 +240,6 @@ def test_parameter_patterns_are_typed(project):
     assert "_byname" not in out and out.count(" - error") == 3
 
 
-def test_named_parameter_patterns_are_typed(project):
-    # `user=(...): User` is a real parameter: keyword calls are checked against User
-    (project / "named.pyn").write_text(
-        "type User = (name: str, age: int)\n"
-        "def fn(*, user=(name=, age=): User):\n"
-        "    return name + age\n"                 # str + int
-        "fn(user=(name='r', age=5))\n"
-        "fn(user=(name='r',))\n"                  # missing age
-    )
-    out, rc = tool(project, "basedpyright", "named.pyn")
-    assert 'named.pyn:3:12 - error: Operator "+" not supported for types "str" and "int"' in out
-    assert "named.pyn:4" not in out and "named.pyn:5:9 - error" in out and "missing field: age" in out
-
-
 def test_ruff_clean_file_passes_despite_generated_header(project):
     # people.pyn is clean; complaints about the record header are hidden and don't fail the run
     out, rc = tool(project, "ruff", "check", "--output-format=concise", "people.pyn")

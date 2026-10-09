@@ -58,10 +58,12 @@ def test_parameter_patterns_format(tmp_path):
     assert format_pyn(want, cwd=tmp_path) == want
 
 
-def test_named_parameter_patterns_format(tmp_path):
-    # `user=(a=): T` stands in as `user: (__D, __P[a:__p], T)`
-    src = "def f(*,user=( name= ,age=):Args):\n    pass\ndef g(k=(name=)=(name='u')): pass\n"
-    want = "def f(*, user=(name=, age=): Args):\n    pass\n\n\ndef g(k=(name=) = (name=\"u\")):\n    pass\n"
+def test_parameter_patterns_with_defaults_format(tmp_path):
+    src = "def f(*,user=( name='x' ,age=1)):\n    pass\ndef g((name=)=(name='u')): pass\ndef h((name=):Args=(name='u')): pass\n"
+    want = (
+        "def f(*, user=(name=\"x\", age=1)):\n    pass\n\n\ndef g((name=) = (name=\"u\")):\n    pass\n\n\n"
+        "def h((name=): Args = (name=\"u\")):\n    pass\n"
+    )
     assert format_pyn(src, cwd=tmp_path) == want
     assert format_pyn(want, cwd=tmp_path) == want
 

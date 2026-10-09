@@ -703,45 +703,46 @@ def transform(
     params = 0  # parameter patterns so far: each becomes PARAM_NAME + its index
     inserted: list[int] = []
 
-    def is_pattern_group(g: int) -> bool:
-        """Every item of group `g` can be a pattern item: `f=`, `f=target`, `f=(...)` that is one too."""
-        for it in items(g):
-            if is_short(it) or (len(it) == 1 and is_name(toks[it[0]]) and tolerant):
+    def no_default_shorthand(its: list[list[int]], level: int | None) -> None:
+        """No shorthand in a parameter's default (`def` or `lambda`), however deep: a default is evaluated
+        where the function is defined, so `name=` there would quietly take the outer `name`, though in a
+        signature it reads as the parameter. `name=name` says so."""
+        for it in its:
+            eq = next((k for k in it if toks[k].string == "=" and parent.get(k) == level), None)
+            if eq is None:
                 continue
-            if not is_kw(it):
-                return False
-            v = it[2]
-            if toks[v].string == "(" and pair.get(v) == it[-1] and pattern_items(v) is not None:
-                if not is_pattern_group(v):
-                    return False
-            elif not is_target(src[off(toks[v].start) : off(toks[it[-1]].end)]):
-                return False
-        return True
+            for k in range(eq + 1, it[-1]):
+                if is_name(toks[k]) and toks[k + 1].string == "=" and toks[k + 2].string in (",", ")") and k + 1 in parent:
+                    f = toks[k].string
+                    raise err(f"{f}= in a parameter's default would take the outer {f!r}: write {f}={f} to mean that", toks[k])
 
-    def no_shorthand(g: int) -> None:
-        """A record in a `def` signature takes no shorthand: there `name=` would mean the outer `name`."""
-        for it in items(g):
-            if is_short(it):
-                f = toks[it[0]]
-                raise err(f"{f.string}= in a def signature: give the value ({f.string}=...), or make every item a pattern item to destructure", f)
-            if is_kw(it) and toks[it[2]].string == "(" and pair.get(it[2]) == it[-1]:
-                no_shorthand(it[2])
+    def lambda_defaults() -> None:
+        """no_default_shorthand for every `lambda`: its parameters run to the `:` at its own level."""
+        for l, t in enumerate(toks):
+            if t.string != "lambda" or t.type != tokenize.NAME:
+                continue
+            k, inner = l + 1, 0
+            while toks[k].type != tokenize.ENDMARKER:
+                if parent.get(k) == parent.get(l):
+                    if toks[k].string == "lambda":  # `lambda f=lambda x: x: ...`: that `:` is the inner one's
+                        inner += 1
+                    elif toks[k].string == ":":
+                        if not inner:
+                            break
+                        inner -= 1
+                k = pair.get(k, k) + 1
+            no_default_shorthand(split(l + 1, k), parent.get(l))
 
     def parameter_patterns(o: int) -> None:
         """`def f((name=, age=): User, n=0):` -> `def f(_byname_p0: User, n=0):` with `_ds = _byname_p0;
         name = _ds.name; age = _ds.age` on a line of its own before the body (after a docstring), or before
-        a one-line body. Python 3 has no destructuring parameters (PEP 3113). to_code puts line numbers back.
-        Named: `user=(name=, age=): User` -> `user: User`, the same unpacking from `user`. In a signature a
-        group of pattern items is always a pattern: `name=` never means the outer `name` there."""
+        a one-line body. Python 3 has no destructuring parameters (PEP 3113). to_code puts line numbers back."""
         nonlocal params
+        no_default_shorthand(items(o), o)
         found = []
         for it in items(o):
-            named = len(it) >= 3 and is_name(toks[it[0]]) and toks[it[1]].string == "="  # user=(name=): User
-            g = it[2] if named else it[0]
+            g = it[0]
             if toks[g].string != "(" or g not in pair or pattern_items(g) is None:
-                continue
-            if named and not is_pattern_group(g):  # `user=(name="r")`: a default record, as in Python
-                no_shorthand(g)
                 continue
             rest = it[it.index(pair[g]) + 1 :]
             if rest and toks[rest[0]].string not in (":", "="):
@@ -751,25 +752,18 @@ def transform(
             group = span(g, pair[g])
             # a pattern over several lines keeps its line breaks (valid inside the def's parentheses),
             # so every line after it keeps its number: tracebacks, source_ast
-            if named:  # `user=(...)` -> `user`
-                name = toks[it[0]].string
-                gone = off(toks[it[1]].start)
-                edits.append(Edit(gone, group[1], "\n" * src.count("\n", gone, group[1]), group))
-                # formatter: `user: (__D, __P[...], T)`, or `user: (__D, __P[...])` with no annotation
-                standins.append((*span(it[1]), f": ({PARAM}, "))
-            else:
-                name = f"{PARAM_NAME}{params}"
-                params += 1
-                edits.append(Edit(*group, name + "\n" * src.count("\n", *group), group))
-                # formatter: `__D: (__P[...], T)`, or `__D: (__P[...],)` with no annotation
-                standins.append((group[0], group[0], f"{PARAM}: ("))
+            name = f"{PARAM_NAME}{params}"
+            params += 1
+            edits.append(Edit(*group, name + "\n" * src.count("\n", *group), group))
+            # formatter: `__D: (__P[...], T)`, or `__D: (__P[...],)` with no annotation
+            standins.append((group[0], group[0], f"{PARAM}: ("))
             if rest and toks[rest[0]].string == ":":
                 ann_end = next((k for k in rest if toks[k].string == "=" and parent.get(k) == o), None)
                 last = rest[rest.index(ann_end) - 1] if ann_end is not None else rest[-1]
                 standins.append((*span(rest[0]), ","))
                 standins.append((off(toks[last].end), off(toks[last].end), ")"))
             else:  # a 1-tuple needs its comma; ruff would keep a 2-tuple with one split over lines
-                standins.append((group[1], group[1], ")" if named else ",)"))
+                standins.append((group[1], group[1], ",)"))
             found.append((name, tree, group))
         if not found:
             return
@@ -898,6 +892,7 @@ def transform(
             j -= 2
         return is_name(toks[j]) and (j == 0 or toks[j - 1].type in STMT_START or toks[j - 1].string == ";")
 
+    lambda_defaults()
     for i, t in enumerate(toks):
         if t.type == tokenize.OP and t.string == "{" and i in pair:  # dict display: `{**u, **r}`
             wrap_kw(items(i))
@@ -1219,8 +1214,7 @@ def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:
         if close + 1 >= len(toks):
             continue
         o = parent.get(i)
-        lead = i - 2 if prev is not None and prev.string == "=" and i >= 3 else i  # def f(user=(...): T)
-        if o is not None and o >= 2 and toks[o - 2].string == "def" and toks[lead - 1].string in ("(", ","):
+        if o is not None and o >= 2 and toks[o - 2].string == "def" and prev is not None and prev.string in ("(", ","):
             if toks[close + 1].string not in (":", ",", ")", "="):  # def f((...): T)
                 continue
         elif prev is not None and prev.string == "for":  # for (...) in xs

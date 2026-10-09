@@ -620,24 +620,22 @@ def test_patterns_nest_rename_and_take_an_inline_type():
     assert label_typed((id=7, user=(name="kim"))) == "7:Kim"  # who is a str
 
 
-def welcome(*, user=(name=, age=): Person, note: str = "") -> str:
+def welcome(*, user: Person, note: str = "") -> str:  # to pass it by keyword: name the parameter, destructure inside
+    (name=, age=) = user
     return f"{name} ({age}) {note}".strip()
 
 
-def welcome_untyped(*, user=(name=, age=), note: str = "") -> str:  # hover: name and age are Unknown
-    return f"{name} ({age}) {note}".strip()
+def test_to_pass_a_record_by_keyword_name_the_parameter():
+    assert welcome(user=(name="ann", age=30)) == "ann (30)"
+    with pytest.raises(SyntaxError, match=r"name= in a parameter's default would take the outer 'name': write name=name"):
+        transform("def welcome(user=(name=)): ...")  # not a pattern: a default, and shorthand there is an error
 
 
-def test_a_named_pattern_is_a_real_parameter_passed_by_keyword():
-    assert welcome(user=(name="ann", age=30)) == welcome_untyped(user=(name="ann", age=30)) == "ann (30)"
-    assert transform("def welcome(*, user=(name=): Person): ...").body.startswith("def welcome(*, user: Person):")
-
-
-def welcome_or_guest(user=(name=): Person = (name="guest", age=0)) -> str:  # noqa: B008 -- see open_issues.md
+def welcome_or_guest((name=): Person = (name="guest", age=0)) -> str:  # noqa: B008 -- see open_issues.md
     return name
 
 
-def welcome_or_guest_untyped(user=(name=) = (name="guest", age=0)) -> str:  # noqa: B008 -- hover: name is str | Unknown, the default's type counts
+def welcome_or_guest_untyped((name=) = (name="guest", age=0)) -> str:  # noqa: B008 -- hover: name is str | Unknown, the default's type counts
     return name
 
 
