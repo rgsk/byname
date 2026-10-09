@@ -148,7 +148,7 @@ def test_spread_mistakes_are_named(project):
         "r = (sex='male',)\n"
         "fn(**u, **r)\n"
         "p: Person = (**u, **r)\n"
-        "q = (name: str, age: int, sex: str, surname: str)(**u, **r, surname='g', x=1)\n"
+        "q: Person = (**u, **r, surname='g', x=1)\n"
         "def mk() -> Person:\n"
         "    return (**u, **r)\n"
         "def take(p: Person, n: int = 0): ...\n"

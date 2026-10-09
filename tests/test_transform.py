@@ -456,7 +456,6 @@ merged = {**u, **r}
 both = (**u, **r)
 override, first = (**u, age=27), (age=27, **u)
 p: Person = (**u, **r)
-q = (name: str, age: int, sex: str, surname: str)(**u, **r)
 
 
 def mk() -> Person:
@@ -472,7 +471,7 @@ def test_records_spread_with_double_star():
     assert ns["merged"] == {"age": 26, "name": "mehak", "sex": "male", "surname": "gupta"}
     assert repr(ns["both"]) == "(age=26, name='mehak', sex='male', surname='gupta')"
     assert (ns["override"].age, ns["first"].age) == (27, 26)  # a later field wins, wherever it is
-    assert ns["p"] == ns["q"] == ns["mk"]() == ns["both"]
+    assert ns["p"] == ns["mk"]() == ns["both"]
     assert ns["p"].surname == "gupta" and ns["u"]["name"] == "rahul" and list(ns["u"].keys()) == ["age", "name"]
 
 
@@ -485,8 +484,8 @@ def test_spreads_leave_valid_python_alone_at_runtime():
 
 def test_spread_records_are_checked_against_the_expected_type():
     # when a spread's fields can't be read off the file (here `u` comes from a call), the checker's build
-    # takes the type expected where it stands (argument, annotation, return), see CTX_PRELUDE; an inline
-    # type `(name: str)(**u)` is a cast. What runs is just _byname_rec
+    # takes the type expected where it stands (argument, annotation, return), see CTX_PRELUDE. What runs is
+    # just _byname_rec
     r = transform(SPREADS.replace('u = (age=26, name="rahul")', "u = load()"), checker=True)
     # a spread name is read through a lambda default, so it keeps its narrowing (pyright drops it inside a
     # lambda for a name reassigned later); the user's `u` stays in place, picked over by the narrowed copy
@@ -495,7 +494,6 @@ def test_spread_records_are_checked_against_the_expected_type():
         "_byname_check(lambda: _byname_t)({**_byname_pick(u, _byname_s0), **_byname_pick(r, _byname_s1)}))"
     )
     assert f"p: Person = {ctx}" in r.body and f"    return {ctx}" in r.body
-    assert "q = _cast(_typ_name__age__sex__surname[str, int, str, str], _byname_rec(_byname_check(" in r.body
     assert "def _byname_ctx[T](" in r.prelude
     r = transform(SPREADS)
     assert "p: Person = _byname_rec({**u, **r})" in r.body and "both = _byname_rec({**u, **r})" in r.body

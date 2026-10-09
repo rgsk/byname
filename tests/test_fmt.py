@@ -35,8 +35,8 @@ def test_nested_pattern_stand_in(tmp_path):
 
 
 def test_spreads_format(tmp_path):
-    src = "both = (**u,**r)\nx=(**u, age =27, name=)\nq = (name: str)( **u )\nfn(**u, **r)\n"
-    want = "both = (**u, **r)\nx = (**u, age=27, name=)\nq = (name: str)(**u)\nfn(**u, **r)\n"
+    src = "both = (**u,**r)\nx=(**u, age =27, name=)\nfn(**u, **r)\n"
+    want = "both = (**u, **r)\nx = (**u, age=27, name=)\nfn(**u, **r)\n"
     assert format_pyn(src, cwd=tmp_path) == want
     assert format_pyn(want, cwd=tmp_path) == want
 

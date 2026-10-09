@@ -454,11 +454,11 @@ def test_a_record_type_is_written_the_way_hover_shows_it():
     assert transform("type Person = (name: str, age: int)").body == "type Person = _typ_name__age[str, int]"
 
 
-def test_an_inline_record_type_can_be_called_but_a_type_alias_cannot(tmp_path):
-    # `type` makes a TypeAliasType, which Python doesn't call, so an alias types a record with an annotation.
-    # An inline type is a type and a constructor in one, so it can be called with the fields
+def test_a_record_type_types_a_record_but_does_not_build_one(tmp_path):
+    # `type` makes a TypeAliasType, which Python doesn't call, so a type goes on the name: an annotation.
+    # An inline type can't be called either (see section 9), so a type is used the same way, named or not
     a: Person = (name="gil", age=30)
-    b = (name: str, age: int)(name="gil", age=30)
+    b: (name: str, age: int) = (name="gil", age=30)
     assert a == b
     with pytest.raises(TypeError, match="not callable"):
         Person(name="gil", age=30)  # pyright: ignore[reportCallIssue]
@@ -466,13 +466,12 @@ def test_an_inline_record_type_can_be_called_but_a_type_alias_cannot(tmp_path):
         """\
         type Person = (name: str, age: int)
         a: Person = (name="gil", age=30)
-        b = (name: str, age: int)(name="gil", age=30)
         c = Person(name="gil", age=30)
         """,
         tmp_path,
     )
-    assert sorted(verdicts) == [4]
-    assert verdicts[4].startswith('Object of type "TypeAliasType" is not callable')
+    assert sorted(verdicts) == [3]
+    assert verdicts[3].startswith('Object of type "TypeAliasType" is not callable')
 
 
 def test_a_record_type_takes_any_field_order_but_exactly_its_fields(tmp_path):
@@ -788,12 +787,6 @@ def test_a_spread_is_checked_against_the_type_expected_where_it_stands(tmp_path)
     assert "extra field: zip" in verdicts[7]  # against the parameter
 
 
-def test_an_inline_record_type_names_the_type_of_a_spread():
-    person, place = (name="ann", age=30), (surname="lee", city="oslo")
-    c = (name: str, age: int, surname: str, city: str)(**person, **place)
-    assert c.city == "oslo"
-
-
 # ============================================================================
 # 9. WHAT BYNAME REJECTS, AND WHY
 # ============================================================================
@@ -822,6 +815,44 @@ def test_a_pattern_reads_by_name_never_by_position():
 def test_a_spread_record_takes_only_spreads_and_named_fields():
     with pytest.raises(SyntaxError, match="takes `\\*\\*record` and `name=value` items"):
         transform("r = (**u, 1)\n")
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        'u = (name: str, age: int)(name="r", age=1)\n',
+        "c = (name: str, age: int)(**u)\n",
+        "c = (..., name: str)(**u)\n",
+    ],
+)
+def test_a_record_type_cannot_be_called(src):
+    # a type alias can't be called, so an inline type isn't either: build the record and annotate the name,
+    # `u: (name: str, age: int) = (name="r", age=1)`, or from a dict, record(T, d)
+    with pytest.raises(SyntaxError, match="can't call a record type: write the record, \\(name=...\\), annotated"):
+        transform(src)
+
+
+def test_instead_of_calling_a_record_type_annotate_the_name_or_use_record(tmp_path):
+    u: (name: str, age: int) = (name="r", age=1)
+    c: (name: str, age: int) = (**u)
+    d = record((name: str, age: int), {"name": "r", "age": 1})  # an inline type stands as a value here
+    assert u == c == d == (name="r", age=1)
+    with pytest.raises(TypeError, match="age"):
+        record((name: str, age: int), {"name": "r", "age": "one"})
+    verdicts = checker(
+        """\
+        from byname import record
+        u: (name: str, age: int) = (name="r", age=1)
+        c: (name: str, age: int) = (**u)
+        d = record((name: str, age: int), {"name": "r", "age": 1})
+        reveal_type(d)
+        e: (name: str, age: int) = (name="r")
+        """,
+        tmp_path,
+    )
+    assert sorted(verdicts) == [5, 6]
+    assert verdicts[5] == 'Type of "d" is "(name: str, age: int)"'
+    assert "missing field: age" in verdicts[6]
 
 
 def test_shorthand_is_for_call_sites_not_def_signatures():

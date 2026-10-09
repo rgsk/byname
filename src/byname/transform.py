@@ -91,8 +91,7 @@ TYPED_PRELUDE = (  # checker-facing typing: typed methods, record types as Proto
 # `return x` under `-> T`, ...), and the dict is checked against that type's `_asdict()` TypedDict. Not a
 # generic `def f[T](d: Dict[T]) -> T`: pyright retries a call that fails with its expected type without it,
 # so the error would vanish; one inside a lambda's body doesn't fail the call. With no type expected (or an
-# overloaded callee) it's unchecked. Inline `(name: str)(**u)` checks against the type it names (`cast(T, …)`
-# makes the checker read T as a type).
+# overloaded callee) it's unchecked.
 RESERVED = {"keys"}  # record methods that make `**rec` work
 HASDICT = (
     "from typing import overload as _ov, Any as _A, Protocol as _PR\n"
@@ -105,14 +104,12 @@ KW_PRELUDE = (  # checker only
     "def _byname_kw(x: _A, /) -> _A: return x._asdict() if hasattr(x, '_asdict') else x  # pyright: ignore\n"
 )
 BUILD_PRELUDE = (
-    "from typing import cast as _cast\n"
     "from collections.abc import Callable as _Cl, Mapping as _Mp\n"
     "from collections import namedtuple as _ntf\n"
     "@_ov\ndef _byname_check[D](t: _Cl[[], _byname_HasDict[D]], /) -> _Cl[[D], D]: ...  # pyright: ignore\n"
     "@_ov\ndef _byname_check(t: _Cl[[], object], /) -> _Cl[[_A], _A]: ...  # pyright: ignore\n"
     "def _byname_check(t: _A, /) -> _A: return _byname_same  # pyright: ignore\n"
     "def _byname_same(d: _A, /) -> _A: return d\n"
-    "_byname_anyv: _A = None\n"
 )
 CTX_PRELUDE = (  # checker only: T is the type expected where the record is built, see the comment above
     # the checker reads typing_extensions from its bundled stubs; the package needn't be installed
@@ -130,11 +127,7 @@ CTX_PRELUDE = (  # checker only: T is the type expected where the record is buil
     "def _byname_arg(f: _Cl[[_byname_R], object], /) -> _byname_R: ...  # pyright: ignore\n"
 )
 BUILD_PORTABLE = (  # what runs in output files: no typing
-    "from typing import cast as _cast\n"
     "from collections import namedtuple as _ntf\n"
-    "def _byname_same(d): return d\n"
-    "def _byname_check(t): return _byname_same\n"
-    "_byname_anyv = None\n"
 )
 BUILD_REC = (  # build a record from a dict: one class per field tuple, made on first use
     "_byname_cls = {}\n"
@@ -519,7 +512,7 @@ def transform(
                 standins.append((at, at, SHORT))
 
     kw_used = builds = False
-    type_groups: set[int] = set()  # `(` of record types, for inline construction `(name: str)(**u)`
+    type_groups: set[int] = set()  # `(` of record types, for their fields' types and `(name: str)(...)`
 
     def wrap_kw(its: list[list[int]]) -> None:
         # checker only: `**x` -> `**_byname_kw(x)` in calls and dict displays, so the checker sees a record's
@@ -601,17 +594,16 @@ def transform(
         standins.append((g0, g0, PAT))
         return True
 
-    def build(i: int, close: int, its: list[list[int]], target: str | None = None, inline_at: int | None = None) -> None:
-        """A record built from spreads and fields, `(**u, age=27)`, as `_byname_rec({**u, 'age': 27})`.
-        target: the inline record type `(name: str)(**u)` (source text) to check it against."""
+    def build(i: int, close: int, its: list[list[int]]) -> None:
+        """A record built from spreads and fields, `(**u, age=27)`, as `_byname_rec({**u, 'age': 27})`."""
         nonlocal builds, kw_used
-        if target is None and checker and known and known_build(i, close, its):
+        if checker and known and known_build(i, close, its):
             return
         builds = True
         names = []
         # checker, no type written: `**name` spreads are read through a lambda default (see below)
         hoist = [it for it in its if toks[it[0]].string == "**" and len(it) == 2 and is_name(toks[it[1]])]
-        hoist = hoist if target is None and checker else []
+        hoist = hoist if checker else []
         wrap_kw([it for it in its if it not in hoist])
         for it in its:
             first = toks[it[0]]
@@ -632,7 +624,7 @@ def transform(
         if len(set(names)) != len(names):
             raise err(f"duplicate record field in {tuple(names)}", toks[i])
         g0, g1 = span(i, close)
-        if target is None and checker:  # checked against the type expected where it stands, if any
+        if checker:  # checked against the type expected where it stands, if any
             ctx = "_byname_arg" if is_argument(i, close) else "_byname_ctx"
             # Inside a lambda pyright drops narrowing of a name that's reassigned later, so a rebound `r`
             # would be its whole union there. A default is evaluated where the record stands, narrowed:
@@ -646,20 +638,11 @@ def transform(
                 edits.append(Edit(b, b, f", _byname_s{k})", (a, b)))
                 kw_used = True
             pre, post = f"{ctx}(lambda _byname_t{defaults}: _byname_check(lambda: _byname_t)({{", "}))"
-        elif target is None:
-            pre, post = "_byname_rec({", "})"
         else:
-            t = one_line(target)
-            pre, post = f"_byname_rec(_byname_check(lambda: _cast({t}, _byname_anyv))({{", "})))"
-            if inline_at is None:
-                pre = f"_cast({t}, " + pre
-            else:  # `(name: str)(**u)`: the type in the source is the cast's first argument
-                edits.append(Edit(inline_at, inline_at, "_cast(", (inline_at, g1)))
-                pre = ", " + pre
+            pre, post = "_byname_rec({", "})"
         edits.append(Edit(g0, g0 + 1, pre, (g0, g1)))
         edits.append(Edit(g1 - 1, g1, post, (g0, g1)))
-        if inline_at is None:
-            standins.append((g0, g0, PAT))  # formatter: a call, `__P(**u, age=27)`
+        standins.append((g0, g0, PAT))  # formatter: a call, `__P(**u, age=27)`
 
     consumed: set[int] = set()  # `(` of nested pattern groups, handled with their outer pattern
 
@@ -894,10 +877,10 @@ def transform(
                 no_parameter_patterns(i)
             continue
 
-        # building a record type: `(name: str, age: int)(**u, **r)`
+        # calling a record type, `(name: str, age: int)(name="r", age=1)`: a type alias can't be called, and
+        # a literal (annotated if it needs the type) or record(T, d) already builds one
         if prev is not None and prev.string == ")" and rpair.get(i - 1) in type_groups:
-            build(i, pair[i], its, src[off(toks[rpair[i - 1]].start) : off(prev.end)], off(toks[rpair[i - 1]].start))
-            continue
+            raise err("can't call a record type: write the record, (name=...), annotated if it needs the type", t)
 
         is_call = prev is not None and (is_name(prev) or prev.string in (")", "]"))
         if is_call:

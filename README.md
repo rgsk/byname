@@ -118,7 +118,7 @@ greet(p=(**u, **r))              # by keyword too
 p: Person = (**u, **r)           # checked against Person
 def make() -> Person:
     return (**u, **r)            # checked against `-> Person`
-(name: str, age: int, sex: str, surname: str)(**u, **r)   # or name the type inline
+q: (name: str, age: int, sex: str, surname: str) = (**u, **r)   # or write the type inline
 ```
 
 A spread record is checked against the type expected where it stands, so you never have to name one.

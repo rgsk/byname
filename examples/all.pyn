@@ -225,8 +225,6 @@ assert older == (name="Ann", age=31)
 type Contact = (name: str, age: int, surname: str, city: str)
 c: Contact = (**first, **last)  # checked against Contact: a missing or extra field is an error
 assert c.city == "Oslo"
-c2 = (name: str, age: int, surname: str, city: str)(**first, **last)  # or name the type inline
-assert c2 == c
 
 
 def mail(to: Contact) -> str:
