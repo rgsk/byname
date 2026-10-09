@@ -436,6 +436,14 @@ def complete(c, uri, text, marker="|"):
     return text, (res["items"] if isinstance(res, dict) else res)
 
 
+def test_a_spread_record_completes_while_a_line_is_half_typed(lsp):
+    # `print(b2.)` doesn't parse: the known names are still read from the rest of the file, so b2 keeps
+    # its exact type and `b2.` offers its fields, not the editor's word list
+    c, root, uri = lsp
+    _, items = complete(c, uri, "type User = (name: str, age: int)\nrec: User = (name='r', age=1)\nb2 = (**rec)\nprint(b2.|)\n")
+    assert {"name", "age"} <= {i["label"] for i in items}
+
+
 def test_completion_in_empty_pattern_slot(lsp):
     # like TS `const { | } = fn()`: every field, nothing else; already-listed fields left out
     c, root, uri = lsp

@@ -309,14 +309,32 @@ def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
     return "if _t.TYPE_CHECKING:\n" + indent(checker) + "else:\n" + indent(out)
 
 
+def parse_around_errors(body: str, tries: int = 10) -> ast.Module | None:
+    """`ast.parse`, with each line that doesn't parse turned into `pass` (at its indent) and parsing tried
+    again: in the editor one half-typed line (`print(b2.)`) would otherwise leave every name in the file
+    unknown, so `b2.` had no type to complete from."""
+    lines = body.splitlines(keepends=True)
+    for _ in range(tries):
+        try:
+            return ast.parse("".join(lines))
+        except SyntaxError as e:
+            if not e.lineno or e.lineno > len(lines):
+                return None
+            line = lines[e.lineno - 1]
+            stub = line[: len(line) - len(line.lstrip())] + "pass\n"
+            if line == stub:
+                return None
+            lines[e.lineno - 1] = stub
+    return None
+
+
 def known_fields(body: str) -> dict[str, tuple[str, ...]]:
     """Names whose record fields can be read off the translation: bound exactly once in the whole file,
     by a record literal, a spread record of such names, or an annotation with a record type (inline, a
     `type` alias, or a parameter's). Any other binding of the name anywhere makes it unknown: a wrong
     field set would be worse than the generic spread path. Checker translation only (see known_build)."""
-    try:
-        tree = ast.parse(body)
-    except SyntaxError:
+    tree = parse_around_errors(body)
+    if tree is None:
         return {}
     count: dict[str, int] = {}
     source: dict[str, tuple[str, ast.expr]] = {}  # name -> ("value" | "type", node)
