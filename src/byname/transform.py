@@ -153,6 +153,11 @@ FIELDSET = "_byname_fieldset"  # a record's field names, sorted: what an exact r
 STMT_START = {tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT}
 
 
+class BynameError(SyntaxError):
+    """A byname rule broken (e.g. shorthand in a parameter's default), as opposed to Python that doesn't
+    tokenize. The editor shows only this then: the checker, sent the raw .pyn, would echo it as noise."""
+
+
 @dataclass
 class Mark:
     """A span of an Edit's text that stands for a span of the original source."""
@@ -432,7 +437,7 @@ def transform(
         return line_starts[rc[0] - 1] + rc[1]
 
     def err(msg: str, t: tokenize.TokenInfo) -> SyntaxError:
-        return SyntaxError(msg, (path, t.start[0], t.start[1] + 1, t.line))
+        return BynameError(msg, (path, t.start[0], t.start[1] + 1, t.line))
 
     def is_name(t: tokenize.TokenInfo) -> bool:
         return t.type == tokenize.NAME and not keyword.iskeyword(t.string)

@@ -623,6 +623,17 @@ def test_formatting_code_that_does_not_translate_offers_nothing(lsp):
     assert edits == []
 
 
+def test_a_broken_byname_rule_shows_only_its_own_error(lsp):
+    # the checker gets the raw .pyn then, so its `"(" was not closed` is noise
+    c, root, uri = lsp
+    text = "name = 1\ndef f(g=lambda v: (v=, name=name)): return g\n"
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 904}, "contentChanges": [{"text": text}]}})
+    want = [(1, "v= in a parameter's default would take the outer 'v': write v=v to mean that")]
+    got = wait_errors(c, uri, want)
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 905}, "contentChanges": [{"text": MAIN}]}})
+    assert got == want
+
+
 
 def test_fix_all_on_save(lsp):
     # codeActionsOnSave: source.fixAll is answered by byname with ruff's safe fixes, as for a .py

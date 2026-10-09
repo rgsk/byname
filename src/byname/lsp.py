@@ -27,7 +27,7 @@ from urllib.request import url2pathname
 
 from .output import output_path, render
 from .srcmap import LineIndex, Translation
-from .transform import DS, FIELDSET, ORDER, REPR, pattern_slot
+from .transform import DS, FIELDSET, ORDER, REPR, BynameError, pattern_slot
 
 DEFAULT_CHECKER = ["basedpyright-langserver", "--stdio"]
 DROP = object()  # a result element whose position fell inside generated-only code
@@ -1282,7 +1282,8 @@ class Proxy:
             return None  # closed .pyn: its translation's diagnostics have nowhere to go
         out = list(doc.tr.problems)
         flagged = {(p["range"]["start"]["line"], p["range"]["start"]["character"]) for p in out}
-        for d in params.get("diagnostics", []):
+        # a broken byname rule: the checker got the raw .pyn, so all it says is noise (`"(" was not closed`)
+        for d in [] if isinstance(doc.tr.error, BynameError) else params.get("diagnostics", []):
             r = doc.tr.range_from_hidden(d["range"], display=True)
             if r is None:
                 continue
