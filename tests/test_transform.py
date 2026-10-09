@@ -518,13 +518,27 @@ def test_spread_records_of_known_names_are_plain_records():
         "n = (**t,)\n"
         "again = (**n, b='y')\n"          # a spread of a spread
         "w = (a=1,)\n"
+        "w1 = (**w,)\n"                  # the nearest binding before it
         "w = (a=1, b=2)\n"
-        "rebound = (**w,)\n"              # `w` is bound twice: unknown
+        "w2 = (**w,)\n"
+        "w = (**w, c=3)\n"               # reads the `w` before it
+        "def g():\n"
+        "    return (**w,)\n"            # may run after any binding of `w`: unknown
+        "if t.a:\n"
+        "    w = (a=1,)\n"
+        "w3 = (**w,)\n"                  # bound in a branch: unknown
+        "k = [(**t,) for t in [w]]\n"    # the comprehension's `t`: unknown
+        "m = [(**t,) for _ in [w]]\n"    # the module's `t`, read there and then
     )
     lines = transform(src, checker=True).body.splitlines()
     assert lines[2] == "    x = _rec_a__b__z(a=c.a, b=c.b, z=1)"
-    assert "_byname_ctx(" in lines[3] and "_byname_ctx(" in lines[9]
+    assert "_byname_ctx(" in lines[3]
     assert lines[6] == "again = _rec_a__b(a=n.a, b='y')"
+    assert lines[8] == "w1 = _rec_a(a=w.a,)"
+    assert lines[10] == "w2 = _rec_a__b(a=w.a, b=w.b,)"
+    assert lines[11] == "w = _rec_a__b__c(a=w.a, b=w.b, c=3)"
+    assert ["_byname_ctx(" in lines[i] for i in (13, 16, 17)] == [True, True, True]
+    assert lines[18] == "m = [_rec_a__b(a=t.a, b=t.b,) for _ in [w]]"
     assert "_rec_" not in transform(SPREADS).body.split("both = ")[1].split("\n")[0]  # runtime: _byname_rec
 
 

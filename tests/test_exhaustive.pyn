@@ -705,10 +705,9 @@ def test_a_record_s_asdict_is_a_typed_mutable_copy_that_spreads_back(tmp_path):
     assert (**d, city="Pune") == (name="rahul", age=27, city="Pune")
 
 
-def test_spreading_back_into_the_same_name_needs_its_type_written(tmp_path):
-    # a spread is typed from its names only when each is bound once. Spreading back into the name it came from
-    # binds that name a second time, so the spread is Unknown, the same whether it spreads the record itself or
-    # its `_asdict()` dict. A new name or an annotation keeps the type
+def test_spreading_back_into_the_same_name_keeps_its_type(tmp_path):
+    # a spread reads the nearest binding of each name before it (bindings in straight-line code), so spreading
+    # back into the name it came from keeps the type, whether it spreads the record itself or its `_asdict()`
     verdicts = checker(
         """\
         r = (name="rahul", age=26)
@@ -729,8 +728,8 @@ def test_spreading_back_into_the_same_name_needs_its_type_written(tmp_path):
         """,
         tmp_path,
     )
-    assert verdicts[3] == 'Type of "r" is "Unknown"'  # the record itself
-    assert verdicts[7] == 'Type of "u" is "Unknown"'  # its dict
+    assert verdicts[3] == 'Type of "r" is "(name: str, age: int)"'  # the record itself
+    assert verdicts[7] == 'Type of "u" is "(name: str, age: int)"'  # its dict
     assert verdicts[11] == 'Type of "v2" is "(name: str, age: int)"'  # a new name
     assert verdicts[15] == 'Type of "w" is "(name: str, age: int)"'  # an annotation
 

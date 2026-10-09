@@ -27,7 +27,7 @@ twice per line. dfb09f7 reads spread names through lambda defaults so a rebound 
 `lambda _byname_t, _byname_s0=_byname_kw(person): ...`. Ruff lints the checker translation and sees a call in
 a default; `byname tool` only drops diagnostics in the generated header, and ones inside a user's line are
 moved onto it (on purpose, so errors in generated reads still show). It hits any spread of a name that
-isn't "known" (bound more than once in the file, a parameter without a record type, ...). Likely fix:
+isn't "known" (bound in a branch, a parameter without a record type, ...). Likely fix:
 make the default the bare name, `_byname_s0=person` (no call, nothing for B008), and call `_byname_kw` in the
 lambda body: `{**_byname_pick(person, _byname_kw(_byname_s0))}`; the default still carries the narrowed
 type. Suppressed with `# noqa: B008` on the two lines in `test_exhaustive.pyn` for now.

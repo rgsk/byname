@@ -85,9 +85,8 @@ wrote them. To a checker, records with the same fields are the same type whateve
 
 You rarely need a record type, since return types are inferred. Three cases where you do:
 - **Recursive functions:** checkers can't infer through the recursive call, so its fields come out `Unknown`.
-- **Spreading back into the same name:** `u = (**user)` with `user = u._asdict()` makes `u` a name bound
-  twice, so the spread is `Unknown`. Annotate the first binding, `u: (name: str, age: int) = (...)`, or use
-  a new name, `u2 = (**user)`.
+- **A name bound in a branch, or rebound and read from a function:** a spread of it is `Unknown` (see
+  below). Annotate the first binding, `u: (name: str, age: int) = (...)`, or use a new name.
 - **Functions that take part of a config:** `def get_batch(cfg: (..., batch_size: int, block_size: int))`
   accepts any config with those fields, while `f(**cfg)` requires an exact match.
 
@@ -123,9 +122,12 @@ q: (name: str, age: int, sex: str, surname: str) = (**u, **r)   # or write the t
 
 A spread record is checked against the type expected where it stands, so you never have to name one.
 With no type expected, like `x = (**u, **r)`, it still gets its exact type when every spread is a name
-the file shows the fields of: bound once, to a record or a spread of such names, or annotated with a
-record type (a parameter's too). Then `x` is `(name: str, age: int, sex: str, surname: str)` and a typo
-like `x.surnme` is an error. Otherwise (a name bound twice, from a call, an import) it's `Any`. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
+the file shows the fields of: bound to a record or a spread of such names, to `rec._asdict()`, or
+annotated with a record type (a parameter's too). Then `x` is `(name: str, age: int, sex: str, surname: str)`
+and a typo like `x.surnme` is an error. Names are scoped as in Python, and a name rebound in straight-line
+code is read at its nearest binding before the spread, so `u = (**u, city="pune")` stays typed. Otherwise
+(bound in an `if` or loop and read after it, rebound and read from inside a function, from a call, an
+import) it's `Any`. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
 `f((**u, **r))`.
 A field can't be called `keys`: records have a `keys()` method, which is what lets `**` work.
 

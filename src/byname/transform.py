@@ -326,66 +326,180 @@ class Known:
     is_dict: bool = False
 
 
-def known_fields(body: str) -> dict[str, Known]:
-    """Names whose record fields can be read off the translation: bound exactly once in the whole file,
-    by a record literal, a spread record of such names, an annotation with a record type (inline, a
-    `type` alias, or a parameter's), or `x._asdict()` of such a name (a TypedDict: its keys can't be
-    removed, so its fields stay). Any other binding of the name anywhere makes it unknown: a wrong
-    field set would be worse than the generic spread path. Checker translation only (see known_build)."""
+@dataclass(eq=False)
+class _Bind:
+    """One binding of a name in a scope (known_fields). at: the index of the scope's statement it's in (-1 for
+    parameters); straight: that statement is simple (no `if`, loop, `try`, ...), so the binding has run once
+    the scope reaches the next statement; source: ("value" | "type", node) when it shows the fields (a
+    parameter's annotation is read where the function is defined)."""
+
+    at: int
+    straight: bool
+    source: tuple[str, ast.expr] | None
+    where: tuple["_Scope", int]  # the scope and statement the source is read in
+
+
+@dataclass(eq=False)
+class _Scope:
+    """A scope in known_fields. at: the parent's statement it stands in; now: its code runs there and then (a
+    class body, a comprehension, byname's own lambdas), so a name it reads from outside is read at `at`."""
+
+    parent: "_Scope | None"
+    at: int = 0
+    now: bool = False
+    is_class: bool = False
+    binds: dict[str, list[_Bind]] = field(default_factory=dict)
+
+
+COMPOUND = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.TryStar, ast.With, ast.AsyncWith, ast.Match)
+COMPS = (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
+
+
+def known_fields(body: str) -> dict[tuple[str, int], Known]:
+    """The record fields of names read in the translation, by (name, line), where a binding shows them: a
+    record literal, a spread record of such names, an annotation with a record type (inline, a `type`
+    alias, or a parameter's), or `x._asdict()` of such a name (a TypedDict: its keys can't be removed, so
+    its fields stay). Names are scoped as in Python (function, lambda, comprehension, class). A read sees
+    the binding that reaches it: the scope's only binding of the name, or, when every binding up to the read
+    is a simple statement at the scope's top level, the nearest one before the read's statement. Anything less
+    clear (bound in a branch or loop, a module name rebound and read from a function, `global`) is
+    unknown: a wrong field set would be worse than the generic spread path. Checker translation only
+    (see known_build)."""
     tree = parse_around_errors(body)
     if tree is None:
         return {}
-    count: dict[str, int] = {}
-    source: dict[str, tuple[str, ast.expr]] = {}  # name -> ("value" | "type", node)
+    shared: set[str] = set()  # names in a `global` / `nonlocal`: rebound across scopes, never known
+    sources: dict[int, tuple[str, ast.expr]] = {}  # id(Name target) -> its binding's source
+    reads: list[tuple[str, int, _Scope, int]] = []  # name, line, scope, statement index
 
-    def bind(name: str, n: int = 1) -> None:
-        count[name] = count.get(name, 0) + n
+    def bind(
+        scope: _Scope, name: str, at: int, straight: bool, source: tuple[str, ast.expr] | None = None,
+        where: tuple[_Scope, int] | None = None,
+    ) -> None:
+        scope.binds.setdefault(name, []).append(_Bind(at, straight, source, where or (scope, at)))
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
-            bind(node.id)
-        elif isinstance(node, ast.arg):
-            bind(node.arg)
-            if node.annotation is not None:
-                source[node.arg] = ("type", node.annotation)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            bind(node.name)
+    def body_of(stmts: list[ast.stmt], scope: _Scope) -> None:
+        for at, s in enumerate(stmts):
+            visit(s, scope, at, not isinstance(s, COMPOUND))
+
+    def params(args: ast.arguments, scope: _Scope, inner: _Scope, at: int, straight: bool) -> None:
+        for d in [*args.defaults, *(d for d in args.kw_defaults if d)]:
+            visit(d, scope, at, straight)
+        for a in [*args.posonlyargs, *args.args, *([args.vararg] if args.vararg else []), *args.kwonlyargs,
+                  *([args.kwarg] if args.kwarg else [])]:
+            if a.annotation is not None:
+                visit(a.annotation, scope, at, straight)
+            source = ("type", a.annotation) if a.annotation is not None else None
+            bind(inner, a.arg, -1, True, source, (scope, at))
+
+    def visit(node: ast.AST, scope: _Scope, at: int, straight: bool) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            ours = isinstance(node, ast.Lambda) and node.args.args and node.args.args[0].arg.startswith("_byname_")
+            inner = _Scope(scope, at, now=bool(ours))
+            if not isinstance(node, ast.Lambda):
+                for d in node.decorator_list:
+                    visit(d, scope, at, straight)
+                if node.returns is not None:
+                    visit(node.returns, scope, at, straight)
+                bind(scope, node.name, at, straight)
+            params(node.args, scope, inner, at, straight)
+            if isinstance(node, ast.Lambda):
+                visit(node.body, inner, 0, True)
+            else:
+                body_of(node.body, inner)
+            return
+        if isinstance(node, ast.ClassDef):
+            for e in [*node.decorator_list, *node.bases, *node.keywords]:
+                visit(e, scope, at, straight)
+            bind(scope, node.name, at, straight)
+            body_of(node.body, _Scope(scope, at, now=True, is_class=True))
+            return
+        if isinstance(node, COMPS):
+            inner = _Scope(scope, at, now=True)
+            visit(node.generators[0].iter, scope, at, straight)
+            for i, g in enumerate(node.generators):
+                if i:
+                    visit(g.iter, inner, 0, True)
+                for n in ast.walk(g.target):
+                    if isinstance(n, ast.Name):
+                        bind(inner, n.id, -1, True)
+                for e in g.ifs:
+                    visit(e, inner, 0, True)
+            for e in [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]:
+                visit(e, inner, 0, True)
+            return
+        if isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Load):
+                reads.append((node.id, node.lineno, scope, at))
+            else:
+                bind(scope, node.id, at, straight, sources.get(id(node)))
+        elif isinstance(node, ast.NamedExpr):
+            bind(scope, node.target.id, at, False)  # rebinds mid-statement: never the nearest binding
+            visit(node.value, scope, at, straight)
+            return
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for a in node.names:
-                bind((a.asname or a.name).split(".")[0])
+                bind(scope, (a.asname or a.name).split(".")[0], at, straight)
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
-            for name in node.names:
-                bind(name, 2)  # rebinds a name across scopes: never known
+            shared.update(node.names)
         elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
-            bind(node.name)
+            bind(scope, node.name, at, straight)
         elif isinstance(node, ast.MatchMapping) and node.rest:
-            bind(node.rest)
+            bind(scope, node.rest, at, straight)
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            source[node.targets[0].id] = ("value", node.value)
+            sources[id(node.targets[0])] = ("value", node.value)
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            source[node.target.id] = ("type", node.annotation)
+            sources[id(node.target)] = ("type", node.annotation)
         elif isinstance(node, ast.TypeAlias):
-            source[node.name.id] = ("type", node.value)
+            sources[id(node.name)] = ("type", node.value)
+        inside = straight and not isinstance(node, COMPOUND)
+        for child in ast.iter_child_nodes(node):
+            visit(child, scope, at, inside)
 
-    memo: dict[str, Known | None] = {}
+    module = _Scope(None)
+    body_of(tree.body, module)
 
-    def resolve(name: str) -> Known | None:
-        if name in memo:
-            return memo[name]
-        memo[name] = None  # a cycle stays unknown
-        if count.get(name) == 1 and name in source:
-            kind, node = source[name]
-            memo[name] = of_value(node) if kind == "value" else of_type(node)
-        return memo[name]
+    def reaching(name: str, scope: _Scope, at: int) -> _Bind | None:
+        """The binding a read of `name` in `scope` at statement `at` sees, if it's clear."""
+        if name in shared:
+            return None
+        s, now = scope, True  # now: no function between the read and the scope binding it
+        while s is not None and (name not in s.binds or (s is not scope and s.is_class)):  # classes don't enclose
+            now, at, s = now and s.now, s.at, s.parent
+        if s is None:
+            return None
+        bs = s.binds[name]
+        if len(bs) == 1:
+            return bs[0]
+        # a later statement's binding can't have run yet (a loop is one statement: its bindings aren't straight)
+        if not now or not all(b.straight for b in bs if b.at <= at):
+            return None
+        before = [b for b in bs if b.at < at]
+        if not before or (len(before) > 1 and before[-2].at == before[-1].at):
+            return None
+        return before[-1]
 
-    def of_value(e: ast.expr) -> Known | None:
+    memo: dict[int, Known | None] = {}
+
+    def resolve(name: str, scope: _Scope, at: int) -> Known | None:
+        b = reaching(name, scope, at)
+        if b is None or b.source is None:
+            return None
+        if id(b) in memo:
+            return memo[id(b)]
+        memo[id(b)] = None  # a cycle stays unknown
+        kind, node = b.source
+        memo[id(b)] = of_value(node, *b.where) if kind == "value" else of_type(node, *b.where)
+        return memo[id(b)]
+
+    def of_value(e: ast.expr, scope: _Scope, at: int) -> Known | None:
         if isinstance(e, ast.Name):
-            return resolve(e.id)
+            return resolve(e.id, scope, at)
         if (  # `rec._asdict()`: a dict with the record's fields
             isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr == "_asdict"
             and isinstance(e.func.value, ast.Name) and not e.args and not e.keywords
         ):
-            got = resolve(e.func.value.id)
+            got = resolve(e.func.value.id, scope, at)
             return Known(got.fields, is_dict=True) if got is not None and not got.is_dict else None
         if not isinstance(e, ast.Call) or not isinstance(e.func, ast.Name):
             return None
@@ -399,7 +513,7 @@ def known_fields(body: str) -> dict[str, Known]:
             for k, v in zip(d.keys, d.values):
                 if k is None:
                     inner = v.args[0] if isinstance(v, ast.Call) and v.args else v
-                    got = resolve(inner.id) if isinstance(inner, ast.Name) else None
+                    got = resolve(inner.id, scope, at) if isinstance(inner, ast.Name) else None
                     if got is None:
                         return None
                     out.update(dict.fromkeys(got.fields))
@@ -410,15 +524,20 @@ def known_fields(body: str) -> dict[str, Known]:
             return Known(tuple(out))
         return None
 
-    def of_type(t: ast.expr) -> Known | None:
+    def of_type(t: ast.expr, scope: _Scope, at: int) -> Known | None:
         if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id.startswith("_typ_"):
             return Known(tuple(t.value.id.removeprefix("_typ_").split("__")))  # exact types only, not `_opn_`
         if isinstance(t, ast.Name):
-            got = resolve(t.id)
+            got = resolve(t.id, scope, at)
             return got if got is None or not got.is_dict else None  # a dict isn't a type
         return None
 
-    return {name: f for name in source if (f := resolve(name))}
+    out: dict[tuple[str, int], Known | None] = {}
+    for name, line, scope, at in reads:
+        got = resolve(name, scope, at)
+        key = (name, line)
+        out[key] = got if out.get(key, got) == got else None  # two reads on a line that disagree: unknown
+    return {key: k for key, k in out.items() if k is not None}
 
 
 def transform(
@@ -427,12 +546,12 @@ def transform(
     tolerant: bool = False,
     portable: bool = False,
     checker: bool = False,
-    known: dict[str, Known] | None = None,
+    known: dict[tuple[str, int], Known] | None = None,
 ) -> Result:
     """tolerant (editor only): a half-typed pattern item like `na` in `(name=, na) = r` becomes
     `_ds.na` instead of an error, so the checker can complete field names there.
     checker: the translation only type checkers see; works around their bugs (see KW_PRELUDE). Never run.
-    known: names with fields known from the file (known_fields); set by the checker translation's second pass."""
+    known: fields of names read in the file, by (name, line) (known_fields); set by the checker translation's second pass."""
     toks = [
         t
         for t in tokenize.generate_tokens(io.StringIO(src).readline)
@@ -551,12 +670,16 @@ def transform(
         exact type without an expected type. A later item wins and the first position stays, as at runtime.
         False: left to the generic path, which also reports any mistakes."""
         order: dict[str, list[int]] = {}  # field -> the item that gives it
+
+        def of(t: tokenize.TokenInfo) -> Known | None:
+            return (known or {}).get((t.string, t.start[0]))  # the translation keeps the source's lines
+
         for it in its:
             first = toks[it[0]]
             if first.string == "**":
-                if len(it) != 2 or not is_name(toks[it[1]]) or toks[it[1]].string not in (known or {}):
+                if len(it) != 2 or not is_name(toks[it[1]]) or (got := of(toks[it[1]])) is None:
                     return False
-                for f in (known or {})[toks[it[1]].string].fields:
+                for f in got.fields:
                     if f in order and toks[order[f][0]].string != "**":
                         return False  # overrides a field written before it: rare, generic path
                     order[f] = it
@@ -579,7 +702,8 @@ def transform(
                 # `**u` -> `name=u.name, age=u.age`: the user's `u` stays real text (hover, colour, rename).
                 # A dict from `_asdict()` is read by key: `name=d["name"]`
                 name, (first, *rest) = toks[it[1]].string, given[it[0]]
-                read = (lambda f: f'["{f}"]') if (known or {})[name].is_dict else (lambda f: f".{f}")
+                is_dict = (got := of(toks[it[1]])) is not None and got.is_dict
+                read = (lambda f: f'["{f}"]') if is_dict else (lambda f: f".{f}")
                 at = off(toks[it[1]].end)
                 edits.append(Edit(off(toks[it[0]].start), off(toks[it[0]].end), f"{first}=", span(it[1])))
                 tail = read(first) + "".join(f", {f}={name}{read(f)}" for f in rest)
