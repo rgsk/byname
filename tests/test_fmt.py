@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from byname.fmt import FormatError, decode, encode, format_pyn
+from byname.fmt import FormatError, UnparsableError, decode, encode, format_pyn
 from byname.transform import to_python
 
 pytestmark = pytest.mark.skipif(
@@ -95,6 +95,12 @@ def test_all_pyn_keeps_its_meaning_and_is_idempotent():
 def test_refuses_sources_using_stand_in_names():
     with pytest.raises(FormatError):
         format_pyn("__p = 1\n")
+
+
+def test_code_ruff_cannot_parse_is_unparsable_not_a_failure(tmp_path):
+    # a half-typed line: the editor offers no edits (as the Ruff extension does); `byname format` still says so
+    with pytest.raises(UnparsableError, match="Failed to parse"):
+        format_pyn("r = (a=1)\nprint(r.)\n", cwd=tmp_path)
 
 
 def test_format_record_types(tmp_path):

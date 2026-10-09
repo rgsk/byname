@@ -41,6 +41,10 @@ class FormatError(Exception):
     pass
 
 
+class UnparsableError(FormatError):
+    """Ruff couldn't parse the code (e.g. a half-typed line): nothing to format, not a failure."""
+
+
 def encode(src: str) -> str:
     if SHORT in src or PAT in src or TYP in src or PARAM in src:
         raise FormatError(f"source already uses the stand-in names {SHORT}/{PAT}/{TYP}/{PARAM}")
@@ -296,5 +300,6 @@ def format_pyn(src: str, filename: str = "file.pyn", cwd: Path | None = None) ->
         input=code, capture_output=True, text=True, cwd=cwd, check=False,
     )
     if p.returncode != 0:
-        raise FormatError(p.stderr.strip() or "ruff format failed")
+        err = p.stderr.strip()
+        raise (UnparsableError if err.startswith("error: Failed to parse") else FormatError)(err or "ruff format failed")
     return ungrid(decode(p.stdout))

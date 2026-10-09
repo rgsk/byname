@@ -1028,13 +1028,13 @@ class Proxy:
 
     def format(self, mid, path: Path, doc: Doc) -> dict:
         """Whole-document ruff format via stand-ins (see fmt.py); answered here, not by the checker."""
-        from .fmt import FormatError, format_pyn
+        from .fmt import FormatError, UnparsableError, format_pyn
 
         src = doc.tr.source
         try:
             out = format_pyn(src, *self.ruff_at(path))
-        except SyntaxError:
-            return {"jsonrpc": "2.0", "id": mid, "result": []}  # code that doesn't translate: its diagnostic says why
+        except (SyntaxError, UnparsableError):  # code that doesn't translate or parse: its diagnostic says why
+            return {"jsonrpc": "2.0", "id": mid, "result": []}
         except FormatError as e:
             return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32603, "message": f"byname format: {e}"}}
         if out == src:
