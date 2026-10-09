@@ -328,10 +328,20 @@ def parse_around_errors(body: str, tries: int = 10) -> ast.Module | None:
     return None
 
 
-def known_fields(body: str) -> dict[str, tuple[str, ...]]:
+@dataclass(frozen=True)
+class Known:
+    """A name's record fields, read off the file (known_fields). is_dict: it holds a record's `_asdict()`,
+    so a spread reads it as `d["name"]`, not `d.name`."""
+
+    fields: tuple[str, ...]
+    is_dict: bool = False
+
+
+def known_fields(body: str) -> dict[str, Known]:
     """Names whose record fields can be read off the translation: bound exactly once in the whole file,
-    by a record literal, a spread record of such names, or an annotation with a record type (inline, a
-    `type` alias, or a parameter's). Any other binding of the name anywhere makes it unknown: a wrong
+    by a record literal, a spread record of such names, an annotation with a record type (inline, a
+    `type` alias, or a parameter's), or `x._asdict()` of such a name (a TypedDict: its keys can't be
+    removed, so its fields stay). Any other binding of the name anywhere makes it unknown: a wrong
     field set would be worse than the generic spread path. Checker translation only (see known_build)."""
     tree = parse_around_errors(body)
     if tree is None:
@@ -368,9 +378,9 @@ def known_fields(body: str) -> dict[str, tuple[str, ...]]:
         elif isinstance(node, ast.TypeAlias):
             source[node.name.id] = ("type", node.value)
 
-    memo: dict[str, tuple[str, ...] | None] = {}
+    memo: dict[str, Known | None] = {}
 
-    def resolve(name: str) -> tuple[str, ...] | None:
+    def resolve(name: str) -> Known | None:
         if name in memo:
             return memo[name]
         memo[name] = None  # a cycle stays unknown
@@ -379,13 +389,19 @@ def known_fields(body: str) -> dict[str, tuple[str, ...]]:
             memo[name] = of_value(node) if kind == "value" else of_type(node)
         return memo[name]
 
-    def of_value(e: ast.expr) -> tuple[str, ...] | None:
+    def of_value(e: ast.expr) -> Known | None:
         if isinstance(e, ast.Name):
             return resolve(e.id)
+        if (  # `rec._asdict()`: a dict with the record's fields
+            isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr == "_asdict"
+            and isinstance(e.func.value, ast.Name) and not e.args and not e.keywords
+        ):
+            got = resolve(e.func.value.id)
+            return Known(got.fields, is_dict=True) if got is not None and not got.is_dict else None
         if not isinstance(e, ast.Call) or not isinstance(e.func, ast.Name):
             return None
         if e.func.id.startswith("_rec_") and all(k.arg for k in e.keywords) and not e.args:
-            return tuple(k.arg for k in e.keywords if k.arg)  # a record literal
+            return Known(tuple(k.arg for k in e.keywords if k.arg))  # a record literal
         if e.func.id in ("_byname_ctx", "_byname_arg"):  # a spread record: its dict display, in order
             d = next((n for n in ast.walk(e) if isinstance(n, ast.Dict)), None)
             if d is None:
@@ -397,19 +413,20 @@ def known_fields(body: str) -> dict[str, tuple[str, ...]]:
                     got = resolve(inner.id) if isinstance(inner, ast.Name) else None
                     if got is None:
                         return None
-                    out.update(dict.fromkeys(got))
+                    out.update(dict.fromkeys(got.fields))
                 elif isinstance(k, ast.Constant) and isinstance(k.value, str):
                     out[k.value] = None
                 else:
                     return None
-            return tuple(out)
+            return Known(tuple(out))
         return None
 
-    def of_type(t: ast.expr) -> tuple[str, ...] | None:
+    def of_type(t: ast.expr) -> Known | None:
         if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id.startswith("_typ_"):
-            return tuple(t.value.id.removeprefix("_typ_").split("__"))  # exact types only, not `_opn_`
+            return Known(tuple(t.value.id.removeprefix("_typ_").split("__")))  # exact types only, not `_opn_`
         if isinstance(t, ast.Name):
-            return resolve(t.id)
+            got = resolve(t.id)
+            return got if got is None or not got.is_dict else None  # a dict isn't a type
         return None
 
     return {name: f for name in source if (f := resolve(name))}
@@ -421,7 +438,7 @@ def transform(
     tolerant: bool = False,
     portable: bool = False,
     checker: bool = False,
-    known: dict[str, tuple[str, ...]] | None = None,
+    known: dict[str, Known] | None = None,
 ) -> Result:
     """tolerant (editor only): a half-typed pattern item like `na` in `(name=, na) = r` becomes
     `_ds.na` instead of an error, so the checker can complete field names there.
@@ -550,7 +567,7 @@ def transform(
             if first.string == "**":
                 if len(it) != 2 or not is_name(toks[it[1]]) or toks[it[1]].string not in (known or {}):
                     return False
-                for f in (known or {})[toks[it[1]].string]:
+                for f in (known or {})[toks[it[1]].string].fields:
                     if f in order and toks[order[f][0]].string != "**":
                         return False  # overrides a field written before it: rare, generic path
                     order[f] = it
@@ -570,11 +587,13 @@ def transform(
         edits.append(Edit(g0, g0, record_class(fields), (g0, g0 + 1)))
         for it in its:
             if toks[it[0]].string == "**":
-                # `**u` -> `name=u.name, age=u.age`: the user's `u` stays real text (hover, colour, rename)
+                # `**u` -> `name=u.name, age=u.age`: the user's `u` stays real text (hover, colour, rename).
+                # A dict from `_asdict()` is read by key: `name=d["name"]`
                 name, (first, *rest) = toks[it[1]].string, given[it[0]]
+                read = (lambda f: f'["{f}"]') if (known or {})[name].is_dict else (lambda f: f".{f}")
                 at = off(toks[it[1]].end)
                 edits.append(Edit(off(toks[it[0]].start), off(toks[it[0]].end), f"{first}=", span(it[1])))
-                tail = f".{first}" + "".join(f", {f}={name}.{f}" for f in rest)
+                tail = read(first) + "".join(f", {f}={name}{read(f)}" for f in rest)
                 edits.append(Edit(at, at, tail, span(it[1])))
             else:
                 # the field name as generated text, like the generic path: the checker would colour a

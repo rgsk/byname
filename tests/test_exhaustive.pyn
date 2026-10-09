@@ -696,6 +696,26 @@ def test_a_spread_of_known_records_is_typed_without_an_annotation(tmp_path):
     assert verdicts[4].startswith('Cannot access attribute "btach_size"')
 
 
+def test_a_record_s_asdict_is_a_typed_mutable_copy_that_spreads_back(tmp_path):
+    # `_asdict()` gives a dict with the record's fields (keys can't be added or removed), so `(**d)` is a
+    # record of those fields again: typed with no annotation, read as d["name"] for the checker
+    verdicts = checker(
+        """\
+        rec = (name="rahul", age=26)
+        d = rec._asdict()
+        d["age"] += 1
+        back = (**d, city="Pune")
+        reveal_type(back)
+        """,
+        tmp_path,
+    )
+    assert verdicts[5] == 'Type of "back" is "(name: str, age: int, city: str)"'
+    rec = (name="rahul", age=26)
+    d = rec._asdict()
+    d["age"] += 1
+    assert (**d, city="Pune") == (name="rahul", age=27, city="Pune")
+
+
 def test_replace_updates_a_record_and_a_spread_builds_a_new_one(tmp_path):
     # both copy with a field changed; _replace keeps the record's type, a spread makes whatever it's given
     r = (name="rahul", age=26)

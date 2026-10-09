@@ -163,6 +163,21 @@ for (x=, y=) in pts: ...               # for-loop targets
 (id=, user=(name=, age=a)) = r         # nested: name = r.user.name
 ```
 
+**Why `images=x0`, not `x0=images`:** in a pattern the field is on the left and the new name on the right,
+so `(images=x0) = load_mnist()` puts the field `images` into `x0`. It reads backwards from `x0 = images`,
+but it's the order Python's own `match` already uses, with the same `=`:
+
+```python
+(images=x0) = load_mnist()             # byname: x0 gets the field `images`
+
+match load_mnist():
+    case MNIST(images=x0): ...         # Python: x0 gets the attribute `images`
+```
+
+A pattern is also written the way the record is built: `r = (images=x0)` puts `x0` into `images`, and
+`(images=x0) = r` takes it back out. Rust (`let Point { x: a, .. } = p`) and JS (`const { images: x0 } = obj`)
+put the field first too; they use `:`, which in Python is an annotation.
+
 **In parameters,** like TypeScript's `function f({ name, age }: User)`:
 
 ```python
