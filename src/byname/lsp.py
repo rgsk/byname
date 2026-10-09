@@ -1033,7 +1033,9 @@ class Proxy:
         src = doc.tr.source
         try:
             out = format_pyn(src, *self.ruff_at(path))
-        except (FormatError, SyntaxError) as e:
+        except SyntaxError:
+            return {"jsonrpc": "2.0", "id": mid, "result": []}  # code that doesn't translate: its diagnostic says why
+        except FormatError as e:
             return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32603, "message": f"byname format: {e}"}}
         if out == src:
             return {"jsonrpc": "2.0", "id": mid, "result": []}

@@ -613,6 +613,16 @@ def test_format_document(lsp):
     assert "res = make(name=, age=)\n" in edits[0]["newText"]
 
 
+def test_formatting_code_that_does_not_translate_offers_nothing(lsp):
+    # rather than failing the save: the file's diagnostic says what's wrong
+    c, root, uri = lsp
+    text = "name = 1\ndef f(g=lambda v: (v=, name=name)): return g\n"
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 902}, "contentChanges": [{"text": text}]}})
+    edits = c.request("textDocument/formatting", {"textDocument": {"uri": uri}, "options": {"tabSize": 4, "insertSpaces": True}})
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 903}, "contentChanges": [{"text": MAIN}]}})
+    assert edits == []
+
+
 
 def test_fix_all_on_save(lsp):
     # codeActionsOnSave: source.fixAll is answered by byname with ruff's safe fixes, as for a .py
