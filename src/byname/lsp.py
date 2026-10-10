@@ -168,13 +168,25 @@ def call_after_comma(src: str, cursor: int) -> int | None:
 
 
 RECORD_TARGET_RE = re.compile(r"^\s*[A-Za-z_][\w.]*\s*:(?P<annotation>[^=]+)=\s*$")
+ARGUMENT_RE = re.compile(r"(?:[(,]|[A-Za-z_]\w*\s*=)\s*$")  # what comes before an argument: `f(`, `, `, `name=`
 RECORD_ITEM_RE = re.compile(r"^\s*(\*\*\s*[\w.]+|[A-Za-z_]\w*\s*=.*)\s*$", re.DOTALL)
 
 
 def record_type_slot(src: str, cursor: int) -> tuple[int, int, str, int, int, set[str]] | None:
-    """(the `(`, its `)`, the annotation, word start, word end, the fields given) if `cursor` is at a field position of a record literal
-    that is the whole value of an annotated assignment, `user: User = (name=, |)`; else None. Every other
-    item must be `name=...` or `**spread`, so a parenthesized expression is left alone."""
+    """(the `(`, its `)`, the annotation, word start, word end, the fields given) if `cursor` is at a field position
+    of a record literal that is the whole value of an annotated assignment, `user: User = (name=, |)`; else None."""
+    if (lit := record_literal_slot(src, cursor)) is None:
+        return None
+    k, close, ws, we, given = lit
+    if (m := RECORD_TARGET_RE.match(src[src.rfind("\n", 0, k) + 1 : k])) is None:
+        return None
+    return k, close, m["annotation"].strip(), ws, we, given
+
+
+def record_literal_slot(src: str, cursor: int) -> tuple[int, int, int, int, set[str]] | None:
+    """(the `(`, its `)`, word start, word end, the fields given) if `cursor` is at a field position of a record
+    literal, `(name=, |)`; else None. Every other item must be `name=...` or `**spread`, so a parenthesized
+    expression is left alone."""
     ws = cursor
     while ws > 0 and (src[ws - 1].isalnum() or src[ws - 1] == "_"):
         ws -= 1
@@ -194,9 +206,6 @@ def record_type_slot(src: str, cursor: int) -> tuple[int, int, str, int, int, se
     else:
         return None
     if src[k] != "(":
-        return None
-    m = RECORD_TARGET_RE.match(src[src.rfind("\n", 0, k) + 1 : k])
-    if m is None:
         return None
     depth, close = 0, None
     for j in range(k + 1, len(src)):
@@ -232,7 +241,23 @@ def record_type_slot(src: str, cursor: int) -> tuple[int, int, str, int, int, se
             return None
         elif "=" in it:
             given.add(it.split("=", 1)[0].strip())
-    return k, close, m["annotation"].strip(), ws, we, given
+    return k, close, ws, we, given
+
+
+def parameter_type(help: dict | None) -> str | None:
+    """The active parameter's type in a signatureHelp result, written as byname: `schedule: T = d` -> T."""
+    sigs = (help or {}).get("signatures") or []
+    if not sigs:
+        return None
+    sig = sigs[min(help.get("activeSignature") or 0, len(sigs) - 1)]
+    active, params = sig.get("activeParameter", help.get("activeParameter")), sig.get("parameters") or []
+    if not isinstance(active, int) or not 0 <= active < len(params):
+        return None
+    label = params[active].get("label")
+    if isinstance(label, list):
+        label = sig.get("label", "")[label[0] : label[1]]
+    _, colon, written = label.partition(": ")
+    return pretty(written.split(" = ", 1)[0].strip()) if colon else None
 
 
 def pretty(text: str) -> str:
@@ -1011,9 +1036,11 @@ class Proxy:
                 self.pending[mid] = ("after_comma", (doc, params["position"]))
                 self.send_server({**msg, "params": self.to_checker(at_paren, doc)})
                 return True
-            if (rec := record_type_slot(tr.source, cursor)) is not None and self.complete_record_type(
-                msg, key, doc, rec
-            ):
+            rec = record_type_slot(tr.source, cursor)
+            if rec is not None and self.complete_record_type(msg, key, doc, rec):
+                return True
+            lit = record_literal_slot(tr.source, cursor)
+            if lit and ARGUMENT_RE.search(tr.source[: lit[0]]) and self.ask_record_argument(msg, key, doc, lit):
                 return True
             if ctx.get("triggerKind") == 2 and ctx.get("triggerCharacter") in self.own_triggers:
                 self.client.send({"jsonrpc": "2.0", "id": mid, "result": {"isIncomplete": False, "items": []}})
@@ -1062,17 +1089,52 @@ class Proxy:
             hidden, h = hidden[: h - len(word)] + hidden[h:], h - len(word)
         self.send_text(key, hidden, None)
         rng = {"start": tr.src_lines.position(ws), "end": tr.src_lines.position(we)}
-        self.pending[msg["id"]] = ("record_type", (key, doc, rng, given))
+        self.pending[msg["id"]] = ("record_type", (msg, key, doc, rng, given))
         sent = {"textDocument": {"uri": self.editor_uri(key)}, "position": LineIndex(hidden).position(h)}
         self.send_server({**msg, "params": sent})
         return True
 
-    def finish_record_type(self, result, key: Path | str, doc: Doc, rng: dict, given: set[str]) -> dict:
-        """The fields not yet given, as `name=`; everything, if the type had none (not a record type)."""
+    def ask_record_argument(
+        self, msg: dict, key: Path | str, doc: Doc, lit: tuple[int, int, int, int, set[str]]
+    ) -> bool:
+        """Field names in `f(s, schedule=(|))`. With no annotation to read, the checker is first asked for the
+        signature there, `0` standing in for the literal; the parameter's type then serves as the annotation
+        (answer_record_argument)."""
+        k, close, ws, we, given = lit
+        src = doc.tr.source
+        ttr = Translation(src[:k] + "0" + src[close + 1 :])
+        if ttr.error is not None:
+            return False
+        h = ttr._to_hidden(k + 1, False, touch=True)
+        self.send_text(key, ttr.hidden, None)
+        sid = f"byname-signature-{msg['id']}"
+        self.pending[sid] = ("record_argument", (msg, key, doc, lit))
+        position = LineIndex(ttr.hidden).position(h)
+        params = {"textDocument": {"uri": self.editor_uri(key)}, "position": position}
+        self.send_server({"jsonrpc": "2.0", "id": sid, "method": "textDocument/signatureHelp", "params": params})
+        return True
+
+    def answer_record_argument(self, help, msg: dict, key: Path | str, doc: Doc, lit: tuple) -> None:
+        """Completes the fields of the parameter's type; not in a call or no parameter there, plain completion."""
+        k, close, ws, we, given = lit
+        written = parameter_type(help)
+        if written and self.complete_record_type(msg, key, doc, (k, close, written, ws, we, given)):
+            return
+        latest = self.docs.get(key, [doc])[-1]
+        self.send_text(key, latest.tr.hidden, latest)  # restore the real text
+        self.complete_plainly(msg, doc)
+
+    def complete_plainly(self, msg: dict, doc: Doc) -> None:
+        """The checker's own completion at the editor's position, on the real text."""
+        self.pending[msg["id"]] = (msg["method"], doc)
+        self.send_server({**msg, "params": self.to_checker(msg["params"], doc)})
+
+    def finish_record_type(self, result, key: Path | str, doc: Doc, rng: dict, given: set[str]) -> dict | None:
+        """The fields not yet given, as `name=`; None if the type had none (not a record type)."""
         out = self.finish_slot(result, key, doc, rng, set())
         fields = [it for it in out["items"] if it.get("kind") == CONSTANT]
         if not fields:
-            return out
+            return None
         items = [
             {
                 **it,
@@ -1317,8 +1379,14 @@ class Proxy:
                 self.client.send({**msg, "result": self.finish_slot(msg.get("result"), key, doc, rng, listed)})
                 return
             if method_doc and method_doc[0] == "record_type":
-                key, doc, rng, given = method_doc[1]
-                self.client.send({**msg, "result": self.finish_record_type(msg.get("result"), key, doc, rng, given)})
+                asked, key, doc, rng, given = method_doc[1]
+                if (out := self.finish_record_type(msg.get("result"), key, doc, rng, given)) is None:
+                    self.complete_plainly(asked, doc)
+                else:
+                    self.client.send({**msg, "result": out})
+                return
+            if method_doc and method_doc[0] == "record_argument":
+                self.answer_record_argument(msg.get("result"), *method_doc[1])
                 return
             if method_doc and method_doc[0] == "after_comma":
                 doc, cursor = method_doc[1]

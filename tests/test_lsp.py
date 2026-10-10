@@ -692,6 +692,19 @@ def test_completion_in_an_annotated_record_literal_offers_the_types_fields(lsp):
     assert {i["label"] for i in items} == {"name=", "age=", "sex="}
     _, items = complete(c, uri, pre + "user: User = (name='x', |)\n")
     assert {i["label"] for i in items} == {"age=", "sex="}
+    # an argument: the fields of the parameter's record type, closed or open, named or written out
+    pre = MAIN + "type User = (name: str, age: int)\ndef f(n: int, *, u: User, o: (..., x: int, y: str)): ...\n"
+    _, items = complete(c, uri, pre + "f(1, u=(|))\n")
+    assert {i["label"] for i in items} == {"name=", "age="}
+    _, items = complete(c, uri, pre + "f(1, u=(name='x', |))\n")
+    assert {i["label"] for i in items} == {"age="}
+    _, items = complete(c, uri, pre + "f(1, u=(name='x'), o=(|))\n")
+    assert {i["label"] for i in items} == {"x=", "y="}
+    _, items = complete(c, uri, pre + "f((|), u=(name='x', age=1), o=(x=1, y=''))\n")
+    assert "print" in {i["label"] for i in items}  # an int parameter: not a record
+    # an annotation that isn't a record type: names in scope
+    _, items = complete(c, uri, pre + "n: int = (|)\n")
+    assert "print" in {i["label"] for i in items}
     # an ordinary parenthesized value is left alone: names in scope, not fields
     _, items = complete(c, uri, pre + "n: int = (1 + |)\n")
     assert "print" in {i["label"] for i in items}
