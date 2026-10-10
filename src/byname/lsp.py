@@ -294,22 +294,26 @@ def element_type(written: str, steps: list[tuple[str, int]]) -> str | None:
 
 def expected_value(written: str, steps: list[tuple[str, int | str]]) -> str | None:
     """An expression of the type expected at the end of `steps` in a value of type `written`, for the checker to
-    complete on: `_t.cast(T, None)`, T read off `written` up to the first field (element_type); a field's type
-    is the checker's to know (`(lead: User)` may be named `Team`), so from there on each step is an expression:
-    `.lead`, `next(iter(...))` for an item, `[i]` for a tuple's."""
-    n = next((j for j, (kind, _) in enumerate(steps) if kind == "field"), len(steps))
-    if not (written := element_type(written, steps[:n])):
-        return None
+    complete on: `_t.cast(T, None)`, T read off `written` while the steps can be (element_type, which keeps a
+    union's members that fit: `list[User] | None`). A field's type is the checker's to know (`(lead: User)` may be
+    named `Team`), as is an alias's (`type Users = list[User]`), so from the first step that can't be read off the
+    text each step is an expression: `.lead`, `next(iter(...))` for an item or what a generator yields, `[i]` for a
+    tuple's. A generator's return type has no expression: None."""
+    n = 0
+    while n < len(steps) and steps[n][0] != "field" and (inner := element_type(written, steps[n : n + 1])):
+        written, n = inner, n + 1
     value = f"_t.cast({written}, None)"
     for kind, i in steps[n:]:
         if kind == "field":
             value = f"{value}.{i}"
-        elif kind in ("item", "key"):
+        elif kind in ("item", "key", "yield"):
             value = f"next(iter({value}))"
         elif kind == "value":
             value = f"next(iter({value}.values()))"
-        else:  # tuple
+        elif kind == "tuple":
             value = f"{value}[{i}]"
+        else:  # a generator's return
+            return None
     return value
 
 
