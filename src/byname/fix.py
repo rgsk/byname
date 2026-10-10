@@ -59,7 +59,17 @@ def fix_pyn(src: str, filename: str = "file.pyn", cwd: Path | None = None, selec
         if tr.error is not None:
             raise FixError(f"can't translate: {tr.error}")
         p = subprocess.run(
-            [resolve("ruff"), "check", *(select or []), "--output-format", "json", "--exit-zero", "--stdin-filename", str(Path(filename).with_suffix(".py")), "-"],
+            [
+                resolve("ruff"),
+                "check",
+                *(select or []),
+                "--output-format",
+                "json",
+                "--exit-zero",
+                "--stdin-filename",
+                str(Path(filename).with_suffix(".py")),
+                "-",
+            ],
             input=tr.hidden,
             capture_output=True,
             text=True,
@@ -84,7 +94,13 @@ def fix_pyn(src: str, filename: str = "file.pyn", cwd: Path | None = None, selec
     return regrid_imports(original, src) if src != original else src
 
 
-def fix_notebook(cells: list[str], byname: bool, filename: str = "notebook.ipynb", cwd: Path | None = None, select: list[str] | None = None) -> list[str]:
+def fix_notebook(
+    cells: list[str],
+    byname: bool,
+    filename: str = "notebook.ipynb",
+    cwd: Path | None = None,
+    select: list[str] | None = None,
+) -> list[str]:
     """A notebook's code cells with Ruff's safe fixes applied, Ruff seeing the whole notebook: an import
     used in a later cell isn't unused. byname: the cells are .pyn (`%load_ext byname`), so Ruff checks each
     one's translation and only edits on text the user wrote are kept, as in fix_pyn. Ruff reports each
@@ -96,11 +112,26 @@ def fix_notebook(cells: list[str], byname: bool, filename: str = "notebook.ipynb
             raise FixError(f"can't translate: {bad}")
         sources = [tr.hidden if tr is not None else c for tr, c in zip(trs, cells)]
         nb = {
-            "cells": [{"cell_type": "code", "metadata": {}, "source": s, "outputs": [], "execution_count": None} for s in sources],
-            "metadata": {"language_info": {"name": "python"}}, "nbformat": 4, "nbformat_minor": 5,
+            "cells": [
+                {"cell_type": "code", "metadata": {}, "source": s, "outputs": [], "execution_count": None}
+                for s in sources
+            ],
+            "metadata": {"language_info": {"name": "python"}},
+            "nbformat": 4,
+            "nbformat_minor": 5,
         }
         p = subprocess.run(
-            [resolve("ruff"), "check", *(select or []), "--output-format", "json", "--exit-zero", "--stdin-filename", str(Path(filename).with_suffix(".ipynb")), "-"],
+            [
+                resolve("ruff"),
+                "check",
+                *(select or []),
+                "--output-format",
+                "json",
+                "--exit-zero",
+                "--stdin-filename",
+                str(Path(filename).with_suffix(".ipynb")),
+                "-",
+            ],
             input=json.dumps(nb),
             capture_output=True,
             text=True,
@@ -118,7 +149,14 @@ def fix_notebook(cells: list[str], byname: bool, filename: str = "notebook.ipynb
                 mine = source_edits(trs[k], fix)
             else:
                 starts = char_offsets(cells[k])
-                mine = [(starts[e["location"]["row"] - 1] + e["location"]["column"] - 1, starts[e["end_location"]["row"] - 1] + e["end_location"]["column"] - 1, e["content"]) for e in fix["edits"]]
+                mine = [
+                    (
+                        starts[e["location"]["row"] - 1] + e["location"]["column"] - 1,
+                        starts[e["end_location"]["row"] - 1] + e["end_location"]["column"] - 1,
+                        e["content"],
+                    )
+                    for e in fix["edits"]
+                ]
             taken = edits[k]
             if mine and not any(s < e2 and s2 < e or s == s2 for s, e, _ in mine for s2, e2, _ in taken):
                 taken += mine

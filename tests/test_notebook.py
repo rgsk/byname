@@ -21,7 +21,9 @@ def run(shell, cell: str):
 
 
 def test_cells_after_load_ext_are_pyn_and_share_records(shell):
-    run(shell, "def make(*, name: str, age: int):\n    return (name=, age=)\nname, age = 'r', 26\nr = make(name=, age=)")
+    run(
+        shell, "def make(*, name: str, age: int):\n    return (name=, age=)\nname, age = 'r', 26\nr = make(name=, age=)"
+    )
     run(shell, "(age=years) = r")
     assert run(shell, "years") == 26
     # records built in different cells are different classes, but equal by name and value

@@ -41,7 +41,7 @@ def test_hidden_has_prelude_and_translation():
     lines = t.hidden.splitlines()
     assert "from typing import NamedTuple as _NT" in lines
     assert "    class _rec_name__age[T0, T1](_NT):" in lines
-    assert "_ds = make(name=\"R\", age=1); who = _ds.name; age = _ds.age" in t.hidden
+    assert '_ds = make(name="R", age=1); who = _ds.name; age = _ds.age' in t.hidden
 
 
 # --- source -> hidden: where requests (hover, completion) land ----------------

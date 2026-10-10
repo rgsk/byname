@@ -193,7 +193,8 @@ def test_reading_by_position_raises_at_runtime_too():
 def test_records_have_no_order():
     with pytest.raises(TypeError, match="'<' not supported"):
         sorted([(name="rahul", age=26), (name="tasha", age=22)])  # pyright: ignore[reportArgumentType]
-    assert min([(name="rahul", age=26), (name="tasha", age=22)], key=lambda u: u.age).name == "tasha"  # order by a field
+    # order by a field
+    assert min([(name="rahul", age=26), (name="tasha", age=22)], key=lambda u: u.age).name == "tasha"
 
 
 def test_in_asks_for_a_field_name_like_a_dict(tmp_path):
@@ -393,7 +394,10 @@ def test_a_for_loop_destructures_each_record():
 
 
 def test_the_loop_reads_fields_through_a_generator():
-    assert transform("for (name=, age=years) in people: pass").body == "for (name, years) in ((_ds.name, _ds.age) for _ds in people): pass"
+    assert (
+        transform("for (name=, age=years) in people: pass").body
+        == "for (name, years) in ((_ds.name, _ds.age) for _ds in people): pass"
+    )
 
 
 def test_comprehensions_destructure_the_same_way():
@@ -601,11 +605,14 @@ def test_the_checker_infers_a_written_record_type(tmp_path):
         """,
         tmp_path,
     )
-    assert verdicts == {
-        11: 'Type of "depth" is "(n: int) -> ((d: int) | (d: int | Unknown))"',  # inference can't see through the recursive call
-        12: 'Type of "depth_typed" is "(n: int) -> (d: int)"',
-        13: 'Type of "depth_typed(3).d" is "int"',
-    }
+    assert (
+        verdicts
+        == {
+            11: 'Type of "depth" is "(n: int) -> ((d: int) | (d: int | Unknown))"',  # inference can't see through the recursive call
+            12: 'Type of "depth_typed" is "(n: int) -> (d: int)"',
+            13: 'Type of "depth_typed(3).d" is "int"',
+        }
+    )
 
 
 # 7. PARAMETERS: give the parameter a name, destructure it in the body
@@ -637,12 +644,16 @@ def test_a_parameter_is_destructured_first_in_the_body():
     ],
 )
 def test_a_pattern_in_a_signature_is_an_error(src):
-    with pytest.raises(SyntaxError, match=r"can't destructure a parameter: give it a name and destructure it in the body"):
+    with pytest.raises(
+        SyntaxError, match=r"can't destructure a parameter: give it a name and destructure it in the body"
+    ):
         transform(src)
 
 
 def test_shorthand_in_a_default_is_still_an_error():
-    with pytest.raises(SyntaxError, match=r"name= in a parameter's default would take the outer 'name': write name=name"):
+    with pytest.raises(
+        SyntaxError, match=r"name= in a parameter's default would take the outer 'name': write name=name"
+    ):
         transform("def welcome(user=(name=)): ...")
 
 
@@ -907,7 +918,9 @@ def test_shorthand_is_for_call_sites_not_def_signatures():
 
 def test_destructuring_reads_attributes_so_a_dict_does_not_destructure(tmp_path):
     src = '(name=) = {"name": "rahul"}\n'
-    assert checker(src, tmp_path) == {1: 'Cannot access attribute "name" for class "dict[str, str]"\nAttribute "name" is unknown (reportAttributeAccessIssue)'}
+    assert checker(src, tmp_path) == {
+        1: 'Cannot access attribute "name" for class "dict[str, str]"\nAttribute "name" is unknown (reportAttributeAccessIssue)'
+    }
     with pytest.raises(AttributeError, match="'dict' object has no attribute 'name'"):
         exec(to_code(src, "x.pyn"), {})  # noqa: S102 -- running the rejected line
 
@@ -955,7 +968,8 @@ def test_a_spread_record_picks_the_overload_that_takes_a_record(tmp_path):
         """,
         tmp_path,
     )
-    assert verdicts[9].endswith('is "str"')  # the Contact overload; the quoted call is generated code, see open_issues.md
+    # the Contact overload; the quoted call is generated code, see open_issues.md
+    assert verdicts[9].endswith('is "str"')
 
 
 # Records can't be told apart at runtime, so `isinstance` can't narrow a union of them, and neither can `in`
@@ -1089,8 +1103,7 @@ def test_record_names_every_bad_field_at_once():
     with pytest.raises(TypeError) as e:
         record(ModelConfig, saved)
     assert str(e.value) == (
-        "ModelConfig: field 'n_layer': expected int, got str ('4'); "
-        "missing field 'dropout'; unexpected field 'dropuot'"
+        "ModelConfig: field 'n_layer': expected int, got str ('4'); missing field 'dropout'; unexpected field 'dropuot'"
     )
 
 

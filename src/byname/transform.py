@@ -27,7 +27,8 @@ import tokenize
 from dataclasses import dataclass, field
 
 DS = "_ds"
-SHORT, PAT, TYP = "__p", "__P", "__T"  # formatting stand-ins: `x=` -> `x=__p`, record `(` -> `__P(`, pattern -> `__P[...]`, record type -> `__T[...]`
+# formatting stand-ins: `x=` -> `x=__p`, record `(` -> `__P(`, pattern -> `__P[...]`, record type -> `__T[...]`
+SHORT, PAT, TYP = "__p", "__P", "__T"
 REPR = "_byname_repr"
 ORDER = "_byname_order"  # a record class's fields in the order written; `_fields` is the sorted storage order
 PRELUDE = (
@@ -175,9 +176,11 @@ class Result:
     body: str
     edits: list[Edit] = field(default_factory=list)
     problems: list[tuple[int, int, str]] = field(default_factory=list)  # (start, end, message), tolerant mode
-    standins: list[tuple[int, int, str]] = field(default_factory=list)  # (start, end, text): plain-Python stand-ins, for formatting
+    # (start, end, text): plain-Python stand-ins, for formatting
+    standins: list[tuple[int, int, str]] = field(default_factory=list)
     fields: list[tuple[int, int]] = field(default_factory=list)  # source spans of record field names, for highlighting
-    labels: list[tuple[int, int]] = field(default_factory=list)  # source spans of walrus names labelling a returned tuple
+    # source spans of walrus names labelling a returned tuple
+    labels: list[tuple[int, int]] = field(default_factory=list)
 
 
 def field_error(name: str) -> str:
@@ -374,7 +377,11 @@ def known_fields(body: str) -> dict[tuple[str, int], Known]:
     reads: list[tuple[str, int, _Scope, int]] = []  # name, line, scope, statement index
 
     def bind(
-        scope: _Scope, name: str, at: int, straight: bool, source: tuple[str, ast.expr] | None = None,
+        scope: _Scope,
+        name: str,
+        at: int,
+        straight: bool,
+        source: tuple[str, ast.expr] | None = None,
         where: tuple[_Scope, int] | None = None,
     ) -> None:
         if name in scope.globals:  # the module's name, rebound whenever the function runs
@@ -391,8 +398,13 @@ def known_fields(body: str) -> dict[tuple[str, int], Known]:
     def params(args: ast.arguments, scope: _Scope, inner: _Scope, at: int, straight: bool) -> None:
         for d in [*args.defaults, *(d for d in args.kw_defaults if d)]:
             visit(d, scope, at, straight)
-        for a in [*args.posonlyargs, *args.args, *([args.vararg] if args.vararg else []), *args.kwonlyargs,
-                  *([args.kwarg] if args.kwarg else [])]:
+        for a in [
+            *args.posonlyargs,
+            *args.args,
+            *([args.vararg] if args.vararg else []),
+            *args.kwonlyargs,
+            *([args.kwarg] if args.kwarg else []),
+        ]:
             if a.annotation is not None:
                 visit(a.annotation, scope, at, straight)
             source = ("type", a.annotation) if a.annotation is not None else None
@@ -507,8 +519,12 @@ def known_fields(body: str) -> dict[tuple[str, int], Known]:
         if isinstance(e, ast.Name):
             return resolve(e.id, scope, at)
         if (  # `rec._asdict()`: a dict with the record's fields
-            isinstance(e, ast.Call) and isinstance(e.func, ast.Attribute) and e.func.attr == "_asdict"
-            and isinstance(e.func.value, ast.Name) and not e.args and not e.keywords
+            isinstance(e, ast.Call)
+            and isinstance(e.func, ast.Attribute)
+            and e.func.attr == "_asdict"
+            and isinstance(e.func.value, ast.Name)
+            and not e.args
+            and not e.keywords
         ):
             got = resolve(e.func.value.id, scope, at)
             return Known(got.fields, is_dict=True) if got is not None and not got.is_dict else None
@@ -564,9 +580,7 @@ def transform(
     checker: the translation only type checkers see; works around their bugs (see KW_PRELUDE). Never run.
     known: fields of names read in the file, by (name, line) (known_fields); set by the checker translation's second pass."""
     toks = [
-        t
-        for t in tokenize.generate_tokens(io.StringIO(src).readline)
-        if t.type not in (tokenize.COMMENT, tokenize.NL)
+        t for t in tokenize.generate_tokens(io.StringIO(src).readline) if t.type not in (tokenize.COMMENT, tokenize.NL)
     ]
 
     # matching bracket for every opener (and back)
@@ -865,9 +879,16 @@ def transform(
             if eq is None:
                 continue
             for k in range(eq + 1, it[-1]):
-                if is_name(toks[k]) and toks[k + 1].string == "=" and toks[k + 2].string in (",", ")") and k + 1 in parent:
+                if (
+                    is_name(toks[k])
+                    and toks[k + 1].string == "="
+                    and toks[k + 2].string in (",", ")")
+                    and k + 1 in parent
+                ):
                     f = toks[k].string
-                    raise err(f"{f}= in a parameter's default would take the outer {f!r}: write {f}={f} to mean that", toks[k])
+                    raise err(
+                        f"{f}= in a parameter's default would take the outer {f!r}: write {f}={f} to mean that", toks[k]
+                    )
 
     def lambda_defaults() -> None:
         """no_default_shorthand for every `lambda`: its parameters run to the `:` at its own level."""
@@ -925,6 +946,7 @@ def transform(
                 while toks[k].type not in (tokenize.NEWLINE, tokenize.ENDMARKER):
                     k += 1
             bodies.append((j, k, annotated))
+
         def label(it: list[int]) -> str:
             # a bare name, or the name a walrus binds: `x := x.to(d)`, `(x := x.to(d))`
             if len(it) >= 3 and it[0] in pair and pair[it[0]] == it[-1]:
@@ -941,7 +963,12 @@ def transform(
 
         found: dict[tuple[str, ...], None] = {}
         for r, t in enumerate(toks):
-            if t.string != "return" or t.type != tokenize.NAME or toks[r - 1].string not in (";", ":") and toks[r - 1].type not in STMT_START:
+            if (
+                t.string != "return"
+                or t.type != tokenize.NAME
+                or toks[r - 1].string not in (";", ":")
+                and toks[r - 1].type not in STMT_START
+            ):
                 continue
             inside = [b for b in bodies if b[0] < r < b[1]]
             if not inside or max(inside)[2]:  # the innermost def, annotated: its annotation is what hover shows
@@ -1335,7 +1362,12 @@ def prelude_index(tree: ast.Module) -> int:
     """Index of the first statement after the docstring and __future__ imports."""
     i = 0
     body = tree.body
-    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
         i = 1
     while i < len(body) and isinstance(body[i], ast.ImportFrom) and body[i].module == "__future__":
         i += 1

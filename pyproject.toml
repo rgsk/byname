@@ -32,9 +32,8 @@ dev = [
 ]
 
 [tool.ruff]
-# ruff can't turn wrapping off; 320 is its maximum, so lines are never split for length.
-# Multi-line code stays multi-line only with a trailing comma (ruff's "magic trailing comma").
-line-length = 320
+line-length = 120
+extend-exclude = ["*.md"]  # README examples are laid out by hand
 
 [tool.basedpyright]
 # the editor (byname lsp) and `byname tool basedpyright` both read this; "recommended", basedpyright's

@@ -22,10 +22,13 @@ from .srcmap import Translation, generated
 
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 CONFIGS = {"pyproject.toml", "setup.cfg", "ruff.toml", ".ruff.toml", "pyrightconfig.json"}
-KEEP_IN_MIRROR = {".ruff_cache", "_abs"}  # tool caches survive between runs; so do the editor's .pyn from outside the project
+# tool caches survive between runs; so do the editor's .pyn from outside the project
+KEEP_IN_MIRROR = {".ruff_cache", "_abs"}
 LOCATION = re.compile(r"^(?P<pre>\s*)(?P<path>[^\s:]+\.py):(?P<line>\d+)(?::(?P<col>\d+))?(?P<rest>.*)$")
 # a notebook cell: ruff `nb.ipynb:cell 3:1:5` (counting every cell), basedpyright `nb.ipynb:3:1:5` (code cells)
-NB_LOCATION = re.compile(r"^(?P<pre>\s*)(?P<path>[^\s:]+\.ipynb):(?P<ruff>cell )?(?P<cell>\d+):(?P<line>\d+):(?P<col>\d+)(?P<rest>.*)$")
+NB_LOCATION = re.compile(
+    r"^(?P<pre>\s*)(?P<path>[^\s:]+\.ipynb):(?P<ruff>cell )?(?P<cell>\d+):(?P<line>\d+):(?P<col>\d+)(?P<rest>.*)$"
+)
 NB_HEADER = re.compile(r"^(?P<path>\S+\.ipynb)(?P<rest> - cell \d+)$")  # basedpyright's per-cell header
 # Ruff findings about how byname wrote its code, not about the user's: statements a translation puts on
 # one line (`(a=, b=) = r` is `_ds = r; a = _ds.a; b = _ds.b`), and anything naming byname's helpers
@@ -50,7 +53,9 @@ def resolve(cmd: str) -> str:
 
 def byname_cells(nb: dict) -> list[str] | None:
     """A notebook's cells' sources, or None unless a code cell loads byname."""
-    cells = ["".join(c["source"]) if isinstance(c.get("source"), list) else c.get("source", "") for c in nb.get("cells", [])]
+    cells = [
+        "".join(c["source"]) if isinstance(c.get("source"), list) else c.get("source", "") for c in nb.get("cells", [])
+    ]
     code = [src for c, src in zip(nb.get("cells", []), cells) if c.get("cell_type") == "code"]
     return cells if any(LOAD_EXT_RE.search(src) for src in code) else None
 
@@ -251,7 +256,11 @@ def only_grids(src: Path, mirrored: Path, out: Path, cache: dict) -> bool:
             if src.suffix == ".ipynb":
                 nb = json.loads(text)
                 byname = byname_cells(nb) is not None
-                cells = ["".join(c["source"]) if isinstance(c.get("source"), list) else c.get("source", "") for c in nb.get("cells", []) if c.get("cell_type") == "code"]
+                cells = [
+                    "".join(c["source"]) if isinstance(c.get("source"), list) else c.get("source", "")
+                    for c in nb.get("cells", [])
+                    if c.get("cell_type") == "code"
+                ]
                 same = fix_notebook(cells, byname, str(mirrored), out, select=ORGANIZE) == cells
             else:
                 same = fix_pyn(text, str(mirrored), out, select=ORGANIZE) == text
@@ -378,7 +387,9 @@ def recount(lines: list[str], located: list[str]) -> list[str]:
                 out.append(f"[*] {fixable} fixable with the `--fix` option.")
         elif re.match(r"\d+ errors?, \d+ warnings?, \d+ notes?", text):
             n = {k: sum(f" - {k}:" in loc for loc in located) for k in ("error", "warning", "information")}
-            out.append(f"{plural(n['error'], 'error')}, {plural(n['warning'], 'warning')}, {plural(n['information'], 'note')}")
+            out.append(
+                f"{plural(n['error'], 'error')}, {plural(n['warning'], 'warning')}, {plural(n['information'], 'note')}"
+            )
         else:
             out.append(ln)
     return out

@@ -227,8 +227,13 @@ def regrid_imports(before: str, after: str) -> str:
     except (tokenize.TokenError, SyntaxError):
         return after
     pair = _pairs(toks)
-    tags = [(o, counts[m], False) for o, c in pair.items()
-            if toks[c].start[0] != toks[o].start[0] and (m := _import_from(toks, o)) in counts and toks[o + 1].type == tokenize.NL]
+    tags = [
+        (o, counts[m], False)
+        for o, c in pair.items()
+        if toks[c].start[0] != toks[o].start[0]
+        and (m := _import_from(toks, o)) in counts
+        and toks[o + 1].type == tokenize.NL
+    ]
     return ungrid(_tag(after, toks, tags)) if tags else after
 
 
@@ -271,9 +276,15 @@ def format_pyn(src: str, filename: str = "file.pyn", cwd: Path | None = None) ->
     code = encode(grid(src))
     p = subprocess.run(
         [resolve("ruff"), "format", "--stdin-filename", str(Path(filename).with_suffix(".py")), "-"],
-        input=code, capture_output=True, text=True, cwd=cwd, check=False,
+        input=code,
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        check=False,
     )
     if p.returncode != 0:
         err = p.stderr.strip()
-        raise (UnparsableError if err.startswith("error: Failed to parse") else FormatError)(err or "ruff format failed")
+        raise (UnparsableError if err.startswith("error: Failed to parse") else FormatError)(
+            err or "ruff format failed"
+        )
     return ungrid(decode(p.stdout))

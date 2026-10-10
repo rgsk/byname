@@ -66,7 +66,8 @@ def test_record_prints_like_its_literal():
 
 def test_records_with_same_fields_share_one_class():
     r = transform("x = (a=, b=)\ny = (a=1, b=2)\n")
-    assert r.prelude.count("class _rec_") == r.prelude.count("def _rec_") == 1  # the runtime class, the checkers' version
+    # the runtime class, the checkers' version
+    assert r.prelude.count("class _rec_") == r.prelude.count("def _rec_") == 1
 
 
 def test_destructure_binds_fields_by_name():
@@ -164,10 +165,7 @@ def test_nested_pattern_reads_through_the_outer_field():
 
 
 def test_nested_pattern_runs_at_any_depth():
-    src = (
-        "r = (id=1, user=(name='Rahul', home=(city='Pune',)))\n"
-        "(id=, user=(name=, home=(city=c))) = r\n"
-    )
+    src = "r = (id=1, user=(name='Rahul', home=(city='Pune',)))\n(id=, user=(name=, home=(city=c))) = r\n"
     ns = {}
     exec(compile_pyn(src), ns)
     assert (ns["id"], ns["name"], ns["c"]) == (1, "Rahul", "Pune")
@@ -195,6 +193,7 @@ def test_nested_half_typed_item_reads_through_the_chain():
 def test_nested_field_spans_cover_inner_names():
     src = "(user=(name=)) = r\n"
     assert [src[a:b] for a, b in transform(src).fields] == ["user", "name"]
+
 
 # --- for-loop targets ---------------------------------------------------------
 
@@ -265,6 +264,7 @@ def test_for_target_half_typed_item_reads_the_field():
 def test_plain_for_tuple_untouched():
     assert transform("for (a, b) in xs: pass\n").body == "for (a, b) in xs: pass\n"
 
+
 # --- errors ------------------------------------------------------------------
 
 
@@ -296,12 +296,12 @@ def test_tolerant_mode_turns_half_typed_item_into_attribute_access():
 @pytest.mark.parametrize(
     "src, expected",
     [
-        ("(greeting=greet, |) = r\n", ("", ["greeting"])),          # empty slot after a comma
-        ("(gree|) = r\n", ("gree", [])),                           # first item: plain Python so far
-        ("(age=, gr|) = r\n", ("gr", ["age"])),                     # bare name being typed
-        ("(gre|eting=g) = r\n", ("greeting", [])),                  # renaming the field of an item
-        ("for (age=, |) in rows:\n", ("", ["age"])),                # for-loop target
-        ("(id=, user=(name=, |)) = r\n", ("", ["name"])),           # nested group
+        ("(greeting=greet, |) = r\n", ("", ["greeting"])),  # empty slot after a comma
+        ("(gree|) = r\n", ("gree", [])),  # first item: plain Python so far
+        ("(age=, gr|) = r\n", ("gr", ["age"])),  # bare name being typed
+        ("(gre|eting=g) = r\n", ("greeting", [])),  # renaming the field of an item
+        ("for (age=, |) in rows:\n", ("", ["age"])),  # for-loop target
+        ("(id=, user=(name=, |)) = r\n", ("", ["name"])),  # nested group
     ],
 )
 def test_pattern_slot_finds_field_positions(src, expected):
@@ -316,11 +316,11 @@ def test_pattern_slot_finds_field_positions(src, expected):
     "src",
     [
         "(a=, b=x|) = r\n",  # on the target side of `=`
-        "fn(a=, |)\n",       # a call, not a pattern
-        "(a=, |)\n",         # a record literal, not a pattern
-        "x = (a=, |) = r\n", # not at statement start
+        "fn(a=, |)\n",  # a call, not a pattern
+        "(a=, |)\n",  # a record literal, not a pattern
+        "x = (a=, |) = r\n",  # not at statement start
         "for (a=, b=x|) in r:\n",  # target side, in a for
-        "(a=d[(|)]) = r\n",          # a bracket in a target, not a nested pattern
+        "(a=d[(|)]) = r\n",  # a bracket in a target, not a nested pattern
     ],
 )
 def test_pattern_slot_ignores_non_field_positions(src):
@@ -345,7 +345,11 @@ def test_duplicate_field_rejected():
 def test_to_python_puts_prelude_after_future_imports():
     src = '"""doc"""\nfrom __future__ import annotations\nx = (a=1)\n'
     out = to_python(src)
-    assert out.splitlines()[:3] == ['"""doc"""', "from __future__ import annotations", "from typing import NamedTuple as _NT"]
+    assert out.splitlines()[:3] == [
+        '"""doc"""',
+        "from __future__ import annotations",
+        "from typing import NamedTuple as _NT",
+    ]
 
 
 def test_output_files_read_records_by_name_only_too():
@@ -370,14 +374,9 @@ def test_a_returned_tuple_is_labelled_for_the_checker_only():
 
 def test_import_hook_runs_pyn_modules(tmp_path):
     (tmp_path / "people.pyn").write_text(
-        "def make(*, name: str, age: int):\n"
-        "    greeting = f'hi {name}'\n"
-        "    return (name=, age=, greeting=)\n"
+        "def make(*, name: str, age: int):\n    greeting = f'hi {name}'\n    return (name=, age=, greeting=)\n"
     )
-    (tmp_path / "main.py").write_text(
-        "import byname\n"
-        "exec(byname.to_code(open('app.pyn').read(), 'app.pyn'))\n"
-    )
+    (tmp_path / "main.py").write_text("import byname\nexec(byname.to_code(open('app.pyn').read(), 'app.pyn'))\n")
     (tmp_path / "app.pyn").write_text(
         "from people import make\n"
         "name, age = 'Rahul', 26\n"
@@ -394,7 +393,9 @@ def test_traceback_points_at_pyn_line(tmp_path):
     (tmp_path / "bad.pyn").write_text("x = (a=1)\n\n\nraise ValueError(x.a)\n")
     out = subprocess.run(
         [sys.executable, "-m", "byname", "run", "bad.pyn"],
-        cwd=tmp_path, capture_output=True, text=True,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
     )
     assert 'bad.pyn", line 4' in out.stderr
 
@@ -413,7 +414,8 @@ def test_divider_marks_where_the_users_code_starts():
     out = to_python("# my note\nx = (a=1)\n", divider="# ---- f.pyn ----")
     lines = out.splitlines()
     assert lines[lines.index("# ---- f.pyn ----") + 1] == "# my note"
-    assert to_python("x = 1\n", divider="# ---- f.pyn ----") == "# ---- f.pyn ----\nx = 1\n"  # no header: divider anyway
+    # no header: divider anyway
+    assert to_python("x = 1\n", divider="# ---- f.pyn ----") == "# ---- f.pyn ----\nx = 1\n"
 
 
 def test_output_files_run_on_old_pythons():
@@ -423,7 +425,10 @@ def test_output_files_run_on_old_pythons():
     # Output files get plain NamedTuple classes; the checker's translation keeps the generic ones.
     src = "def f(*, n: int):\n    return (n=, sq=n * n)\n(sq=) = f(n=3)\nprint(sq)\n"
     out = render(src, Path("f.pyn"))
-    assert "class _rec_n__sq(_NT):\n    n: object; sq: object; __class_getitem__ = classmethod(lambda cls, _: cls)\n" in out
+    assert (
+        "class _rec_n__sq(_NT):\n    n: object; sq: object; __class_getitem__ = classmethod(lambda cls, _: cls)\n"
+        in out
+    )
     ast.parse(out, feature_version=(3, 8))
     assert "class _rec_n__sq[T0, T1](_NT):" in to_python(src)
     with pytest.raises(SyntaxError):
@@ -512,23 +517,23 @@ def test_spread_records_of_known_names_are_plain_records():
     src = (
         "type T = (a: int, b: str)\n"
         "def f(c: T, d):\n"
-        "    x = (**c, z=1)\n"            # a parameter's record type
-        "    y = (**d, z=1)\n"            # no type: unknown
+        "    x = (**c, z=1)\n"  # a parameter's record type
+        "    y = (**d, z=1)\n"  # no type: unknown
         "t: T = (a=1, b='x')\n"
         "n = (**t,)\n"
-        "again = (**n, b='y')\n"          # a spread of a spread
+        "again = (**n, b='y')\n"  # a spread of a spread
         "w = (a=1,)\n"
-        "w1 = (**w,)\n"                  # the nearest binding before it
+        "w1 = (**w,)\n"  # the nearest binding before it
         "w = (a=1, b=2)\n"
         "w2 = (**w,)\n"
-        "w = (**w, c=3)\n"               # reads the `w` before it
+        "w = (**w, c=3)\n"  # reads the `w` before it
         "def g():\n"
-        "    return (**w,)\n"            # may run after any binding of `w`, and they differ: unknown
+        "    return (**w,)\n"  # may run after any binding of `w`, and they differ: unknown
         "if t.a:\n"
         "    w = (a=1,)\n"
-        "w3 = (**w,)\n"                  # the branch's `w` or the one before it, which differ: unknown
-        "k = [(**t,) for t in [w]]\n"    # the comprehension's `t`: unknown
-        "m = [(**t,) for _ in [w]]\n"    # the module's `t`, read there and then
+        "w3 = (**w,)\n"  # the branch's `w` or the one before it, which differ: unknown
+        "k = [(**t,) for t in [w]]\n"  # the comprehension's `t`: unknown
+        "m = [(**t,) for _ in [w]]\n"  # the module's `t`, read there and then
     )
     lines = transform(src, checker=True).body.splitlines()
     assert lines[2] == "    x = _rec_a__b__z(a=c.a, b=c.b, z=1)"
@@ -568,6 +573,7 @@ def test_spread_records_run_on_old_pythons():
     ast.parse(out, feature_version=(3, 8))
     p = subprocess.run([sys.executable, "-c", out], capture_output=True, text=True, check=True)
     assert p.stdout == "(age=26, name='mehak', sex='male', surname='gupta') gupta ('mehak', 26, 'male', 'gupta')\n"
+
 
 def test_record_type_annotation():
     # `(name: type, ...)` in an annotation is the record's type, written the way hover shows it.
@@ -617,7 +623,11 @@ def test_open_record_type_with_no_fields():
 
 
 def test_open_record_type_dots_go_first():
-    for src in ["def f(p: (age: int, ...)): ...\n", "def f(p: (..., a: int, ...)): ...\n", "x: (a: int, ..., b: int)\n"]:
+    for src in [
+        "def f(p: (age: int, ...)): ...\n",
+        "def f(p: (..., a: int, ...)): ...\n",
+        "x: (a: int, ..., b: int)\n",
+    ]:
         with pytest.raises(SyntaxError, match="`...` goes first in an open record type"):
             to_python(src)
 
@@ -703,10 +713,18 @@ def test_no_shorthand_in_parameter_defaults():
         # not f's parameter
         ("def f(name, g=lambda: h(name=)): pass\n", "name"),
     ]:
-        with pytest.raises(SyntaxError, match=rf"{field}= in a parameter's default would take the outer '{field}': write {field}={field}"):
+        with pytest.raises(
+            SyntaxError,
+            match=rf"{field}= in a parameter's default would take the outer '{field}': write {field}={field}",
+        ):
             transform(src)
     # shorthand in a body is the usual kind: it reads the name where the call runs
-    for src in ["f = lambda name: g(name=)\n", "h(key=lambda r: g(r=))\n", "def f(x=1, y=lambda: 2): return g(x=)\n", "f = lambda x=1: (x=)\n"]:
+    for src in [
+        "f = lambda name: g(name=)\n",
+        "h(key=lambda r: g(r=))\n",
+        "def f(x=1, y=lambda: 2): return g(x=)\n",
+        "f = lambda x=1: (x=)\n",
+    ]:
         transform(src)
 
 

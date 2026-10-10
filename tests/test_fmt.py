@@ -43,7 +43,7 @@ def test_spreads_format(tmp_path):
 
 def test_record_defaults_format(tmp_path):
     src = "def f(*,user=( name='x' ,age=1)):\n    pass\n"
-    want = "def f(*, user=(name=\"x\", age=1)):\n    pass\n"
+    want = 'def f(*, user=(name="x", age=1)):\n    pass\n'
     assert format_pyn(src, cwd=tmp_path) == want
     assert format_pyn(want, cwd=tmp_path) == want
 
@@ -59,7 +59,7 @@ def test_format_normalises_like_ruff(tmp_path):
 
 
 def test_long_pattern_splits_one_item_per_line(tmp_path):
-    # in an empty dir ruff uses its default 88 columns (byname's own pyproject sets 320)
+    # in an empty dir ruff uses its default 88 columns (byname's own pyproject sets 120)
     src = "(name=self.label, age=d['age'], greeting=self.greeting_value_that_is_long, extra=, more=) = make(name=)\n"
     assert format_pyn(src, cwd=tmp_path).splitlines()[:3] == ["(", "    name=self.label,", '    age=d["age"],']
 
@@ -93,9 +93,14 @@ def test_format_record_types(tmp_path):
 
 def test_grid_packs_to_the_first_lines_width(tmp_path):
     # the first line sets the most a line may hold; ruff alone would put one item per line
-    src = "s = [\n    1,2, 3,\n    4, 5, 6, 7, 8, 9,\n]\nf(\n    a, b, c,\n    d=jfljdskfsd, e=fdsljfsdklfd, g=, h=,\n)\n"
+    src = (
+        "s = [\n    1,2, 3,\n    4, 5, 6, 7, 8, 9,\n]\nf(\n    a, b, c,\n    d=jfljdskfsd, e=fdsljfsdklfd, g=, h=,\n)\n"
+    )
     out = format_pyn(src, cwd=tmp_path)
-    assert out == "s = [\n    1, 2, 3,\n    4, 5, 6,\n    7, 8, 9,\n]\nf(\n    a, b, c,\n    d=jfljdskfsd,\n    e=fdsljfsdklfd,\n    g=, h=,\n)\n"
+    assert (
+        out
+        == "s = [\n    1, 2, 3,\n    4, 5, 6,\n    7, 8, 9,\n]\nf(\n    a, b, c,\n    d=jfljdskfsd,\n    e=fdsljfsdklfd,\n    g=, h=,\n)\n"
+    )
     assert format_pyn(out, cwd=tmp_path) == out
 
 
@@ -118,7 +123,10 @@ def test_grid_from_items_right_after_the_bracket(tmp_path):
     # `[1, 2, 3,` : the items on the bracket line are the first line
     src = "s = [1, 2, 3,\n4, 5, 6, 7, 8, 9,]\nr = bfs(n, m, k,\n  start=(sr, sc), blocked=walls,)\n"
     out = format_pyn(src, cwd=tmp_path)
-    assert out == "s = [\n    1, 2, 3,\n    4, 5, 6,\n    7, 8, 9,\n]\nr = bfs(\n    n, m, k,\n    start=(sr, sc),\n    blocked=walls,\n)\n"
+    assert (
+        out
+        == "s = [\n    1, 2, 3,\n    4, 5, 6,\n    7, 8, 9,\n]\nr = bfs(\n    n, m, k,\n    start=(sr, sc),\n    blocked=walls,\n)\n"
+    )
     assert format_pyn(out, cwd=tmp_path) == out
 
 

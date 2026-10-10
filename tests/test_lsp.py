@@ -15,7 +15,8 @@ import pytest
 from byname.lsp import pretty, read_message
 
 pytestmark = pytest.mark.skipif(
-    not (Path(sys.executable).parent / "basedpyright-langserver").exists() and not shutil.which("basedpyright-langserver"),
+    not (Path(sys.executable).parent / "basedpyright-langserver").exists()
+    and not shutil.which("basedpyright-langserver"),
     reason="basedpyright not installed (uv sync --all-extras)",
 )
 
@@ -57,8 +58,12 @@ class Client:
     def __init__(self, root: Path, cache: Path, settings: dict | None = None):
         env = {"XDG_CACHE_HOME": str(cache), "PATH": str(Path(sys.executable).parent)}
         self.p = subprocess.Popen(
-            [sys.executable, "-m", "byname", "lsp"], cwd=root, env=env,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            [sys.executable, "-m", "byname", "lsp"],
+            cwd=root,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
         )
         self.q: queue.Queue = queue.Queue()
         self.next_id = 0
@@ -79,7 +84,9 @@ class Client:
         """Answer checker->editor requests; record diagnostics; return responses."""
         if "method" in msg and "id" in msg:  # server request
             if msg["method"] == "workspace/configuration":
-                self.send({"id": msg["id"], "result": [self.settings.get(i.get("section")) for i in msg["params"]["items"]]})
+                self.send(
+                    {"id": msg["id"], "result": [self.settings.get(i.get("section")) for i in msg["params"]["items"]]}
+                )
             else:
                 self.send({"id": msg["id"], "result": None})
         elif msg.get("method") == "textDocument/publishDiagnostics":
@@ -114,7 +121,13 @@ class Client:
     def initialize(self, root: Path, caps: dict, **opts):
         """As VS Code starts it: rootUri, rootPath and the workspace folder all given."""
         folders = [{"uri": root.as_uri(), "name": root.name}]
-        params = {"processId": None, "rootPath": str(root), "rootUri": root.as_uri(), "workspaceFolders": folders, "capabilities": caps}
+        params = {
+            "processId": None,
+            "rootPath": str(root),
+            "rootUri": root.as_uri(),
+            "workspaceFolders": folders,
+            "capabilities": caps,
+        }
         result = self.request("initialize", {**params, "initializationOptions": opts})
         self.send({"method": "initialized", "params": {}})
         return result
@@ -150,11 +163,23 @@ def lsp(tmp_path_factory):
     caps = {  # like VS Code: the checker asks us for settings, and we accept semantic tokens
         "workspace": {"configuration": True, "workspaceFolders": True},
         "notebookDocument": {"synchronization": {}},
-        "textDocument": {"semanticTokens": {"requests": {"full": {"delta": True}}, "tokenTypes": [], "tokenModifiers": [], "formats": ["relative"]}},
+        "textDocument": {
+            "semanticTokens": {
+                "requests": {"full": {"delta": True}},
+                "tokenTypes": [],
+                "tokenModifiers": [],
+                "formats": ["relative"],
+            }
+        },
     }
     c.init = c.initialize(root, caps)
     uri = (root / "main.pyn").as_uri()
-    c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": uri, "languageId": "pyn", "version": 1, "text": MAIN}}})
+    c.send(
+        {
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": uri, "languageId": "pyn", "version": 1, "text": MAIN}},
+        }
+    )
     yield c, root, uri
     c.close()
 
@@ -235,7 +260,12 @@ def test_definition_jumps_into_other_pyn(lsp):
 def test_completion_on_record_lists_fields(lsp):
     c, root, uri = lsp
     text = MAIN + "res.\n"
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": text}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": text}]},
+        }
+    )
     res = c.request("textDocument/completion", {"textDocument": {"uri": uri}, "position": pos(text, "res.\n", delta=4)})
     labels = {i["label"] for i in (res["items"] if isinstance(res, dict) else res)}
     assert {"name", "age", "greeting"} <= labels
@@ -244,7 +274,10 @@ def test_completion_on_record_lists_fields(lsp):
 def test_completion_hides_generated_names(lsp):
     c, root, uri = lsp
     text = MAIN + "res.\n"
-    res = c.request("textDocument/completion", {"textDocument": {"uri": uri}, "position": {"line": text.count("\n"), "character": 0}})
+    res = c.request(
+        "textDocument/completion",
+        {"textDocument": {"uri": uri}, "position": {"line": text.count("\n"), "character": 0}},
+    )
     labels = {i["label"] for i in (res["items"] if isinstance(res, dict) else res)}
     assert "greeting" in labels  # module-level names are offered...
     assert "_ds" not in labels and not any(l.startswith("_rec_") for l in labels)  # ...generated ones aren't
@@ -253,8 +286,10 @@ def test_completion_hides_generated_names(lsp):
 def test_definition_of_destructured_local_covers_the_word(lsp):
     # `greeting` was bound by `(greeting=, ...)`; the jump lands on that word, not a zero-width point
     c, root, uri = lsp
-    res = c.request("textDocument/definition", {"textDocument": {"uri": uri}, "position": pos(MAIN, "shout(greeting", delta=7)})
-    rng = (res[0].get("targetSelectionRange") or res[0]["range"])
+    res = c.request(
+        "textDocument/definition", {"textDocument": {"uri": uri}, "position": pos(MAIN, "shout(greeting", delta=7)}
+    )
+    rng = res[0].get("targetSelectionRange") or res[0]["range"]
     assert MAIN.splitlines()[rng["start"]["line"]].startswith("(greeting=, age=years)")
     assert snippet(MAIN, rng) == "greeting"
 
@@ -285,7 +320,7 @@ def test_a_project_config_decides_over_the_editors_settings(tmp_path):
     for name in ("a.py", "b.pyn"):
         uri = c.open(root / name)
         c.wait_diags(uri)
-        want = [(0, "Type \"Literal['a']\" is not assignable to declared type \"int\"")]
+        want = [(0, 'Type "Literal[\'a\']" is not assignable to declared type "int"')]
         assert wait_errors(c, uri, want) == want, name
     c.close()
 
@@ -324,7 +359,12 @@ def test_spread_names_and_fields_keep_their_colours(lsp):
     # text (variable colour, not dropped), and field names written next to it are record fields (property)
     c, root, uri = lsp
     text = "d = (a=1, b=2)\nx = (**d, c=3)\ny = (**load(), c=3)\n"
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 992}, "contentChanges": [{"text": text}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 992}, "contentChanges": [{"text": text}]},
+        }
+    )
     legend = c.init["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"]
     data = c.request("textDocument/semanticTokens/full", {"textDocument": {"uri": uri}})["data"]
     lines, line, col, got = text.splitlines(), 0, 0, {}
@@ -332,7 +372,12 @@ def test_spread_names_and_fields_keep_their_colours(lsp):
         dl, dc, length, typ, _ = data[i : i + 5]
         line, col = line + dl, (col + dc if dl == 0 else dc)
         got[(line, lines[line][col : col + length])] = legend[typ]
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 993}, "contentChanges": [{"text": MAIN}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 993}, "contentChanges": [{"text": MAIN}]},
+        }
+    )
     assert got.get((1, "d")) == "variable" and got.get((1, "c")) == "property", got
     assert got.get((2, "c")) == "property", got  # the generic path, for comparison
 
@@ -345,7 +390,12 @@ def test_pattern_labels_reading_methods_are_coloured_as_methods(lsp):
         "class Tok:\n    def __init__(self): self.n = 65\n    def encode(self, s: str) -> int: return 1\n"
         "    def decode(self, i: int) -> str: return ''\n(encode=, decode=renamed, n=) = Tok()\nr = (encode=)\n"
     )
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 994}, "contentChanges": [{"text": text}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 994}, "contentChanges": [{"text": text}]},
+        }
+    )
     legend = c.init["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"]
     data = c.request("textDocument/semanticTokens/full", {"textDocument": {"uri": uri}})["data"]
     lines, line, col, got = text.splitlines(), 0, 0, {}
@@ -353,7 +403,12 @@ def test_pattern_labels_reading_methods_are_coloured_as_methods(lsp):
         dl, dc, length, typ, _ = data[i : i + 5]
         line, col = line + dl, (col + dc if dl == 0 else dc)
         got[(line, lines[line][col : col + length])] = legend[typ]
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 995}, "contentChanges": [{"text": MAIN}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 995}, "contentChanges": [{"text": MAIN}]},
+        }
+    )
     assert got[(4, "encode")] == got[(4, "decode")] == "method" and got[(4, "renamed")] == "function", got
     assert got[(4, "n")] == "property", got
     assert got[(5, "encode")] == "function", got  # a record built from the local `encode`
@@ -364,7 +419,12 @@ def test_fields_read_through_record_types_look_like_record_fields(lsp):
     # field is static. Both must get the same token, or themes colour them differently
     c, root, uri = lsp
     text = "def f(p: (..., age: int), q: (age: int, name: str)) -> int:\n    return p.age + q.age\nr = (age=1, name='x')\nprint(r.age)\n"
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 990}, "contentChanges": [{"text": text}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 990}, "contentChanges": [{"text": text}]},
+        }
+    )
     legend = c.init["capabilities"]["semanticTokensProvider"]["legend"]
     data = c.request("textDocument/semanticTokens/full", {"textDocument": {"uri": uri}})["data"]
     lines, line, col, got = text.splitlines(), 0, 0, []
@@ -373,7 +433,12 @@ def test_fields_read_through_record_types_look_like_record_fields(lsp):
         line, col = line + dl, (col + dc if dl == 0 else dc)
         if lines[line][col : col + length] == "age" and line in (1, 3):
             got.append((legend["tokenTypes"][typ], mods))
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 991}, "contentChanges": [{"text": MAIN}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 991}, "contentChanges": [{"text": MAIN}]},
+        }
+    )
     assert len(got) == 3 and len(set(got)) == 1, got
 
 
@@ -389,6 +454,7 @@ def lines_of(res) -> list[tuple[str, int]]:
 
 def uri_path(uri: str) -> str:
     from byname.lsp import uri_to_path
+
     return str(uri_to_path(uri))
 
 
@@ -411,7 +477,12 @@ def test_completion_inside_pattern_offers_fields(lsp):
     # typing `gr` as a pattern item suggests the record's matching field; `greeting` replaces exactly `gr`
     c, root, uri = lsp
     text = MAIN + "(name=, gr) = res\n"
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 10}, "contentChanges": [{"text": text}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 10}, "contentChanges": [{"text": text}]},
+        }
+    )
     p = pos(text, "gr) = res", delta=2)
     res = c.request("textDocument/completion", {"textDocument": {"uri": uri}, "position": p})
     items = res["items"] if isinstance(res, dict) else res
@@ -430,7 +501,12 @@ def test_completion_inside_pattern_offers_fields(lsp):
 def complete(c, uri, text, marker="|"):
     at = text.index(marker)
     text = text.replace(marker, "")
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 100 + at}, "contentChanges": [{"text": text}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 100 + at}, "contentChanges": [{"text": text}]},
+        }
+    )
     p = {"line": text.count("\n", 0, at), "character": at - (text.rfind("\n", 0, at) + 1)}
     res = c.request("textDocument/completion", {"textDocument": {"uri": uri}, "position": p})
     return text, (res["items"] if isinstance(res, dict) else res)
@@ -440,7 +516,9 @@ def test_a_spread_record_completes_while_a_line_is_half_typed(lsp):
     # `print(b2.)` doesn't parse: the known names are still read from the rest of the file, so b2 keeps
     # its exact type and `b2.` offers its fields, not the editor's word list
     c, root, uri = lsp
-    _, items = complete(c, uri, "type User = (name: str, age: int)\nrec: User = (name='r', age=1)\nb2 = (**rec)\nprint(b2.|)\n")
+    _, items = complete(
+        c, uri, "type User = (name: str, age: int)\nrec: User = (name='r', age=1)\nb2 = (**rec)\nprint(b2.|)\n"
+    )
     assert {"name", "age"} <= {i["label"] for i in items}
 
 
@@ -484,7 +562,12 @@ def test_replace_completes_and_checks_fields(lsp):
     _, items = complete(c, uri, MAIN + "res._replace(|)\n")
     assert {"name=", "age=", "greeting="} <= {i["label"] for i in items}
     text = MAIN + "res._replace(nme='x')\ndef h(*, name: str): ...\nh(**res._asdict())\n"
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 900}, "contentChanges": [{"text": text}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 900}, "contentChanges": [{"text": text}]},
+        }
+    )
     end, msgs = time.time() + 60, []
     while time.time() < end and not any("nme" in m for m in msgs):  # skip diagnostics for the previous text
         c.diags.pop(uri, None)
@@ -497,18 +580,32 @@ def test_mixed_record_list_is_checked_in_the_editor(lsp):
     # basedpyright would infer list[Unknown] here and stay silent; the strict-inference comment keeps it typed
     c, root, uri = lsp
     text = MAIN + 'rs = [(name="a", age="90"), (name="b", age=23)]\nrs[0]._replace(nme="x")\n'
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 950}, "contentChanges": [{"text": text}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 950}, "contentChanges": [{"text": text}]},
+        }
+    )
     end, msgs = time.time() + 60, []
     while time.time() < end and not any("nme" in m for m in msgs):  # skip diagnostics for the previous text
         c.diags.pop(uri, None)
         msgs = [d["message"] for d in c.wait_diags(uri)]
     assert any('No parameter named "nme"' in m for m in msgs)
 
+
 def test_a_walrus_labelling_a_returned_tuple_is_not_called_unused(lsp):
     # `(x := ...)` in a return names a position (hover shows tuple[x: ..., y: ...]); nothing reads it after
     c, root, uri = lsp
-    text = MAIN + "def pair(a: int):\n    return (lo := a, hi := a + 1)\ndef other(a: int):\n    unused = a\n    return a\n"
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 960}, "contentChanges": [{"text": text}]}})
+    text = (
+        MAIN
+        + "def pair(a: int):\n    return (lo := a, hi := a + 1)\ndef other(a: int):\n    unused = a\n    return a\n"
+    )
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 960}, "contentChanges": [{"text": text}]},
+        }
+    )
     end, msgs = time.time() + 60, []
     while time.time() < end and not any('"unused"' in m for m in msgs):  # skip diagnostics for the previous text
         c.diags.pop(uri, None)
@@ -521,7 +618,12 @@ def test_explicit_record_type_errors_in_the_editor(lsp):
     # any field order is fine for an explicit type; an extra field is named plainly, not as _byname_fieldset
     c, root, uri = lsp
     text = MAIN + "type U = (name: str, age: int)\nok: U = (age=1, name='x')\nbad: U = (age=1, name='x', po=2)\n"
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 970}, "contentChanges": [{"text": text}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 970}, "contentChanges": [{"text": text}]},
+        }
+    )
     end, diags = time.time() + 60, []
     while time.time() < end and not any("po" in d["message"] for d in diags):  # skip diagnostics for the previous text
         c.diags.pop(uri, None)
@@ -537,7 +639,12 @@ def test_comma_trigger_only_inside_patterns_and_calls(lsp):
     c, root, uri = lsp
     assert "," in c.init["capabilities"]["completionProvider"]["triggerCharacters"]
     text = MAIN + "t = (1,)\n"
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 500}, "contentChanges": [{"text": text}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 500}, "contentChanges": [{"text": text}]},
+        }
+    )
     p = pos(text, "t = (1,", delta=7)
     ctx = {"triggerKind": 2, "triggerCharacter": ","}
     res = c.request("textDocument/completion", {"textDocument": {"uri": uri}, "position": p, "context": ctx})
@@ -556,7 +663,12 @@ def test_completion_right_after_a_comma_in_a_call_offers_the_unused_keywords(lsp
         assert all(i["textEdit"]["range"] == {"start": cursor, "end": cursor} for i in items)
     # popped by typing `,`: our own trigger character
     text = MAIN + "res._replace(name='x',)\n"
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 980}, "contentChanges": [{"text": text}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 980}, "contentChanges": [{"text": text}]},
+        }
+    )
     p = pos(text, "name='x',", delta=len("name='x',"))
     ctx = {"triggerKind": 2, "triggerCharacter": ","}
     res = c.request("textDocument/completion", {"textDocument": {"uri": uri}, "position": p, "context": ctx})
@@ -602,8 +714,15 @@ def test_format_document(lsp):
     c, root, uri = lsp
     assert c.init["capabilities"]["documentFormattingProvider"] is True
     text = MAIN.replace("res = make(name=, age=)", "res=make( name= ,age= )")
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 900}, "contentChanges": [{"text": text}]}})
-    edits = c.request("textDocument/formatting", {"textDocument": {"uri": uri}, "options": {"tabSize": 4, "insertSpaces": True}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 900}, "contentChanges": [{"text": text}]},
+        }
+    )
+    edits = c.request(
+        "textDocument/formatting", {"textDocument": {"uri": uri}, "options": {"tabSize": 4, "insertSpaces": True}}
+    )
     assert len(edits) == 1
     assert "res = make(name=, age=)\n" in edits[0]["newText"]
 
@@ -614,9 +733,24 @@ def test_formatting_code_that_does_not_translate_or_parse_offers_nothing(lsp):
     c, root, uri = lsp
     got = []
     for v, text in enumerate(["name = 1\ndef f(g=lambda v: (v=, name=name)): return g\n", "r = (a=1)\nprint(r.)\n"]):
-        c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 902 + v}, "contentChanges": [{"text": text}]}})
-        got.append(c.request("textDocument/formatting", {"textDocument": {"uri": uri}, "options": {"tabSize": 4, "insertSpaces": True}}))
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 909}, "contentChanges": [{"text": MAIN}]}})
+        c.send(
+            {
+                "method": "textDocument/didChange",
+                "params": {"textDocument": {"uri": uri, "version": 902 + v}, "contentChanges": [{"text": text}]},
+            }
+        )
+        got.append(
+            c.request(
+                "textDocument/formatting",
+                {"textDocument": {"uri": uri}, "options": {"tabSize": 4, "insertSpaces": True}},
+            )
+        )
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 909}, "contentChanges": [{"text": MAIN}]},
+        }
+    )
     assert got == [[], []]
 
 
@@ -624,22 +758,41 @@ def test_a_broken_byname_rule_shows_only_its_own_error(lsp):
     # the checker gets the raw .pyn then, so its `"(" was not closed` is noise
     c, root, uri = lsp
     text = "name = 1\ndef f(g=lambda v: (v=, name=name)): return g\n"
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 904}, "contentChanges": [{"text": text}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 904}, "contentChanges": [{"text": text}]},
+        }
+    )
     want = [(1, "v= in a parameter's default would take the outer 'v': write v=v to mean that")]
     got = wait_errors(c, uri, want)
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 905}, "contentChanges": [{"text": MAIN}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 905}, "contentChanges": [{"text": MAIN}]},
+        }
+    )
     assert got == want
 
 
 def test_a_pattern_in_a_signature_is_an_error(lsp):
     c, root, uri = lsp
     text = "type U = (name: str, age: int)\ndef f((name=, age=): U):\n    return name\n"
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 906}, "contentChanges": [{"text": text}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 906}, "contentChanges": [{"text": text}]},
+        }
+    )
     want = [(1, "can't destructure a parameter: give it a name and destructure it in the body")]
     got = wait_errors(c, uri, want)
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 907}, "contentChanges": [{"text": MAIN}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 907}, "contentChanges": [{"text": MAIN}]},
+        }
+    )
     assert got == want
-
 
 
 def test_fix_all_on_save(lsp):
@@ -647,20 +800,38 @@ def test_fix_all_on_save(lsp):
     c, root, uri = lsp
     assert "source.fixAll" in c.init["capabilities"]["codeActionProvider"]["codeActionKinds"]
     text = "from typing import List\n\n\ndef f(xs: List[int]):\n    n = len(xs)\n    return (n=, xs=)\n"
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 901}, "contentChanges": [{"text": text}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 901}, "contentChanges": [{"text": text}]},
+        }
+    )
     rng = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}
-    actions = c.request("textDocument/codeAction", {"textDocument": {"uri": uri}, "range": rng, "context": {"diagnostics": [], "only": ["source.fixAll"]}})
+    actions = c.request(
+        "textDocument/codeAction",
+        {"textDocument": {"uri": uri}, "range": rng, "context": {"diagnostics": [], "only": ["source.fixAll"]}},
+    )
     assert [a["kind"] for a in actions] == ["source.fixAll.byname"]
     new = actions[0]["edit"]["changes"][uri][0]["newText"]
     assert new == "\n\ndef f(xs: list[int]):\n    n = len(xs)\n    return (n=, xs=)\n"
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 902}, "contentChanges": [{"text": MAIN}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 902}, "contentChanges": [{"text": MAIN}]},
+        }
+    )
 
 
 def test_reading_a_record_by_position_offers_reading_it_by_name(lsp):
     # the error says how, and a quick fix rewrites the targets by field, matched in the order written
     c, root, uri = lsp
     text = MAIN + "def batch():\n    return (x=1, y=2)\nx, y = batch()\nfor a, _ in [batch()]: pass\n"
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 990}, "contentChanges": [{"text": text}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 990}, "contentChanges": [{"text": text}]},
+        }
+    )
     last = text.count("\n") - 1
     end, mine = time.time() + 60, []
     while time.time() < end and len(mine) < 2:  # skip diagnostics for the previous text
@@ -669,11 +840,23 @@ def test_reading_a_record_by_position_offers_reading_it_by_name(lsp):
     assert all("records are read by name: (x=, y=)" in d["message"] for d in mine)
     fixes = []
     for d in sorted(mine, key=lambda d: d["range"]["start"]["line"]):
-        actions = c.request("textDocument/codeAction", {"textDocument": {"uri": uri}, "range": d["range"], "context": {"diagnostics": [d]}})
-        fixes += [(a["title"], a["edit"]["changes"][uri][0]) for a in actions if a.get("kind") == "quickfix" and a["title"].startswith("Read by name")]
+        actions = c.request(
+            "textDocument/codeAction",
+            {"textDocument": {"uri": uri}, "range": d["range"], "context": {"diagnostics": [d]}},
+        )
+        fixes += [
+            (a["title"], a["edit"]["changes"][uri][0])
+            for a in actions
+            if a.get("kind") == "quickfix" and a["title"].startswith("Read by name")
+        ]
     assert [t for t, _ in fixes] == ["Read by name: (x=, y=)", "Read by name: (x=a)"]
     assert [snippet(text, e["range"]) for _, e in fixes] == ["x, y", "a, _"]
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 991}, "contentChanges": [{"text": MAIN}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 991}, "contentChanges": [{"text": MAIN}]},
+        }
+    )
 
 
 SOLUTION = """\
@@ -693,14 +876,25 @@ def start(tmp_path, caps=None, **opts):
     c = Client(root, tmp_path / "cache")
     c.initialize(root, caps or {"workspace": {"configuration": True, "workspaceFolders": True}}, **opts)
     uri = (root / "sol.pyn").as_uri()
-    c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": uri, "languageId": "pyn", "version": 1, "text": SOLUTION}}})
+    c.send(
+        {
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": uri, "languageId": "pyn", "version": 1, "text": SOLUTION}},
+        }
+    )
     return c, root, uri
 
 
 def save(c, uri, text, version):
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": version}, "contentChanges": [{"text": text}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": version}, "contentChanges": [{"text": text}]},
+        }
+    )
     c.send({"method": "textDocument/didSave", "params": {"textDocument": {"uri": uri}}})
-    c.request("textDocument/hover", {"textDocument": {"uri": uri}, "position": {"line": 0, "character": 0}})  # round trip: save handled
+    # round trip: save handled
+    c.request("textDocument/hover", {"textDocument": {"uri": uri}, "position": {"line": 0, "character": 0}})
 
 
 def test_output_on_save_off_by_default(tmp_path):
@@ -751,12 +945,20 @@ def drain(c, seconds):
 def test_diagnostics_on_save_holds_them_while_typing(tmp_path):
     # diagnosticsOnSave: an error typed in shows up only once the file is saved
     # VS Code offers pull diagnostics, which the checker would use instead of pushing
-    caps = {"workspace": {"configuration": True, "diagnostics": {"refreshSupport": True}}, "textDocument": {"diagnostic": {"dynamicRegistration": True}}}
+    caps = {
+        "workspace": {"configuration": True, "diagnostics": {"refreshSupport": True}},
+        "textDocument": {"diagnostic": {"dynamicRegistration": True}},
+    }
     c, root, uri = start(tmp_path, caps, diagnosticsOnSave=True)
     assert c.wait_diags(uri) == []  # the opened text counts as saved
     broken = SOLUTION + "print(nope)\n"
     c.diags.pop(uri)
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": broken}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": broken}]},
+        }
+    )
     drain(c, 3)
     assert c.diags.pop(uri, []) == []
     c.send({"method": "textDocument/didSave", "params": {"textDocument": {"uri": uri}}})
@@ -768,7 +970,15 @@ def test_diagnostics_while_typing_by_default(tmp_path):
     c, root, uri = start(tmp_path)
     c.wait_diags(uri)
     c.diags.pop(uri)
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": SOLUTION + "print(nope)\n"}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [{"text": SOLUTION + "print(nope)\n"}],
+            },
+        }
+    )
     assert any("nope" in d["message"] for d in c.wait_diags(uri))
     c.close()
 
@@ -781,7 +991,15 @@ def test_diagnostics_on_save_drops_fixed_errors_at_once(tmp_path):
     save(c, uri, SOLUTION + "print(nope)\n", 2)
     assert any("nope" in d["message"] for d in c.wait_diags(uri, timeout=10))
     c.diags.pop(uri)
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": uri, "version": 3}, "contentChanges": [{"text": SOLUTION + "print(other)\n"}]}})
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": uri, "version": 3},
+                "contentChanges": [{"text": SOLUTION + "print(other)\n"}],
+            },
+        }
+    )
     assert c.wait_diags(uri, timeout=10) == []  # nope is gone, other isn't shown yet
     c.diags.pop(uri)
     c.send({"method": "textDocument/didSave", "params": {"textDocument": {"uri": uri}}})
@@ -824,7 +1042,13 @@ def test_ordering_a_record_says_to_use_a_field():
     hint = "  records have no order: compare or sort by a field (key=lambda r: r.name)"
     assert explain_fields(raw) == raw.split("\n")[0] + "\n" + hint + " (reportArgumentType)"
     raw = 'Operator "<" not supported for types "_typ_age[int]" and "_typ_age[int]" (reportOperatorIssue)'
-    assert explain_fields(raw) == raw.removesuffix(" (reportOperatorIssue)") + "\n" + hint.replace("r.name", "r.age") + " (reportOperatorIssue)"
+    assert (
+        explain_fields(raw)
+        == raw.removesuffix(" (reportOperatorIssue)")
+        + "\n"
+        + hint.replace("r.name", "r.age")
+        + " (reportOperatorIssue)"
+    )
 
 
 # --- .py files and notebooks ---------------------------------------------------
@@ -835,7 +1059,12 @@ def test_py_files_go_to_the_checker_as_they_are(lsp):
     c, root, uri = lsp
     text = "from helpers import shout\n\nn: int = shout('a')\n"
     py = (root / "script.py").as_uri()
-    c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": py, "languageId": "python", "version": 1, "text": text}}})
+    c.send(
+        {
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": py, "languageId": "python", "version": 1, "text": text}},
+        }
+    )
     assert "(s: str) -> str" in hover_text(c, py, pos(text, "shout", 1))
     assert errors(c.wait_diags(py)) == [(2, 'Type "str" is not assignable to declared type "int"')]
 
@@ -849,21 +1078,44 @@ CELLS = [
 
 def open_notebook(c, root, name, cells):
     nb = (root / name).as_uri()
-    uris = [f"vscode-notebook-cell:{nb[len('file:'):]}#C{i}" for i in range(len(cells))]
-    c.send({"method": "notebookDocument/didOpen", "params": {
-        "notebookDocument": {"uri": nb, "notebookType": "jupyter-notebook", "version": 1, "cells": [{"kind": 2, "document": u} for u in uris]},
-        "cellTextDocuments": [{"uri": u, "languageId": "python", "version": 1, "text": t} for u, t in zip(uris, cells)],
-    }})
+    uris = [f"vscode-notebook-cell:{nb[len('file:') :]}#C{i}" for i in range(len(cells))]
+    c.send(
+        {
+            "method": "notebookDocument/didOpen",
+            "params": {
+                "notebookDocument": {
+                    "uri": nb,
+                    "notebookType": "jupyter-notebook",
+                    "version": 1,
+                    "cells": [{"kind": 2, "document": u} for u in uris],
+                },
+                "cellTextDocuments": [
+                    {"uri": u, "languageId": "python", "version": 1, "text": t} for u, t in zip(uris, cells)
+                ],
+            },
+        }
+    )
     return nb, uris
 
 
 def edit_cell(c, nb, uri, version, start, end, text):
     rng = {"start": {"line": start[0], "character": start[1]}, "end": {"line": end[0], "character": end[1]}}
     c.diags.pop(uri, None)
-    c.send({"method": "notebookDocument/didChange", "params": {
-        "notebookDocument": {"uri": nb, "version": version},
-        "change": {"cells": {"textContent": [{"document": {"uri": uri, "version": version}, "changes": [{"range": rng, "text": text}]}]}},
-    }})
+    c.send(
+        {
+            "method": "notebookDocument/didChange",
+            "params": {
+                "notebookDocument": {"uri": nb, "version": version},
+                "change": {
+                    "cells": {
+                        "textContent": [
+                            {"document": {"uri": uri, "version": version}, "changes": [{"range": rng, "text": text}]}
+                        ]
+                    }
+                },
+            },
+        }
+    )
 
 
 def wait_errors(c, uri, want, timeout=30) -> list[tuple[int, str]]:
@@ -917,7 +1169,9 @@ def test_loading_byname_in_a_cell_translates_the_notebook(lsp):
 
 
 def format_cell(c, uri) -> list:
-    return c.request("textDocument/formatting", {"textDocument": {"uri": uri}, "options": {"tabSize": 4, "insertSpaces": True}})
+    return c.request(
+        "textDocument/formatting", {"textDocument": {"uri": uri}, "options": {"tabSize": 4, "insertSpaces": True}}
+    )
 
 
 def organize_cell(c, uri, text) -> list:
@@ -931,9 +1185,12 @@ def test_notebook_cells_are_formatted(lsp):
     # byname formats notebooks (notebook.defaultFormatter): Ruff on each cell, through the translation in a
     # byname notebook, as it is in a plain one. A cell's last line keeps having no newline
     c, root, uri = lsp
-    nb, cells = open_notebook(c, root, "fmt.ipynb", ["%load_ext byname", "import sys\nimport os\nr=(a=os.sep,b= sys.argv)"])
+    nb, cells = open_notebook(
+        c, root, "fmt.ipynb", ["%load_ext byname", "import sys\nimport os\nr=(a=os.sep,b= sys.argv)"]
+    )
     assert [e["newText"] for e in format_cell(c, cells[1])] == ["import sys\nimport os\n\nr = (a=os.sep, b=sys.argv)"]
-    assert organize_cell(c, cells[1], "import sys\nimport os\nr=(a=os.sep,b= sys.argv)") == []  # the notebook-wide action does it
+    # the notebook-wide action does it
+    assert organize_cell(c, cells[1], "import sys\nimport os\nr=(a=os.sep,b= sys.argv)") == []
     assert format_cell(c, cells[0]) == []  # a magic: Ruff can't parse the cell alone, so it's left as it is
     nb, cells = open_notebook(c, root, "fmt_plain.ipynb", ["x=1"])
     assert [e["newText"] for e in format_cell(c, cells[0])] == ["x = 1"]
@@ -976,12 +1233,22 @@ def test_py_files_are_formatted_and_fixed_by_byname(lsp):
     c, root, uri = lsp
     text = "import sys\nimport os\nfrom typing import List\nx: List[int]=[1]\nprint(os.sep, x)\n"
     py = (root / "fixme.py").as_uri()
-    c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": py, "languageId": "python", "version": 1, "text": text}}})
-    assert [e["newText"] for e in format_cell(c, py)] == [text.replace("List\nx: List[int]=[1]", "List\n\nx: List[int] = [1]")]
+    c.send(
+        {
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": py, "languageId": "python", "version": 1, "text": text}},
+        }
+    )
+    assert [e["newText"] for e in format_cell(c, py)] == [
+        text.replace("List\nx: List[int]=[1]", "List\n\nx: List[int] = [1]")
+    ]
     rng = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}
     for kind, want in (
         ("source.fixAll", "import os\n\nx: list[int]=[1]\nprint(os.sep, x)\n"),
-        ("source.organizeImports", "import os\nimport sys\nfrom typing import List\n\nx: List[int]=[1]\nprint(os.sep, x)\n"),
+        (
+            "source.organizeImports",
+            "import os\nimport sys\nfrom typing import List\n\nx: List[int]=[1]\nprint(os.sep, x)\n",
+        ),
     ):
         ctx = {"diagnostics": [], "only": [kind], "triggerKind": 2}
         actions = c.request("textDocument/codeAction", {"textDocument": {"uri": py}, "range": rng, "context": ctx})
@@ -994,7 +1261,12 @@ def test_python_diagnostics_off_keeps_only_syntax_errors_and_hints(tmp_path):
     c, root, uri = start(tmp_path, pythonDiagnostics=False)
     py = (root / "x.py").as_uri()
     text = "import os\nx: int = 'a'\ndef f(:\n    pass\n"
-    c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": py, "languageId": "python", "version": 1, "text": text}}})
+    c.send(
+        {
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": py, "languageId": "python", "version": 1, "text": text}},
+        }
+    )
     end = time.time() + 30
     while not c.diags.get(py) and time.time() < end:  # the first publish can be the empty one before analysis
         c.diags.pop(py, None)
@@ -1003,7 +1275,12 @@ def test_python_diagnostics_off_keeps_only_syntax_errors_and_hints(tmp_path):
     assert {d.get("code") for d in diags} == {None, "reportUnusedImport"}
     assert not any(d.get("code") == "reportAssignmentType" for d in diags)
     bad = (root / "bad.pyn").as_uri()  # the same error in a .pyn is shown
-    c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": bad, "languageId": "pyn", "version": 1, "text": "x: int = 'a'\n"}}})
+    c.send(
+        {
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": bad, "languageId": "pyn", "version": 1, "text": "x: int = 'a'\n"}},
+        }
+    )
     assert [d.get("code") for d in c.wait_diags(bad)] == ["reportAssignmentType"]
     c.close()
 
@@ -1020,7 +1297,12 @@ def test_a_pyn_in_a_folder_made_after_startup_imports_its_neighbours(tmp_path):
     c.send({"method": "workspace/didChangeWatchedFiles", "params": {"changes": changes}})
     text = "from helper_py import a\nfrom helper_pyn import b\n\nprint(a(), b().x)\n"
     late = (root / "pkg" / "late.pyn").as_uri()
-    c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": late, "languageId": "pyn", "version": 1, "text": text}}})
+    c.send(
+        {
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": late, "languageId": "pyn", "version": 1, "text": text}},
+        }
+    )
     c.wait_diags(late)
     assert wait_errors(c, late, []) == []
     c.close()
@@ -1037,7 +1319,12 @@ def test_pyn_imports_pyn_with_a_project_config_as_vs_code_starts_it(tmp_path):
     c.initialize(root, {"workspace": {"configuration": True, "workspaceFolders": True}})
     text = "from people import make\n\nprint(make(name='a', age=1).nme)\n"
     uri = (root / "src" / "main.pyn").as_uri()
-    c.send({"method": "textDocument/didOpen", "params": {"textDocument": {"uri": uri, "languageId": "pyn", "version": 1, "text": text}}})
+    c.send(
+        {
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": uri, "languageId": "pyn", "version": 1, "text": text}},
+        }
+    )
     want = [(2, 'Cannot access attribute "nme" for class "(name: str, age: int, greeting: str)"')]
     c.wait_diags(uri)
     assert wait_errors(c, uri, want) == want
@@ -1089,8 +1376,12 @@ def test_a_pyn_is_checked_like_a_py_in_its_place(tmp_path):
         c.wait_diags(uri)
         assert wait_errors(c, uri, want) == want, name
         got[name] = sorted((d["range"]["start"]["line"], d.get("code"), d["message"]) for d in c.diags[uri])
-        res = c.request("textDocument/definition", {"textDocument": {"uri": uri}, "position": pos(PARITY, "to_be_imported", 1)})
-        assert [r.get("targetUri") or r["uri"] for r in res] == [(root / "src" / "records" / "fn_import_test.py").as_uri()], name
+        res = c.request(
+            "textDocument/definition", {"textDocument": {"uri": uri}, "position": pos(PARITY, "to_be_imported", 1)}
+        )
+        assert [r.get("targetUri") or r["uri"] for r in res] == [
+            (root / "src" / "records" / "fn_import_test.py").as_uri()
+        ], name
     assert got["tc.pyn"] == got["tc_py.py"]
     c.close()
 
@@ -1099,7 +1390,14 @@ def test_the_editor_and_byname_tool_agree(tmp_path):
     # Alt+L (`byname tool basedpyright`) and the editor check the same mirror: the same findings
     root = parity_project(tmp_path)
     env = {"XDG_CACHE_HOME": str(tmp_path / "cache"), "PATH": str(Path(sys.executable).parent)}
-    out = subprocess.run([sys.executable, "-m", "byname", "tool", "basedpyright", "src/records/tc.pyn"], cwd=root, env=env, capture_output=True, text=True, check=False).stdout
+    out = subprocess.run(
+        [sys.executable, "-m", "byname", "tool", "basedpyright", "src/records/tc.pyn"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
     found = [re.match(r"\s*src/records/tc\.pyn:(\d+):\d+ - error: (.*?)(?: \(\w+\))?$", ln) for ln in out.splitlines()]
     tool = [(int(m[1]) - 1, m[2]) for m in found if m]
     c = Client(root, tmp_path / "cache")
@@ -1129,13 +1427,31 @@ def test_a_deleted_pyn_is_gone_for_its_importers(tmp_path):
     # file events sync the mirror: once a .pyn is deleted, importing it is an error, as for a .py
     c, root, uri = start(tmp_path)
     (root / "lib.pyn").write_text("def f():\n    return (x=1)\n")
-    c.send({"method": "workspace/didChangeWatchedFiles", "params": {"changes": [{"uri": (root / "lib.pyn").as_uri(), "type": 1}]}})
+    c.send(
+        {
+            "method": "workspace/didChangeWatchedFiles",
+            "params": {"changes": [{"uri": (root / "lib.pyn").as_uri(), "type": 1}]},
+        }
+    )
     user = c.open(root / "user.pyn", "from lib import f\n\nprint(f().x)\n")
     c.wait_diags(user)
     assert wait_errors(c, user, []) == []
     (root / "lib.pyn").unlink()
-    c.send({"method": "workspace/didChangeWatchedFiles", "params": {"changes": [{"uri": (root / "lib.pyn").as_uri(), "type": 3}]}})
-    c.send({"method": "textDocument/didChange", "params": {"textDocument": {"uri": user, "version": 2}, "contentChanges": [{"text": "from lib import f\n\nprint(f().x)\n\n"}]}})
+    c.send(
+        {
+            "method": "workspace/didChangeWatchedFiles",
+            "params": {"changes": [{"uri": (root / "lib.pyn").as_uri(), "type": 3}]},
+        }
+    )
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": user, "version": 2},
+                "contentChanges": [{"text": "from lib import f\n\nprint(f().x)\n\n"}],
+            },
+        }
+    )
     want = [(0, 'Import "lib" could not be resolved')]
     assert wait_errors(c, user, want) == want
     c.close()
@@ -1150,7 +1466,12 @@ def test_organize_imports_on_save_agrees_with_byname_tool_ruff(tmp_path):
     (root / "lib_pyn.pyn").write_text("x = 1\n")
     (root / "lib.py").write_text("y = 2\n")
     for f in ("pyproject.toml", "lib_pyn.pyn", "lib.py"):
-        c.send({"method": "workspace/didChangeWatchedFiles", "params": {"changes": [{"uri": (root / f).as_uri(), "type": 1}]}})
+        c.send(
+            {
+                "method": "workspace/didChangeWatchedFiles",
+                "params": {"changes": [{"uri": (root / f).as_uri(), "type": 1}]},
+            }
+        )
     text = "from lib_pyn import x\n\nfrom lib import y\n\nprint(x, y)\n"
     (root / "user.pyn").write_text(text)
     user = c.open(root / "user.pyn")
@@ -1161,6 +1482,13 @@ def test_organize_imports_on_save_agrees_with_byname_tool_ruff(tmp_path):
     assert fixed == ["from lib import y\nfrom lib_pyn import x\n\nprint(x, y)\n"]
     (root / "user.pyn").write_text(fixed[0])
     env = {"XDG_CACHE_HOME": str(tmp_path / "cache"), "PATH": str(Path(sys.executable).parent)}
-    out = subprocess.run([sys.executable, "-m", "byname", "tool", "ruff", "check", "--select", "I", "user.pyn"], cwd=root, env=env, capture_output=True, text=True, check=False).stdout
+    out = subprocess.run(
+        [sys.executable, "-m", "byname", "tool", "ruff", "check", "--select", "I", "user.pyn"],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
     assert "All checks passed" in out, out
     c.close()

@@ -40,7 +40,11 @@ def tool(project: Path, *args: str, debug: bool = False) -> tuple[str, int]:
         env["BYNAME_DEBUG"] = "1"
     p = subprocess.run(
         [sys.executable, "-m", "byname", "tool", *args],
-        cwd=project, env=env, capture_output=True, text=True, check=False,
+        cwd=project,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     return p.stdout, p.returncode
 
@@ -49,7 +53,9 @@ def test_basedpyright_errors_land_on_pyn_lines(project):
     # line 4 col 2 is `nope` in `(nope=, age=)`; the type shows as fields, not _rec_...
     out, rc = tool(project, "basedpyright", "main.pyn")
     assert rc == 1
-    assert 'main.pyn:4:2 - error: Cannot access attribute "nope" for class "(name: str, age: int, greeting: str)"' in out
+    assert (
+        'main.pyn:4:2 - error: Cannot access attribute "nope" for class "(name: str, age: int, greeting: str)"' in out
+    )
     assert "main.pyn:5:10 - error" in out
     assert ".cache" not in out and "_rec_" not in out  # no mirror paths, no generated names
 
@@ -74,23 +80,28 @@ def test_explicit_record_types_ignore_order_but_not_field_set(project):
     # explicit types match any order, but exactly these fields; a record is read by name, never by position
     (project / "types.pyn").write_text(
         "type User = (name: str, age: int)\n"
-        "u: User = (age=26, name='R')\n"            # order differs: fine
-        "x: User = (age=26, name='R', po='d')\n"    # extra field
+        "u: User = (age=26, name='R')\n"  # order differs: fine
+        "x: User = (age=26, name='R', po='d')\n"  # extra field
         "def f() -> User:\n"
         "    return (age=1, name='R')\n"
-        "a, b = f()\n"                              # positional: an error, typed or not
+        "a, b = f()\n"  # positional: an error, typed or not
         "(name=) = f()\n"
         "c, d = (age=1, name='R')\n"
         "reveal_type(name)\n"
         "def g(p: (..., age: int)) -> int:\n"
         "    return p.age\n"
-        "g(u); g((name='R',))\n"                    # open type: at least `age`
+        "g(u); g((name='R',))\n"  # open type: at least `age`
     )
     out, rc = tool(project, "basedpyright", "types.pyn")
     assert "types.pyn:2" not in out
-    assert 'types.pyn:3:11 - error: Type "(age: int, name: str, po: str)" is not assignable to declared type "User"' in out
+    assert (
+        'types.pyn:3:11 - error: Type "(age: int, name: str, po: str)" is not assignable to declared type "User"' in out
+    )
     assert "extra field: po (reportAssignmentType)" in out and "_byname_fieldset" not in out
-    assert 'types.pyn:6:8 - error: "User" is not iterable' in out or 'types.pyn:6:8 - error: "(name: str, age: int)" is not iterable' in out
+    assert (
+        'types.pyn:6:8 - error: "User" is not iterable' in out
+        or 'types.pyn:6:8 - error: "(name: str, age: int)" is not iterable' in out
+    )
     assert "types.pyn:7" not in out
     assert 'types.pyn:8:8 - error: "(age: int, name: str)" is not iterable' in out
     assert 'types.pyn:9:13 - information: Type of "name" is "str"' in out
@@ -130,9 +141,9 @@ def test_field_set_errors_on_long_records_name_the_fields(project):
 def test_a_record_spreads_into_a_call_by_name_only(project):
     (project / "star.pyn").write_text(
         "def fn(name: str, age: int) -> None: ...\n"
-        "fn(*(age=1, name='r'))\n"   # by position: an error
+        "fn(*(age=1, name='r'))\n"  # by position: an error
         "fn(**(age=1, name='r'))\n"  # by name: fine
-        "fn(**(name=1, age=1))\n"    # name is an int
+        "fn(**(name=1, age=1))\n"  # name is an int
     )
     out, rc = tool(project, "basedpyright", "star.pyn")
     assert 'star.pyn:2:5 - error: "(age: int, name: str)" is not iterable' in out
@@ -152,10 +163,10 @@ def test_spread_mistakes_are_named(project):
         "def mk() -> Person:\n"
         "    return (**u, **r)\n"
         "def take(p: Person, n: int = 0): ...\n"
-        "take((**u, **r, surname='g'))\n"     # fine: no type written, the parameter's is used
-        "take((**u, **r))\n"                  # missing surname
-        "take(p=(**u, **r, surname=1))\n"     # by keyword: surname is an int
-        "x = (**u, **r)\n"                    # u, r are known records: x is typed, nothing to check here
+        "take((**u, **r, surname='g'))\n"  # fine: no type written, the parameter's is used
+        "take((**u, **r))\n"  # missing surname
+        "take(p=(**u, **r, surname=1))\n"  # by keyword: surname is an int
+        "x = (**u, **r)\n"  # u, r are known records: x is typed, nothing to check here
     )
     out, rc = tool(project, "basedpyright", "spread.pyn")
     assert 'spread.pyn:5:1 - error: Argument missing for parameter "surname"' in out
@@ -188,7 +199,7 @@ def test_spread_of_a_rebound_name_keeps_its_narrowing(project):
         "u = (name='r',)\n"
         "r = (age=1,)\n"
         "fn(user=(**u, **r))\n"
-        "fn(user=(**u, **r, age='x'))\n"   # still checked: wrong type
+        "fn(user=(**u, **r, age='x'))\n"  # still checked: wrong type
         "r = (tag='a', note=1)\n"
     )
     out, rc = tool(project, "basedpyright", "rebound.pyn")
@@ -207,10 +218,10 @@ def test_spread_record_picks_the_overload_that_takes_a_record(project):
         "def lookup(key: Any) -> Any: ...\n"
         "u = (name='r',)\n"
         "reveal_type(lookup((**u, age=1)))\n"
-        "lookup((**u,))\n"                     # missing age
+        "lookup((**u,))\n"  # missing age
         "x = (**u, age=1)\n"
         "def fn(p: Person) -> None: ...\n"
-        "fn(x)\n"                               # x = (**u, age=1) is (name: str, age: int): fine
+        "fn(x)\n"  # x = (**u, age=1) is (name: str, age: int): fine
         "reveal_type(print((**u, age=1)))\n"
     )
     out, rc = tool(project, "basedpyright", "ov.pyn")
@@ -228,13 +239,13 @@ def test_destructured_parameters_are_typed(project):
         "def f(user: User):\n"
         "    (name=, age=) = user\n"
         "    if age > 1:\n"
-        "        return name + 1\n"          # str + int
+        "        return name + 1\n"  # str + int
         "    return name\n"
         "def g(user: User):\n"
-        "    (nme=) = user\n"                # no such field
+        "    (nme=) = user\n"  # no such field
         "    return nme\n"
         "f((name='r', age=5))\n"
-        "f((name='r',))\n"                   # missing age
+        "f((name='r',))\n"  # missing age
     )
     out, rc = tool(project, "basedpyright", "params.pyn")
     assert 'params.pyn:5:16 - error: Operator "+" not supported for types "str" and "Literal[1]"' in out
@@ -258,10 +269,22 @@ def test_ruff_real_issue_reported_at_pyn_position(project):
 
 
 def notebook(cells: list[tuple[str, str]]) -> str:
-    return json.dumps({
-        "cells": [{"cell_type": kind, "metadata": {}, "source": src, **({"outputs": [], "execution_count": None} if kind == "code" else {})} for kind, src in cells],
-        "metadata": {}, "nbformat": 4, "nbformat_minor": 5,
-    })
+    return json.dumps(
+        {
+            "cells": [
+                {
+                    "cell_type": kind,
+                    "metadata": {},
+                    "source": src,
+                    **({"outputs": [], "execution_count": None} if kind == "code" else {}),
+                }
+                for kind, src in cells
+            ],
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }
+    )
 
 
 NB_CELLS = [
@@ -277,10 +300,14 @@ def test_byname_notebooks_are_checked_cell_by_cell(project):
     # basedpyright numbers code cells (3rd), ruff every cell (4th)
     (project / "nb.ipynb").write_text(notebook(NB_CELLS))
     out, rc = tool(project, "basedpyright", str(project / "nb.ipynb"))  # absolute, as the editor task passes it
-    assert 'nb.ipynb:3:2:5 - error: Cannot access attribute "nme" for class "(name: str, age: int, greeting: str)"' in out
+    assert (
+        'nb.ipynb:3:2:5 - error: Cannot access attribute "nme" for class "(name: str, age: int, greeting: str)"' in out
+    )
     assert ".cache" not in out and "_rec_" not in out
     out, rc = tool(project, "ruff", "check", "--select", "F", "--output-format=concise", "nb.ipynb")
-    assert [ln for ln in out.splitlines() if ln.startswith("nb.ipynb")] == ["nb.ipynb:cell 4:3:8: F401 [*] `os` imported but unused"]
+    assert [ln for ln in out.splitlines() if ln.startswith("nb.ipynb")] == [
+        "nb.ipynb:cell 4:3:8: F401 [*] `os` imported but unused"
+    ]
 
 
 def test_plain_notebooks_are_checked_as_they_are(project):
@@ -293,24 +320,24 @@ def test_ruff_findings_on_byname_layout_are_hidden_and_real_ones_kept(project):
     # each hidden finding is about code byname wrote; its look-alike on the user's own code stays
     (project / "other.py").write_text("res = (1, 2)\n")
     (project / "layout.pyn").write_text(
-        "from other import res\n"                 # E402 only because the record prelude sits above it
+        "from other import res\n"  # E402 only because the record prelude sits above it
         "\n"
         "extra = (city='Pune')\n"
-        "print((**res, **extra, age=27))\n"       # B008 on the `_byname_kw` helper of an unknown spread
+        "print((**res, **extra, age=27))\n"  # B008 on the `_byname_kw` helper of an unknown spread
         "r = (name='a', age=1)\n"
-        "(name=, age=years) = r\n"                # E702: a destructure is one line of `;` statements
-        "print(name, years); print(1)\n"          # a semicolon the user wrote: kept
+        "(name=, age=years) = r\n"  # E702: a destructure is one line of `;` statements
+        "print(name, years); print(1)\n"  # a semicolon the user wrote: kept
         "\n"
         "\n"
         "def get_batch():\n"
-        "    return (x := 1, y := 5)\n"           # F841: walrus labels name the returned positions
+        "    return (x := 1, y := 5)\n"  # F841: walrus labels name the returned positions
         "\n"
         "\n"
         "def f():\n"
-        "    z = 3\n"                             # really unused: kept
+        "    z = 3\n"  # really unused: kept
         "\n"
         "\n"
-        "import sys\n"                            # really after code: kept
+        "import sys\n"  # really after code: kept
     )
     out, rc = tool(project, "ruff", "check", "--select", "E,F,B", "--output-format=concise", "layout.pyn")
     assert [ln for ln in out.splitlines() if ln.startswith("layout.pyn")] == [
@@ -329,8 +356,21 @@ def test_ruff_i001_on_a_gridded_import_alone_is_hidden(project):
     (project / "grid.py").write_text(grid)
     (project / "unsorted.py").write_text("import sys\nimport os\n\nprint(os, sys)\n")
     (project / "nb.ipynb").write_text(notebook([("code", grid)]))
-    out, rc = tool(project, "ruff", "check", "--select", "I001", "--output-format=concise", "grid.pyn", "grid.py", "unsorted.py", "nb.ipynb")
-    assert [ln for ln in out.splitlines() if "I001" in ln] == ["unsorted.py:1:1: I001 [*] Import block is un-sorted or un-formatted"]
+    out, rc = tool(
+        project,
+        "ruff",
+        "check",
+        "--select",
+        "I001",
+        "--output-format=concise",
+        "grid.pyn",
+        "grid.py",
+        "unsorted.py",
+        "nb.ipynb",
+    )
+    assert [ln for ln in out.splitlines() if "I001" in ln] == [
+        "unsorted.py:1:1: I001 [*] Import block is un-sorted or un-formatted"
+    ]
     assert rc == 1
     out, rc = tool(project, "ruff", "check", "--select", "I001", "--output-format=concise", "grid.pyn")
     assert "All checks passed!" in out and rc == 0
@@ -351,5 +391,5 @@ def test_totals_count_what_is_shown(project):
 def test_py_errors_show_the_projects_path(project):
     (project / "plain.py").write_text("x: int = 'a'\n")
     out, rc = tool(project, "basedpyright", str(project / "plain.py"))
-    assert "  plain.py:1:10 - error: Type \"Literal['a']\" is not assignable to declared type \"int\"" in out
+    assert '  plain.py:1:10 - error: Type "Literal[\'a\']" is not assignable to declared type "int"' in out
     assert ".cache" not in out

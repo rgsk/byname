@@ -39,7 +39,11 @@ FIX_ALL_KIND, ORGANIZE_KIND = "source.fixAll", "source.organizeImports"  # ruff 
 # kinds; notebook.defaultFormatter picks among `notebook.format` ones, which it doesn't do for cells: they go
 # to the cell language's default formatter). The first cell may be markdown, so the VS Code extension offers
 # them and asks us on the first code cell. Ruff sees the whole notebook: an import used in a later cell is used
-NOTEBOOK_FORMAT, NOTEBOOK_FIX_ALL, NOTEBOOK_ORGANIZE = "notebook.format", "notebook.source.fixAll", "notebook.source.organizeImports"
+NOTEBOOK_FORMAT, NOTEBOOK_FIX_ALL, NOTEBOOK_ORGANIZE = (
+    "notebook.format",
+    "notebook.source.fixAll",
+    "notebook.source.organizeImports",
+)
 METHOD, VARIABLE, CONSTANT = 2, 6, 21  # CompletionItemKind
 # a cell that makes the notebook's cells .pyn (IPython takes one module per %load_ext)
 LOAD_EXT_RE = re.compile(r"^[ \t]*%load_ext[ \t]+byname[ \t]*(?:#.*)?$", re.MULTILINE)
@@ -110,7 +114,9 @@ DICT_EXTRA_RE = re.compile(r'"(\w+)" is an undefined item in type "_dct_')
 # same field set are compared by type argument, and pyright names the type parameter rather than the field
 # a record read by position, which records don't allow (see record_def in transform.py)
 # (`rec[0]`: `__getitem__` takes a `_key_<fields>`, see key_alias in transform.py)
-POSITIONAL_RE = re.compile(r'"_(?:typ|opn)_(\w+?)\[[^"]*" is not iterable|of type "_key_(\w+)" in function "__getitem__"')
+POSITIONAL_RE = re.compile(
+    r'"_(?:typ|opn)_(\w+?)\[[^"]*" is not iterable|of type "_key_(\w+)" in function "__getitem__"'
+)
 # a record ordered (`sorted(recs)`, `max(recs)`, `a < b`), which records don't allow: pyright's message is a page
 # about SupportsRichComparison
 UNORDERED_RE = re.compile(
@@ -119,7 +125,9 @@ UNORDERED_RE = re.compile(
 )
 # a target list read by position: `x, y` / `(x, _)` / `x,`
 TARGETS_RE = re.compile(r"\(?\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*,?\s*\)?")
-VARIANCE_RE = re.compile(r'Type parameter "T(\d+)@_(?:typ|opn)_(\w+?)" is \w+, but "(.*)" is not (?:the same as|a subtype of|assignable to) "(.*)"')
+VARIANCE_RE = re.compile(
+    r'Type parameter "T(\d+)@_(?:typ|opn)_(\w+?)" is \w+, but "(.*)" is not (?:the same as|a subtype of|assignable to) "(.*)"'
+)
 KEY_RE = re.compile(r'"_key_\w*"')
 RULE_RE = re.compile(r"\s*\((report\w+)\)\s*$")
 CODE_KEYS = {"newText", "insertText", "filterText", "sortText", "uri", "targetUri", "data"}
@@ -330,7 +338,9 @@ def explain_fields(msg: str) -> str:
         field = (m[1] or m[2]).split("__")[0]
         msg = add_line(head, f"records have no order: compare or sort by a field (key=lambda r: r.{field})")
         return msg + (f" ({rule[1]})" if rule else "")
-    msg = VARIANCE_RE.sub(lambda m: f'"{m[2].split("__")[int(m[1])]}" is an incompatible type: "{m[3]}" is not "{m[4]}"', msg)
+    msg = VARIANCE_RE.sub(
+        lambda m: f'"{m[2].split("__")[int(m[1])]}" is an incompatible type: "{m[3]}" is not "{m[4]}"', msg
+    )
     if FIELDSET not in msg:
         return msg
     # pyright cuts literals over 50 characters to `…`, so prefer the class names, which it doesn't cut
@@ -361,12 +371,38 @@ def explain_fields(msg: str) -> str:
 
 def is_generated_name(name) -> bool:
     return isinstance(name, str) and (
-        name in (DS, REPR, FIELDSET, ORDER, "_NT", "_cast", "_Cl", "_Mp", "_ntf", "_t", "_TD", "_PR", "_L", "_S", "_Fi", "_ov", "_A", "_TV") or name.startswith((*GENERATED_PREFIXES, "_byname_"))
+        name
+        in (
+            DS,
+            REPR,
+            FIELDSET,
+            ORDER,
+            "_NT",
+            "_cast",
+            "_Cl",
+            "_Mp",
+            "_ntf",
+            "_t",
+            "_TD",
+            "_PR",
+            "_L",
+            "_S",
+            "_Fi",
+            "_ov",
+            "_A",
+            "_TV",
+        )
+        or name.startswith((*GENERATED_PREFIXES, "_byname_"))
     )
 
 
 def is_range(v) -> bool:
-    return isinstance(v, dict) and isinstance(v.get("start"), dict) and isinstance(v.get("end"), dict) and "line" in v["start"]
+    return (
+        isinstance(v, dict)
+        and isinstance(v.get("start"), dict)
+        and isinstance(v.get("end"), dict)
+        and "line" in v["start"]
+    )
 
 
 def is_position(v) -> bool:
@@ -476,7 +512,9 @@ class Proxy:
             return path
         rel = path.relative_to(self.mirror)
         real = Path("/", *rel.parts[1:]) if rel.parts and rel.parts[0] == "_abs" else self.root / rel
-        if real.suffix == ".py" and ((pyn := real.with_suffix(".pyn")) in self.docs or pyn.is_file() or rel.parts[0] == "_abs"):
+        if real.suffix == ".py" and (
+            (pyn := real.with_suffix(".pyn")) in self.docs or pyn.is_file() or rel.parts[0] == "_abs"
+        ):
             return pyn
         return real
 
@@ -569,7 +607,14 @@ class Proxy:
             return [self.uris_to_checker(x) for x in obj]
         if not isinstance(obj, dict):
             return obj
-        return {k: self.uri_to_checker(v) if k in URI_KEYS and isinstance(v, str) else v if k == "data" else self.uris_to_checker(v) for k, v in obj.items()}
+        return {
+            k: self.uri_to_checker(v)
+            if k in URI_KEYS and isinstance(v, str)
+            else v
+            if k == "data"
+            else self.uris_to_checker(v)
+            for k, v in obj.items()
+        }
 
     # rewriting ----------------------------------------------------------
 
@@ -700,8 +745,14 @@ class Proxy:
         uri = td.get("uri")
         key = self.key(uri)
         only = params.get("context", {}).get("only") or []
-        if method == "textDocument/codeAction" and uri in self.cell_text and (kind := next((k for k in (NOTEBOOK_FORMAT, NOTEBOOK_FIX_ALL, NOTEBOOK_ORGANIZE) if k in only), None)):
-            self.client.send({"jsonrpc": "2.0", "id": mid, "result": self.notebook_action(self.notebooks[self.cell_nb[uri]], kind)})
+        if (
+            method == "textDocument/codeAction"
+            and uri in self.cell_text
+            and (kind := next((k for k in (NOTEBOOK_FORMAT, NOTEBOOK_FIX_ALL, NOTEBOOK_ORGANIZE) if k in only), None))
+        ):
+            self.client.send(
+                {"jsonrpc": "2.0", "id": mid, "result": self.notebook_action(self.notebooks[self.cell_nb[uri]], kind)}
+            )
             return
         if uri in self.cell_text and method == "textDocument/codeAction" and source_kind(params):
             # a cell's own fixAll / organizeImports: nothing, the notebook-wide actions do it (a cell alone
@@ -710,20 +761,29 @@ class Proxy:
             return
         if key is None:
             own = method == "textDocument/formatting" or (method == "textDocument/codeAction" and source_kind(params))
-            if method == "textDocument/formatting" and uri in self.cell_text:  # a plain notebook's cell: Ruff on it as it is
-                self.client.send(self.cell_action(msg, Doc(uri, self.cell_text[uri], None), uri_to_path(self.cell_nb[uri])))
+            # a plain notebook's cell: Ruff on it as it is
+            if method == "textDocument/formatting" and uri in self.cell_text:
+                self.client.send(
+                    self.cell_action(msg, Doc(uri, self.cell_text[uri], None), uri_to_path(self.cell_nb[uri]))
+                )
                 return
             if own and uri in self.py_text:  # a .py file: Ruff on it (its translation is itself)
                 doc, path = Doc(uri, self.py_text[uri], None), uri_to_path(uri)
                 kind = source_kind(params)
-                self.client.send(self.format(mid, path, doc) if method == "textDocument/formatting" else self.fix(mid, path, doc, kind))
+                self.client.send(
+                    self.format(mid, path, doc)
+                    if method == "textDocument/formatting"
+                    else self.fix(mid, path, doc, kind)
+                )
                 return
             if own:  # nothing of ours (an untitled buffer): the checker has neither
                 self.client.send({"jsonrpc": "2.0", "id": mid, "result": []})
                 return
             if isinstance(uri, str) and uri.startswith("file:") and uri.endswith(".py"):
                 if method in ("textDocument/didOpen", "textDocument/didChange"):  # full sync: the whole text
-                    self.py_text[uri] = td["text"] if method == "textDocument/didOpen" else params["contentChanges"][-1]["text"]
+                    self.py_text[uri] = (
+                        td["text"] if method == "textDocument/didOpen" else params["contentChanges"][-1]["text"]
+                    )
                 elif method == "textDocument/didClose":
                     self.py_text.pop(uri, None)
             if method == "workspace/didChangeWatchedFiles":
@@ -746,7 +806,9 @@ class Proxy:
             self.pending[mid] = (method, doc)
         if method == "textDocument/completion" and self.complete_slot(msg, key, doc):
             return
-        if isinstance(key, str) and (method == "textDocument/formatting" or (method == "textDocument/codeAction" and source_kind(params))):
+        if isinstance(key, str) and (
+            method == "textDocument/formatting" or (method == "textDocument/codeAction" and source_kind(params))
+        ):
             self.client.send(self.cell_action(msg, doc, path))
             return
         if method == "textDocument/formatting":
@@ -802,7 +864,13 @@ class Proxy:
             self.held.pop(path, None)
             self.shown.pop(path, None)
             self.send_server({**msg, "params": {"textDocument": {"uri": uri}}})
-            self.client.send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": uri, "diagnostics": []}})
+            self.client.send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/publishDiagnostics",
+                    "params": {"uri": uri, "diagnostics": []},
+                }
+            )
             return True
         return False
 
@@ -833,7 +901,13 @@ class Proxy:
         for d in (self.cell_text, self.cell_version, self.cell_nb):
             d.pop(uri, None)
         if self.docs.pop(uri, None) is not None:  # its translated diagnostics have nowhere to go
-            self.client.send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {"uri": uri, "diagnostics": []}})
+            self.client.send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/publishDiagnostics",
+                    "params": {"uri": uri, "diagnostics": []},
+                }
+            )
 
     def on_notebook(self, msg: dict) -> None:
         method, params = msg["method"], msg.get("params") or {}
@@ -886,7 +960,10 @@ class Proxy:
             cells["structure"] = {**st, "didOpen": [{**td, **self.cell_for_checker(nb, td["uri"])} for td in opened]}
         if changed:
             content = [self.cell_for_checker(nb, u) for u in dict.fromkeys(changed)]
-            cells["textContent"] = [{"document": {"uri": c["uri"], "version": c["version"]}, "changes": [{"text": c["text"]}]} for c in content]
+            cells["textContent"] = [
+                {"document": {"uri": c["uri"], "version": c["version"]}, "changes": [{"text": c["text"]}]}
+                for c in content
+            ]
         self.send_server({**msg, "params": {**params, "change": {**change, "cells": cells}}})
 
     def next_version(self) -> int:
@@ -904,7 +981,13 @@ class Proxy:
         td = {"uri": self.editor_uri(key), "version": v}
         changes = [{"text": hidden}]
         if isinstance(key, Path):
-            self.send_server({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {"textDocument": td, "contentChanges": changes}})
+            self.send_server(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didChange",
+                    "params": {"textDocument": td, "contentChanges": changes},
+                }
+            )
             return
         nb = self.notebooks[self.cell_nb[key]]
         cells = {"textContent": [{"document": td, "changes": changes}]}
@@ -928,7 +1011,9 @@ class Proxy:
                 self.pending[mid] = ("after_comma", (doc, params["position"]))
                 self.send_server({**msg, "params": self.to_checker(at_paren, doc)})
                 return True
-            if (rec := record_type_slot(tr.source, cursor)) is not None and self.complete_record_type(msg, key, doc, rec):
+            if (rec := record_type_slot(tr.source, cursor)) is not None and self.complete_record_type(
+                msg, key, doc, rec
+            ):
                 return True
             if ctx.get("triggerKind") == 2 and ctx.get("triggerCharacter") in self.own_triggers:
                 self.client.send({"jsonrpc": "2.0", "id": mid, "result": {"isIncomplete": False, "items": []}})
@@ -955,7 +1040,9 @@ class Proxy:
         self.send_server({**msg, "params": sent})
         return True
 
-    def complete_record_type(self, msg: dict, key: Path | str, doc: Doc, rec: tuple[int, int, str, int, int, set[str]]) -> bool:
+    def complete_record_type(
+        self, msg: dict, key: Path | str, doc: Doc, rec: tuple[int, int, str, int, int, set[str]]
+    ) -> bool:
         """Field names in `user: User = (name=, |)`. The checker is shown `user: User = _t.cast(User, None).|`
         in place of the literal and asked for User's members: a record's fields, closed or open, are its
         read-only members, offered as constants (an open record type has no `_replace` to ask instead; `user.`
@@ -986,7 +1073,16 @@ class Proxy:
         fields = [it for it in out["items"] if it.get("kind") == CONSTANT]
         if not fields:
             return out
-        items = [{**it, "label": f"{it['label']}=", "kind": VARIABLE, "textEdit": {**it["textEdit"], "newText": f"{it['label']}="}} for it in fields if it["label"] not in given]
+        items = [
+            {
+                **it,
+                "label": f"{it['label']}=",
+                "kind": VARIABLE,
+                "textEdit": {**it["textEdit"], "newText": f"{it['label']}="},
+            }
+            for it in fields
+            if it["label"] not in given
+        ]
         return {"isIncomplete": False, "items": items}
 
     def finish_after_comma(self, result, doc: Doc, cursor: dict) -> dict:
@@ -1068,7 +1164,11 @@ class Proxy:
         itself). A cell Ruff can't parse alone (a magic: `%time x = 1`) is left as it is rather than
         failing the save."""
         mid = msg["id"]
-        reply = self.format(mid, path, doc) if msg["method"] == "textDocument/formatting" else {"jsonrpc": "2.0", "id": mid, "result": []}
+        reply = (
+            self.format(mid, path, doc)
+            if msg["method"] == "textDocument/formatting"
+            else {"jsonrpc": "2.0", "id": mid, "result": []}
+        )
         if "error" in reply:
             return {"jsonrpc": "2.0", "id": mid, "result": []}
         if not doc.tr.source.endswith("\n"):  # a cell's last line has no newline, as Ruff writes notebooks
@@ -1094,7 +1194,9 @@ class Proxy:
         else:
             texts = [self.cell_text[u] for u in code]
             try:
-                fixed = fix_notebook(texts, nb.byname, *self.ruff_at(path), select=ORGANIZE if kind == NOTEBOOK_ORGANIZE else None)
+                fixed = fix_notebook(
+                    texts, nb.byname, *self.ruff_at(path), select=ORGANIZE if kind == NOTEBOOK_ORGANIZE else None
+                )
             except (FixError, ValueError):
                 fixed = texts  # mid-edit code: offer nothing rather than fail the save
             for u, old, new in zip(code, texts, fixed):
@@ -1103,7 +1205,11 @@ class Proxy:
                     changes[u] = [{"range": whole, "newText": new}]
         if not changes:
             return []
-        title = {NOTEBOOK_FORMAT: "format notebook", NOTEBOOK_FIX_ALL: "fix all", NOTEBOOK_ORGANIZE: "organize imports"}[kind]
+        title = {
+            NOTEBOOK_FORMAT: "format notebook",
+            NOTEBOOK_FIX_ALL: "fix all",
+            NOTEBOOK_ORGANIZE: "organize imports",
+        }[kind]
         return [{"title": f"byname: {title} (ruff)", "kind": kind + ".byname", "edit": {"changes": changes}}]
 
     def by_name_actions(self, params: dict, doc: Doc) -> list[dict]:
@@ -1121,10 +1227,15 @@ class Proxy:
                 continue
             a, b, text = fix
             edit = {"range": {"start": lines.position(a), "end": lines.position(b)}, "newText": text}
-            out.append({
-                "title": f"Read by name: {text}", "kind": "quickfix", "diagnostics": [d], "isPreferred": True,
-                "edit": {"changes": {doc.uri: [edit]}},
-            })
+            out.append(
+                {
+                    "title": f"Read by name: {text}",
+                    "kind": "quickfix",
+                    "diagnostics": [d],
+                    "isPreferred": True,
+                    "edit": {"changes": {doc.uri: [edit]}},
+                }
+            )
         return out
 
     def write_output(self, path: Path, doc: Doc) -> str | None:
@@ -1242,13 +1353,26 @@ class Proxy:
                         if "readonly" in mods and "static" in mods:
                             self.final_field = (1 << mods.index("readonly"), 1 << mods.index("static"))
                     # notebooks: their cells are synced whole through notebookDocument/*, see on_notebook
-                    caps["notebookDocumentSync"] = {"notebookSelector": [{"notebook": "jupyter-notebook", "cells": [{"language": "python"}]}]}
+                    caps["notebookDocumentSync"] = {
+                        "notebookSelector": [{"notebook": "jupyter-notebook", "cells": [{"language": "python"}]}]
+                    }
                     cp = caps.setdefault("completionProvider", {})
                     have = cp.setdefault("triggerCharacters", [])
                     self.own_triggers = {c for c in EXTRA_TRIGGERS if c not in have}
                     have.extend(sorted(self.own_triggers))
                 elif req.startswith("textDocument/semanticTokens"):
-                    msg = {**msg, "result": {"data": remap_tokens(msg["result"].get("data", []), doc, self.field_type, self.final_field, self.callable_types)}}
+                    msg = {
+                        **msg,
+                        "result": {
+                            "data": remap_tokens(
+                                msg["result"].get("data", []),
+                                doc,
+                                self.field_type,
+                                self.final_field,
+                                self.callable_types,
+                            )
+                        },
+                    }
                 else:
                     result = self.to_editor(msg["result"], doc)
                     msg = {**msg, "result": None if result is DROP else result}
@@ -1259,7 +1383,8 @@ class Proxy:
 
         if method == "workspace/configuration" and mid is not None:
             self.server_requests[mid] = msg.get("params", {}).get("items", [])
-        elif mid is not None and method in ("workspace/applyEdit", "window/showDocument"):  # mirror uris -> the editor's
+        elif mid is not None and method in ("workspace/applyEdit", "window/showDocument"):
+            # mirror uris -> the editor's
             msg = {**msg, "params": self.to_editor(msg.get("params"), None)}
         elif method == "textDocument/publishDiagnostics":
             msg = self.diagnostics(msg)
@@ -1276,7 +1401,12 @@ class Proxy:
             kept = params.get("diagnostics", [])
             if not self.python_diags:  # keep syntax errors (no rule) and hints (faded unused code)
                 kept = [d for d in kept if not d.get("code") or d.get("severity", 1) == 4]
-            kept = [{**d, "relatedInformation": self.to_editor(d["relatedInformation"], None)} if "relatedInformation" in d else d for d in kept]
+            kept = [
+                {**d, "relatedInformation": self.to_editor(d["relatedInformation"], None)}
+                if "relatedInformation" in d
+                else d
+                for d in kept
+            ]
             params = {**params, "uri": self.uri_to_editor(params["uri"]), "diagnostics": kept}
             msg = {**msg, "params": params}
             if params["uri"] in self.cell_text:  # a plain notebook's cell: the version is ours, not the editor's
@@ -1335,7 +1465,6 @@ class Proxy:
             del self.held[path]
             self.shown[path] = held["params"]["diagnostics"]
         self.client.send(held)
-
 
     # run ----------------------------------------------------------------
 

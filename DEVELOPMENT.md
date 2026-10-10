@@ -134,8 +134,7 @@ there run through byname directly; no output files.
 ## Open issues
 
 - **Lint debt in byname's own `.py` files:** about 25 Ruff findings (mostly Ruff 0.16's strict defaults, like BLE001 and RUF059).
-- **byname's `pyproject.toml` sets Ruff `line-length = 320`,** but the existing `.py` files haven't been reformatted under it. They change as they're saved.
-- **A global Ruff setup** across projects (the 320 line length and so on) is still to be decided. There's no `~/.config/ruff`.
+- **A global Ruff setup** across projects (line length and so on) is still to be decided. There's no `~/.config/ruff`.
 - **Display of field names containing `__`** is wrong, because `pretty()` splits the class name at `__`.
 - **VS Code was launched with llm's `VIRTUAL_ENV`** in its environment, which made uv warn in tasks. The byname and `cp` tasks pin `VIRTUAL_ENV` to the workspace venv.
 
