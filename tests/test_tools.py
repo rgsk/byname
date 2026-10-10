@@ -189,6 +189,49 @@ def test_spread_of_known_records_is_typed_without_an_annotation(project):
     assert 'defaults.pyn:4:5 - error: Cannot access attribute "btach_size"' in out
 
 
+def test_spread_of_a_record_type_from_another_module_is_typed(project):
+    # `cfg: Config` with Config imported from a .pyn module found as the checker finds it (here through
+    # extraPaths), by name, renamed, re-exported or relative; a record value imported spreads too
+    (project / "pyproject.toml").write_text(
+        '[tool.basedpyright]\ntypeCheckingMode = "standard"\nextraPaths = ["src"]\n'
+    )
+    (project / "src" / "pkg").mkdir(parents=True)
+    (project / "tests").mkdir()
+    (project / "src" / "model.pyn").write_text("type Config = (a: int, b: str)\nDEFAULT = (a=1, b='x')\n")
+    (project / "src" / "again.pyn").write_text("from model import Config as Cfg\n")
+    (project / "src" / "pkg" / "__init__.pyn").write_text("")
+    (project / "src" / "pkg" / "types.pyn").write_text("type Point = (x: float, y: float)\n")
+    (project / "src" / "pkg" / "use.pyn").write_text(
+        "from .types import Point\ndef f(p: Point):\n    reveal_type((**p, z=0.0))\n"
+    )
+    # a cycle: each reads as unknown from the other, and nothing hangs
+    (project / "src" / "one.pyn").write_text("from two import T\ntype S = (a: int)\n")
+    (project / "src" / "two.pyn").write_text("from one import S\ntype T = (b: int)\n")
+    (project / "tests" / "test_x.pyn").write_text(
+        "from model import Config, DEFAULT\n"
+        "from model import Config as C\n"
+        "from again import Cfg\n"
+        "from one import S\n"
+        "def f(cfg: Config, c: C, g: Cfg, s: S):\n"
+        "    reveal_type((**cfg, n=1))\n"
+        "    reveal_type((**c))\n"
+        "    reveal_type((**g))\n"
+        "    reveal_type((**DEFAULT, b='y'))\n"
+        "    reveal_type((**s))\n"
+    )
+    out, _ = tool(project, "basedpyright", "tests/test_x.pyn", "src/pkg/use.pyn")
+    types = [line.rsplit(" is ", 1)[1] for line in out.splitlines() if "information: Type of" in line]
+    assert types == [
+        '"(x: float, y: float, z: float)"',
+        '"(a: int, b: str, n: int)"',
+        '"(a: int, b: str)"',
+        '"(a: int, b: str)"',
+        '"(a: int, b: str)"',
+        '"(a: int)"',
+    ], out
+    assert "0 errors" in out
+
+
 def test_spread_of_a_rebound_name_keeps_its_narrowing(project):
     # `r` is bound twice, so its fields aren't known and the generic path checks the spread inside a
     # lambda, where pyright drops narrowing for a name reassigned later. Read through a lambda default,

@@ -189,6 +189,36 @@ def hover_text(c, uri, p) -> str:
     return h["contents"]["value"] if h else ""
 
 
+def test_spread_of_an_imported_record_type_follows_its_module(lsp):
+    # `c: Cfg` with Cfg from another .pyn: the spread has Cfg's fields, and saving that module retranslates this file
+    c, root, _ = lsp
+    (root / "settings.pyn").write_text("type Cfg = (a: int)\n")
+    c.open(root / "settings.pyn")  # in the checker's mirror, as a file made in the editor is
+    text = "from settings import Cfg\ndef f(c: Cfg):\n    v = (**c)\n    return v\n"
+    uri = c.open(root / "spreads.pyn", text)
+    c.wait_diags(uri)
+    assert "v: (a: int)" in hover_text(c, uri, pos(text, "v ="))
+    new, settings = "type Cfg = (a: int, b: str)\n", (root / "settings.pyn").as_uri()
+    (root / "settings.pyn").write_text(new)  # edited, then saved
+    td = {"uri": settings, "version": 2}
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": td, "contentChanges": [{"text": new}]}})
+    c.send({"method": "textDocument/didSave", "params": {"textDocument": {"uri": settings}}})
+    for _ in range(50):
+        if "v: (a: int, b: str)" in (got := hover_text(c, uri, pos(text, "v ="))):
+            break
+        time.sleep(0.1)
+    assert "v: (a: int, b: str)" in got
+    # changed outside the editor (a script, git) while not open: the file watcher's event does it, with no save
+    c.send({"method": "textDocument/didClose", "params": {"textDocument": {"uri": settings}}})
+    (root / "settings.pyn").write_text("type Cfg = (a: int, c: float)\n")
+    c.send({"method": "workspace/didChangeWatchedFiles", "params": {"changes": [{"uri": settings, "type": 2}]}})
+    for _ in range(50):
+        if "v: (a: int, c: float)" in (got := hover_text(c, uri, pos(text, "v ="))):
+            break
+        time.sleep(0.1)
+    assert "v: (a: int, c: float)" in got
+
+
 def test_hover_destructured_local_has_field_type(lsp):
     # `greeting` comes from another .pyn, through a record, through destructuring: still `str`
     c, root, uri = lsp

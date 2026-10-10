@@ -70,7 +70,7 @@ def translated_notebook(src: Path) -> str | None:
         return None
     for c, text in zip(nb["cells"], cells):
         if c.get("cell_type") == "code":
-            c["source"] = Translation(text).hidden
+            c["source"] = Translation(text, src).hidden
     return json.dumps(nb, indent=1, ensure_ascii=False) + "\n"
 
 
@@ -123,7 +123,7 @@ def place(root: Path, out: Path, src: Path) -> tuple[Path, int | None] | None:
         dst.unlink()
         return dst, 3
     if src.suffix == ".pyn":
-        changed = write_if_changed(dst, Translation(src.read_text(encoding="utf-8")).hidden)
+        changed = write_if_changed(dst, Translation(src.read_text(encoding="utf-8"), src).hidden)
     elif src.suffix == ".ipynb" and (text := translated_notebook(src)) is not None:
         changed = write_if_changed(dst, text)
     elif dst.is_symlink() and dst.readlink() == src:
@@ -193,7 +193,7 @@ def remap(line: str, root: Path, out: Path, cache: dict) -> tuple[str | None, bo
     if not pyn.exists():  # an ordinary .py file: the project's path, not the mirror's
         return f"{m['pre']}{rel}:{m['line']}" + (f":{m['col']}" if m["col"] else "") + m["rest"], True
     if pyn not in cache:
-        cache[pyn] = Translation(pyn.read_text(encoding="utf-8"))
+        cache[pyn] = Translation(pyn.read_text(encoding="utf-8"), pyn)
     pos = source_position(cache[pyn], int(m["line"]) - 1, int(m["col"]) - 1 if m["col"] else 0, line)
     if not isinstance(pos, dict):
         return pos, True
@@ -292,7 +292,7 @@ def remap_notebook(line: str, root: Path, out: Path, cache: dict) -> tuple[str |
             cache[nb_path] = None
         else:
             kinds = [c.get("cell_type") for c in nb["cells"]]
-            every = [Translation(src) if k == "code" else None for k, src in zip(kinds, cells)]
+            every = [Translation(src, nb_path) if k == "code" else None for k, src in zip(kinds, cells)]
             cache[nb_path] = (every, [t for t in every if t is not None])
     loc = f"{rel}:{m['ruff'] or ''}{m['cell']}"
     if cache[nb_path] is None:  # a plain notebook: positions are the cell's own

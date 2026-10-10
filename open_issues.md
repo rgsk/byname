@@ -158,27 +158,6 @@ Likely fix: in `main`, add `--output-format=concise` to `ruff check` when the us
 format, as it already adds `--pythonpath` for basedpyright. Or parse the full format: a `CODE message` line,
 then a ` --> path:line:col` line, then the snippet, all mapped or dropped together.
 
-## Spreading a parameter whose record type is imported gives `Unknown`
-
-```python
-# tests/test_x.pyn                         # model.pyn: type GPTConfig = (vocab_size: int, ..., n_layer: int)
-from model import GPTConfig
-
-def test_x(cfg: GPTConfig):
-    named = (**cfg, name="small")
-    reveal_type(named)                     # Unknown
-```
-
-The same code with the alias defined in the same file reveals `(a: int, b: int, name: str)`, for a
-parameter and for an annotated local alike. So the spread seems to find a name's fields only through
-aliases defined in the file being translated; an imported alias sends it down the generic path (the same path as the B008 entry above), which types the result
-`Unknown`. Nothing errors: `named` just has no type, so `named.name` and `GPT(named)` go unchecked
-and the editor shows the names white. Found in llm-final (`tests/test_model.pyn`) by
-`scripts/any_check.py`. Other uses of the imported alias (`cfg.n_layer`, destructuring, passing `cfg`
-to a function typed with it) are checked fine; only the spread loses it. Workaround: write the record
-out literally. Likely fix: resolve the parameter's annotation through the import (the checker already
-knows the alias) before falling back to the generic path.
-
 ## With `reportAny` / `reportUnknownVariableType` on, a generic-path spread reports errors in generated code
 
 Turn the two rules on (`# pyright: reportAny=true, reportUnknownVariableType=true`, which is what

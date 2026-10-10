@@ -24,6 +24,7 @@ import ast
 import io
 import keyword
 import tokenize
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 DS = "_ds"
@@ -329,17 +330,23 @@ class Known:
     is_dict: bool = False
 
 
+# the record fields of a name another module defines: (module, level, name) -> Known, or None if it shows none
+Lookup = Callable[[str, int, str], "Known | None"]
+Source = tuple[str, ast.expr] | tuple[str, tuple[str, int, str]]  # where a binding's fields show (_Bind.source)
+
+
 @dataclass(eq=False)
 class _Bind:
     """One binding of a name in a scope (known_fields). at: the index of the scope's statement it's in (-1 for
     parameters); straight: that statement is simple (no `if`, loop, `try`, ...), so the binding has run once
     the scope reaches the next statement; source: ("value" | "type", node) when it shows the fields (a
-    parameter's annotation is read where the function is defined); anywhere: a function's binding of a
-    `global` name, which can run before any read of it."""
+    parameter's annotation is read where the function is defined), ("import", (module, level, name)) for
+    `from module import name`; anywhere: a function's binding of a `global` name, which can run before any
+    read of it."""
 
     at: int
     straight: bool
-    source: tuple[str, ast.expr] | None
+    source: "Source | None"
     where: tuple["_Scope", int]  # the scope and statement the source is read in
     anywhere: bool = False
 
@@ -361,14 +368,15 @@ COMPOUND = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.TryStar, ast.
 COMPS = (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
 
 
-def known_fields(body: str) -> dict[tuple[str, int], Known]:
+def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False) -> dict[tuple[str, int], Known]:
     """The record fields of names read in the translation, by (name, line), where a binding shows them: a
     record literal, a spread record of such names, an annotation with a record type (inline, a `type`
-    alias, or a parameter's), or `x._asdict()` of such a name (a TypedDict: its keys can't be removed, so
-    its fields stay). Names are scoped as in Python (function, lambda, comprehension, class). A read is
-    known when every binding that may reach it shows the same fields (reaching): any of them may be the
-    one that ran, and a wrong field set would be worse than the generic spread path. Checker translation
-    only (see known_build)."""
+    alias, one imported with `from module import name` that lookup finds, or a parameter's), or
+    `x._asdict()` of such a name (a TypedDict: its keys can't be removed, so its fields stay). Names are
+    scoped as in Python (function, lambda, comprehension, class). A read is known when every binding that
+    may reach it shows the same fields (reaching): any of them may be the one that ran, and a wrong field
+    set would be worse than the generic spread path. exports: instead, the module's own names as another
+    module importing it sees them, by (name, 0). Checker translation only (see known_build)."""
     tree = parse_around_errors(body)
     if tree is None:
         return {}
@@ -381,7 +389,7 @@ def known_fields(body: str) -> dict[tuple[str, int], Known]:
         name: str,
         at: int,
         straight: bool,
-        source: tuple[str, ast.expr] | None = None,
+        source: Source | None = None,
         where: tuple[_Scope, int] | None = None,
     ) -> None:
         if name in scope.globals:  # the module's name, rebound whenever the function runs
@@ -455,7 +463,10 @@ def known_fields(body: str) -> dict[tuple[str, int], Known]:
             bind(scope, node.target.id, at, False)  # rebinds mid-statement: never the nearest one alone
             visit(node.value, scope, at, straight)
             return
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+        elif isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                bind(scope, a.asname or a.name, at, straight, ("import", (node.module or "", node.level, a.name)))
+        elif isinstance(node, ast.Import):
             for a in node.names:
                 bind(scope, (a.asname or a.name).split(".")[0], at, straight)
         elif isinstance(node, ast.Global):
@@ -512,7 +523,10 @@ def known_fields(body: str) -> dict[tuple[str, int], Known]:
             return memo[id(b)]
         memo[id(b)] = None  # a cycle stays unknown
         kind, node = b.source
-        memo[id(b)] = of_value(node, *b.where) if kind == "value" else of_type(node, *b.where)
+        if isinstance(node, tuple):  # ("import", (module, level, name))
+            memo[id(b)] = lookup(*node) if lookup is not None else None
+        else:
+            memo[id(b)] = of_value(node, *b.where) if kind == "value" else of_type(node, *b.where)
         return memo[id(b)]
 
     def of_value(e: ast.expr, scope: _Scope, at: int) -> Known | None:
@@ -559,6 +573,9 @@ def known_fields(body: str) -> dict[tuple[str, int], Known]:
             return got if got is None or not got.is_dict else None  # a dict isn't a type
         return None
 
+    if exports:
+        names = (resolve(name, module, len(tree.body)) for name in module.binds)
+        return {(name, 0): k for name, k in zip(module.binds, names) if k is not None}
     out: dict[tuple[str, int], Known | None] = {}
     for name, line, scope, at in reads:
         got = resolve(name, scope, at)
@@ -574,11 +591,13 @@ def transform(
     portable: bool = False,
     checker: bool = False,
     known: dict[tuple[str, int], Known] | None = None,
+    lookup: Lookup | None = None,
 ) -> Result:
     """tolerant (editor only): a half-typed pattern item like `na` in `(name=, na) = r` becomes
     `_ds.na` instead of an error, so the checker can complete field names there.
     checker: the translation only type checkers see; works around their bugs (see KW_PRELUDE). Never run.
-    known: fields of names read in the file, by (name, line) (known_fields); set by the checker translation's second pass."""
+    known: fields of names read in the file, by (name, line) (known_fields); set by the checker translation's second pass.
+    lookup: fields of record types imported from other modules (imports.Modules), for known_fields."""
     toks = [
         t for t in tokenize.generate_tokens(io.StringIO(src).readline) if t.type not in (tokenize.COMMENT, tokenize.NL)
     ]
@@ -1236,7 +1255,7 @@ def transform(
     for e in reversed(edits):
         body = body[: e.start] + e.text + body[e.end :]
     # checker: spread records of names whose fields the file shows get their exact type (known_build)
-    if checker and known is None and builds and (k := known_fields(body)):
+    if checker and known is None and builds and (k := known_fields(body, lookup)):
         return transform(src, path, tolerant, portable, checker, known=k)
 
     prelude = ""

@@ -450,7 +450,9 @@ class Doc:
         self.uri = uri
         self.version = version  # the editor's version
         self.sent: int | None = None  # version we sent to the checker (we number them ourselves)
-        self.tr = Translation(text)
+        # the file (a cell's notebook), where the record types it imports are looked up from
+        self.path = uri_to_path(uri) if urlparse(uri).scheme in ("file", "vscode-notebook-cell") else None
+        self.tr = Translation(text, self.path)
 
 
 class Notebook:
@@ -619,7 +621,7 @@ class Proxy:
 
         assert self.root is not None and self.mirror is not None
         if place(self.root, self.mirror, path) is None and path.suffix == ".pyn" and path.is_file():
-            write_if_changed(self.to_mirror(path), Translation(path.read_text(encoding="utf-8")).hidden)
+            write_if_changed(self.to_mirror(path), Translation(path.read_text(encoding="utf-8"), path).hidden)
 
     def send_server(self, msg: dict) -> None:
         """To the checker, every document uri in the params as the checker knows it (see to_mirror)."""
@@ -814,6 +816,10 @@ class Proxy:
             if method == "workspace/didChangeWatchedFiles":
                 if changes := self.watched(params.get("changes", [])):
                     self.send_server({**msg, "params": {"changes": changes}})
+                # a module changed outside the editor (a script, git, an agent): its importers read it again
+                for c in params.get("changes", []):
+                    if c.get("uri", "").endswith(".pyn"):
+                        self.retranslate_importers(uri_to_path(c["uri"]))
                 return
             elif mid is not None:  # e.g. workspace/symbol: results point into the mirror
                 self.pending[mid] = (method, self.last_completion if method == "completionItem/resolve" else None)
@@ -877,6 +883,7 @@ class Proxy:
         if method == "textDocument/didSave":
             versions = self.docs.get(path)
             self.place(path)
+            self.retranslate_importers(path)
             self.send_server({**msg, "params": {"textDocument": {"uri": uri}}})
             if self.output_on_save and versions:
                 self.write_output(path, versions[-1])
@@ -898,6 +905,18 @@ class Proxy:
             )
             return True
         return False
+
+    def retranslate_importers(self, saved: Path) -> None:
+        """Open files whose spreads read record types from `saved` are translated again: its types may have
+        changed (imports.Modules reads a module from disk). On a save, or a file event for a change made
+        outside the editor."""
+        for key, versions in self.docs.items():
+            doc = versions[-1]
+            if key != saved and saved in doc.tr.imports:
+                again = Doc(doc.uri, doc.tr.source, doc.version)
+                versions.append(again)
+                del versions[:-5]
+                self.send_text(key, again.tr.hidden, again)
 
     # notebooks ----------------------------------------------------------
 
@@ -1052,7 +1071,7 @@ class Proxy:
         temp = src[:ws] + word + src[we:]
         close += len(word) - (we - ws)
         temp = temp[:close] + ", __byname_kw=" + temp[close:]  # makes `(x) = y` a pattern too
-        ttr = Translation(temp)
+        ttr = Translation(temp, doc.path)
         if ttr.error is not None:
             return False
         h = ttr._to_hidden(ws + len(word), False, touch=True)
@@ -1080,7 +1099,7 @@ class Proxy:
         src = tr.source
         prefix = f"_t.cast({annotation}, None)."
         word = src[ws:we] or PLACEHOLDER
-        ttr = Translation(src[:open_at] + prefix + word + src[close + 1 :])
+        ttr = Translation(src[:open_at] + prefix + word + src[close + 1 :], doc.path)
         if ttr.error is not None:
             return False
         h = ttr._to_hidden(open_at + len(prefix) + len(word), False, touch=True)
@@ -1102,7 +1121,7 @@ class Proxy:
         (answer_record_argument)."""
         k, close, ws, we, given = lit
         src = doc.tr.source
-        ttr = Translation(src[:k] + "0" + src[close + 1 :])
+        ttr = Translation(src[:k] + "0" + src[close + 1 :], doc.path)
         if ttr.error is not None:
             return False
         h = ttr._to_hidden(k + 1, False, touch=True)

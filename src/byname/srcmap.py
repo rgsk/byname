@@ -8,6 +8,8 @@ Three coordinate systems:
 LSP positions are (line, UTF-16 column), so LineIndex converts to and from offsets.
 """
 
+from pathlib import Path
+
 from .transform import Edit, Mark, prelude_offset, transform
 
 Hit = tuple[Edit, Mark | None] | None  # what generated text a body offset landed on
@@ -103,20 +105,27 @@ class LineIndex:
 class Translation:
     """A .pyn source and its hidden Python, with LSP position mapping both ways."""
 
-    def __init__(self, source: str):
+    def __init__(self, source: str, path: Path | None = None):
+        """path: the file, to find record types it imports from other modules (imports.Modules)."""
+        from .imports import Modules
+
         self.source = source
+        lookup = Modules(path) if path is not None else None
+        self.imports: set[Path] = set()  # module files whose record types the translation used
         self.error: Exception | None = None
         self.problems: list[dict] = []  # byname diagnostics from tolerant translation
         self.fields: list[tuple[int, int]] = []  # source spans of record field names
         self.labels: set[int] = set()  # where a walrus labelling a returned tuple starts (see Result.labels)
         try:
-            r = transform(source, tolerant=True, checker=True)
+            r = transform(source, tolerant=True, checker=True, lookup=lookup)
             body, prelude, edits = r.body, r.prelude, r.edits
             self.fields = r.fields
             self.labels = {s for s, _ in r.labels}
         except Exception as e:  # mid-edit code: send it raw; the checker reports the syntax error
             self.error = e
             body, prelude, edits = source, "", []
+        if lookup is not None:
+            self.imports = lookup.used
         self.map = SourceMap(edits)
         self.at = prelude_offset(body) if prelude else 0
         self.plen = len(prelude)
