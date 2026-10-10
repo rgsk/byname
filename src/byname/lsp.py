@@ -200,11 +200,11 @@ def split_top(text: str, sep: str) -> list[str]:
     return parts
 
 
-def container_step(src: str, k: int, close: int) -> tuple[int, int, tuple[str, int] | None] | None:
+def container_step(src: str, k: int, close: int) -> tuple[int, int, tuple[str, int | str] | None] | None:
     """The list, set, dict or tuple that src[k:close+1] is a whole item of, or the comprehension it's the element
     of: (its opener, its closer, the step in: ("item", 0) in a list or set or a comprehension's element, ("key", 0)
-    or ("value", 0) in a dict, ("tuple", i) in a tuple, None in a plain group); None if it's an item of nothing (a
-    call's argument, a subscript, part of a larger expression)."""
+    or ("value", 0) in a dict, ("tuple", i) in a tuple, ("field", name) as `name=` in a record literal, None in a
+    plain group); None if it's an item of nothing (a call's argument, a subscript, part of a larger expression)."""
     depth, o = 0, k
     while o > 0:
         o -= 1
@@ -248,6 +248,10 @@ def container_step(src: str, k: int, close: int) -> tuple[int, int, tuple[str, i
         if len(colons) == 2 and colons[0].strip() and not colons[1].strip() and "**" not in colons[0]:
             return o, c, ("value", 0)
         return None
+    if src[o] == "(" and (m := re.fullmatch(r"\s*([A-Za-z_]\w*)\s*=\s*", head)):
+        if all(RECORD_ITEM_RE.match(it) or not it.strip() for n, it in enumerate(items) if n != i):
+            return o, c, ("field", m[1])
+        return None
     if head.strip():
         return None
     if src[o] == "[" or comprehension:
@@ -286,6 +290,27 @@ def element_type(written: str, steps: list[tuple[str, int]]) -> str | None:
             return None
         written = " | ".join(found)
     return written
+
+
+def expected_value(written: str, steps: list[tuple[str, int | str]]) -> str | None:
+    """An expression of the type expected at the end of `steps` in a value of type `written`, for the checker to
+    complete on: `_t.cast(T, None)`, T read off `written` up to the first field (element_type); a field's type
+    is the checker's to know (`(lead: User)` may be named `Team`), so from there on each step is an expression:
+    `.lead`, `next(iter(...))` for an item, `[i]` for a tuple's."""
+    n = next((j for j, (kind, _) in enumerate(steps) if kind == "field"), len(steps))
+    if not (written := element_type(written, steps[:n])):
+        return None
+    value = f"_t.cast({written}, None)"
+    for kind, i in steps[n:]:
+        if kind == "field":
+            value = f"{value}.{i}"
+        elif kind in ("item", "key"):
+            value = f"next(iter({value}))"
+        elif kind == "value":
+            value = f"next(iter({value}.values()))"
+        else:  # tuple
+            value = f"{value}[{i}]"
+    return value
 
 
 def record_literal_slot(src: str, cursor: int) -> tuple[int, int, int, int, set[str]] | None:
@@ -1246,11 +1271,12 @@ class Proxy:
         in place of the literal and asked for User's members: a record's fields, closed or open, are its
         read-only members, offered as constants (an open record type has no `_replace` to ask instead; `user.`
         won't do: `user` is unbound in its own assignment). `_t` is the prelude's `import typing as _t`, in
-        every file with a record type."""
-        open_at, close, annotation, ws, we, given = rec
+        every file with a record type. `value` is that cast, or an expression on it for a literal nested in another
+        (expected_value)."""
+        open_at, close, value, ws, we, given = rec
         tr = doc.tr
         src = tr.source
-        prefix = f"_t.cast({annotation}, None)."
+        prefix = f"{value}."
         word = src[ws:we] or PLACEHOLDER
         ttr = Translation(src[:open_at] + prefix + word + src[close + 1 :], doc.path)
         if ttr.error is not None:
@@ -1298,8 +1324,8 @@ class Proxy:
             return self.ask_record_argument(msg, key, doc, lit, o, c, steps)
         else:
             return False
-        written = written and element_type(written, steps)
-        return bool(written) and self.complete_record_type(msg, key, doc, (k, close, written, ws, we, given))
+        value = written and expected_value(written, steps)
+        return bool(value) and self.complete_record_type(msg, key, doc, (k, close, value, ws, we, given))
 
     def ask_record_argument(
         self, msg: dict, key: Path | str, doc: Doc, lit: tuple, o: int, c: int, steps: list
@@ -1323,8 +1349,8 @@ class Proxy:
     def answer_record_argument(self, help, msg: dict, key: Path | str, doc: Doc, lit: tuple, steps: list) -> None:
         """Completes the fields of the parameter's type; not in a call or no parameter there, plain completion."""
         k, close, ws, we, given = lit
-        written = (written := parameter_type(help)) and element_type(written, steps)
-        if written and self.complete_record_type(msg, key, doc, (k, close, written, ws, we, given)):
+        value = (written := parameter_type(help)) and expected_value(written, steps)
+        if value and self.complete_record_type(msg, key, doc, (k, close, value, ws, we, given)):
             return
         latest = self.docs.get(key, [doc])[-1]
         self.send_text(key, latest.tr.hidden, latest)  # restore the real text

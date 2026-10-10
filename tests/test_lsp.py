@@ -768,6 +768,18 @@ def test_completion_in_an_annotated_record_literal_offers_the_types_fields(lsp):
     ]:
         _, items = complete(c, uri, pre + "from collections.abc import Sequence\n" + text)
         assert {i["label"] for i in items} == want
+    # a literal in another's field: the field's type is the checker's to know, then items peeled as expressions
+    team = "type Team = (lead: User, size: int, members: list[User])\n"
+    for text, want in [
+        ("t: Team = (lead=(name='a', |), size=1, members=[])\n", {"age="}),
+        ("ts: list[Team] = [(lead=(|), size=1, members=[])]\n", {"name=", "age="}),
+        ("t: Team = (size=1, members=[(name='a', age=1), (age=2, |)], lead=(name='b', age=3))\n", {"name="}),
+        ("def g() -> Team:\n    return (lead=(name='a', |), size=1, members=[])\n", {"age="}),
+        ("def h(*, t: Team): ...\nh(t=(lead=(name='a', |), size=1, members=[]))\n", {"age="}),
+        ("p: (inner: (x: int, y: str)) = (inner=(x=1, |))\n", {"y="}),
+    ]:
+        _, items = complete(c, uri, pre + team + text)
+        assert {i["label"] for i in items} == want
     # yielded: Y in Iterator[Y] or Generator[Y, S, R], an iterable of Y after `yield from`; a generator returns R
     gen = "from collections.abc import AsyncIterator, Generator, Iterator\n"
     for text, want in [
