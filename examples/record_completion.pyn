@@ -1,0 +1,133 @@
+from collections.abc import AsyncIterator, Generator, Iterator, Sequence
+
+type User = (name: str, age: int)
+
+# Each literal below is missing a field: put the cursor after its last comma
+# and press Ctrl+Space. You should get only the fields not given yet.
+
+
+# a list item, under an annotation
+users: list[User] = [
+    (name="a", age=1),
+    (name="b", ),  # offers age=
+]
+
+# a set item
+seen: set[User] = {(age=3, )}  # offers name=
+
+# a dict value, through a union and a nested list
+by_team: dict[str, list[User] | None] = {
+    "core": [(name="c", )],  # offers age=
+    "ops": None,
+}
+
+# a tuple position: the second item's type, written out inline
+pair: tuple[int, (x: int, y: str)] = (1, (x=1, ))  # offers y=
+
+# tuple[T, ...]: every item has type T
+many: tuple[User, ...] = ((name="d", age=4), (name="e", ))  # offers age=
+
+
+# a returned value
+def team() -> list[User]:
+    return [(name="f", )]  # offers age=
+ 
+
+def maybe() -> dict[str, User] | None:
+    return {"lead": (age=5, )}  # offers name=
+
+
+# an argument: the parameter's type comes from the checker's signature help
+def register(*, members: Sequence[User]) -> None: ...
+
+
+register(members=[(name="g", )])  # offers age=
+
+
+# a yielded value: the T in Iterator[T]
+def stream() -> Iterator[User]:
+    yield (name="l", )  # offers age=
+
+
+# Generator[Y, S, R]: a yield gets Y, a return gets R
+def batches() -> Generator[User, None, (count: int, done: bool)]:
+    yield (age=8, )  # offers name=
+    return (count=1,  )  # offers done=
+
+
+# yield from an iterable: each item gets Y
+def seeded() -> Iterator[User]:
+    yield from [(name="m", )]  # offers age=
+
+
+# an async generator
+async def feed() -> AsyncIterator[User]:
+    yield (name="n", )  # offers age=
+
+
+# a dict key, and a comprehension's element
+keys: dict[User, int] = {(name="h", ): 1}  # offers age=
+built: list[User] = [(name=n, ) for n in "ij"]  # offers age=
+by_name: dict[str, User] = {n: (age=1, ) for n in "ij"}  # offers name=
+
+
+# nested defs: a return or yield belongs to the innermost def around it
+def outer() -> User:
+    def inner() -> (x: int, y: str):
+        return (x=1, )  # offers y=, inner's type
+
+    def numbers() -> Iterator[int]:
+        yield 1  # a nested generator doesn't make outer a generator
+
+    return (name="q", )  # offers age=, outer's type
+
+
+# nested containers: each level peeled off the annotation
+groups: dict[str, list[tuple[int, User]]] = {
+    "a": [(1, (name="r", ))],  # offers age=
+}
+
+
+# a record inside a record's field: the checker reads the field's type
+type Team = (lead: User, size: int, members: list[User])
+team: Team = (lead=(name="s", ), size=1, members=[])  # offers age=
+teams: list[Team] = [(lead=(age=2, ), size=1, members=[])]  # offers name=
+crew: Team = (lead=(name="t", age=3), size=2, members=[(name="u", )])  # offers age=
+
+
+def make_team() -> Team:
+    return (lead=(name="v", ), size=1, members=[])  # offers age=
+
+
+def hire(*, team: Team) -> None: ...
+
+
+hire(team=(lead=(name="w", ), size=1, members=[]))  # offers age=
+
+
+# an alias of a container: the checker reads its element type
+type Users = list[User]
+aliased: Users = [(name="k", )]  # offers age=
+
+
+type Stream = Iterator[User]
+
+
+def streamed() -> Stream:
+    yield (name="x", )  # offers age=
+
+
+# an alias inside a union, and yield from under an aliased generator type
+maybe_users: Users | None = [(name="y", )]  # offers age=
+
+
+def streamed_from() -> Stream:
+    yield from [(name="z", )]  # offers age=
+
+
+# not offered (plain completion instead)
+
+
+def plain() -> Iterator[User]:
+    yield (name="o",)
+    return (name="p", )  # a generator's return under Iterator[Y]: no return type to read
