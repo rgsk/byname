@@ -574,6 +574,12 @@ def test_completion_in_an_annotated_record_literal_offers_the_types_fields(lsp):
     # on one line, right after a comma, as on a line of its own
     _, items = complete(c, uri, pre + "u = (name='r', age=1)\nuser: User = (**u, name='x', age=2, |)\n")
     assert {i["label"] for i in items} == {"sex="}
+    # an open record type too: it has no `_replace`, but its fields are read-only members like a record's
+    pre = MAIN + "type User = (..., name: str, age: int, sex: str)\n"
+    _, items = complete(c, uri, pre + "user: User = (|)\n")
+    assert {i["label"] for i in items} == {"name=", "age=", "sex="}
+    _, items = complete(c, uri, pre + "user: User = (name='x', |)\n")
+    assert {i["label"] for i in items} == {"age=", "sex="}
     # an ordinary parenthesized value is left alone: names in scope, not fields
     _, items = complete(c, uri, pre + "n: int = (1 + |)\n")
     assert "print" in {i["label"] for i in items}

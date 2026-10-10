@@ -40,7 +40,7 @@ FIX_ALL_KIND, ORGANIZE_KIND = "source.fixAll", "source.organizeImports"  # ruff 
 # to the cell language's default formatter). The first cell may be markdown, so the VS Code extension offers
 # them and asks us on the first code cell. Ruff sees the whole notebook: an import used in a later cell is used
 NOTEBOOK_FORMAT, NOTEBOOK_FIX_ALL, NOTEBOOK_ORGANIZE = "notebook.format", "notebook.source.fixAll", "notebook.source.organizeImports"
-METHOD = 2  # CompletionItemKind
+METHOD, VARIABLE, CONSTANT = 2, 6, 21  # CompletionItemKind
 # a cell that makes the notebook's cells .pyn (IPython takes one module per %load_ext)
 LOAD_EXT_RE = re.compile(r"^[ \t]*%load_ext[ \t]+byname[ \t]*(?:#.*)?$", re.MULTILINE)
 # methods records and tuples bring along (byname's `keys`, tuple's); a class's own methods stay
@@ -163,8 +163,8 @@ RECORD_TARGET_RE = re.compile(r"^\s*[A-Za-z_][\w.]*\s*:(?P<annotation>[^=]+)=\s*
 RECORD_ITEM_RE = re.compile(r"^\s*(\*\*\s*[\w.]+|[A-Za-z_]\w*\s*=.*)\s*$", re.DOTALL)
 
 
-def record_type_slot(src: str, cursor: int) -> tuple[int, str, int, int] | None:
-    """(the `(`, the annotation, word start, word end) if `cursor` is at a field position of a record literal
+def record_type_slot(src: str, cursor: int) -> tuple[int, int, str, int, int, set[str]] | None:
+    """(the `(`, its `)`, the annotation, word start, word end, the fields given) if `cursor` is at a field position of a record literal
     that is the whole value of an annotated assignment, `user: User = (name=, |)`; else None. Every other
     item must be `name=...` or `**spread`, so a parenthesized expression is left alone."""
     ws = cursor
@@ -215,13 +215,16 @@ def record_type_slot(src: str, cursor: int) -> tuple[int, str, int, int] | None:
         else:
             cur += ch
     items.append(cur)
+    given = set()
     for it in items:
         if "\0" in it:
             if it.strip() != "\0":
                 return None  # typing a value, not a field name
         elif it.strip() and not RECORD_ITEM_RE.match(it):
             return None
-    return k, m["annotation"].strip(), ws, we
+        elif "=" in it:
+            given.add(it.split("=", 1)[0].strip())
+    return k, close, m["annotation"].strip(), ws, we, given
 
 
 def pretty(text: str) -> str:
@@ -952,34 +955,39 @@ class Proxy:
         self.send_server({**msg, "params": sent})
         return True
 
-    def complete_record_type(self, msg: dict, key: Path | str, doc: Doc, rec: tuple[int, str, int, int]) -> bool:
-        """Field names in `user: User = (name=, |)`. The checker is shown `_t.cast(User, None)._replace(name=, |)`,
-        so `_replace` offers User's fields not yet given (`user._replace` won't do: `user` is unbound in its own
-        assignment). `_t` is the prelude's `import typing as _t`, in every file with a record type."""
-        open_at, annotation, ws, we = rec
+    def complete_record_type(self, msg: dict, key: Path | str, doc: Doc, rec: tuple[int, int, str, int, int, set[str]]) -> bool:
+        """Field names in `user: User = (name=, |)`. The checker is shown `user: User = _t.cast(User, None).|`
+        in place of the literal and asked for User's members: a record's fields, closed or open, are its
+        read-only members, offered as constants (an open record type has no `_replace` to ask instead; `user.`
+        won't do: `user` is unbound in its own assignment). `_t` is the prelude's `import typing as _t`, in
+        every file with a record type."""
+        open_at, close, annotation, ws, we, given = rec
         tr = doc.tr
         src = tr.source
-        prefix = f"_t.cast({annotation}, None)._replace"
-        temp = src[:open_at] + prefix + src[open_at:]
-        ttr = Translation(temp)
+        prefix = f"_t.cast({annotation}, None)."
+        word = src[ws:we] or PLACEHOLDER
+        ttr = Translation(src[:open_at] + prefix + word + src[close + 1 :])
         if ttr.error is not None:
             return False
-        # nothing typed yet: ask right after `_replace(`, as in call_after_comma (basedpyright offers
-        # nothing right after a comma); it still leaves out the fields already given
-        at = ws + len(prefix) if ws < we else open_at + len(prefix) + 1
-        h = ttr._to_hidden(at, False, touch=True)
-        self.send_text(key, ttr.hidden, None)
+        h = ttr._to_hidden(open_at + len(prefix) + len(word), False, touch=True)
+        hidden = ttr.hidden
+        if word == PLACEHOLDER:  # leave `_t.cast(User, None).` with nothing after it: every member
+            hidden, h = hidden[: h - len(word)] + hidden[h:], h - len(word)
+        self.send_text(key, hidden, None)
         rng = {"start": tr.src_lines.position(ws), "end": tr.src_lines.position(we)}
-        self.pending[msg["id"]] = ("record_type", (key, doc, rng))
-        sent = {"textDocument": {"uri": self.editor_uri(key)}, "position": LineIndex(ttr.hidden).position(h)}
+        self.pending[msg["id"]] = ("record_type", (key, doc, rng, given))
+        sent = {"textDocument": {"uri": self.editor_uri(key)}, "position": LineIndex(hidden).position(h)}
         self.send_server({**msg, "params": sent})
         return True
 
-    def finish_record_type(self, result, key: Path | str, doc: Doc, rng: dict) -> dict:
-        """The field items (`name=`); everything, if the type had none (not a record type)."""
+    def finish_record_type(self, result, key: Path | str, doc: Doc, rng: dict, given: set[str]) -> dict:
+        """The fields not yet given, as `name=`; everything, if the type had none (not a record type)."""
         out = self.finish_slot(result, key, doc, rng, set())
-        fields = [it for it in out["items"] if it.get("label", "").endswith("=")]
-        return {"isIncomplete": False, "items": fields or out["items"]}
+        fields = [it for it in out["items"] if it.get("kind") == CONSTANT]
+        if not fields:
+            return out
+        items = [{**it, "label": f"{it['label']}=", "kind": VARIABLE, "textEdit": {**it["textEdit"], "newText": f"{it['label']}="}} for it in fields if it["label"] not in given]
+        return {"isIncomplete": False, "items": items}
 
     def finish_after_comma(self, result, doc: Doc, cursor: dict) -> dict:
         """Items asked for right after the call's `(`, inserted at the cursor instead."""
@@ -1198,8 +1206,8 @@ class Proxy:
                 self.client.send({**msg, "result": self.finish_slot(msg.get("result"), key, doc, rng, listed)})
                 return
             if method_doc and method_doc[0] == "record_type":
-                key, doc, rng = method_doc[1]
-                self.client.send({**msg, "result": self.finish_record_type(msg.get("result"), key, doc, rng)})
+                key, doc, rng, given = method_doc[1]
+                self.client.send({**msg, "result": self.finish_record_type(msg.get("result"), key, doc, rng, given)})
                 return
             if method_doc and method_doc[0] == "after_comma":
                 doc, cursor = method_doc[1]
