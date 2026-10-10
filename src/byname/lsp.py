@@ -13,7 +13,9 @@ cell loads byname (`%load_ext byname`, see notebook.py): then every cell is tran
 as the kernel runs it, under its URI in the mirror, where the checker chains cells itself.
 """
 
+import ast
 import json
+import keyword
 import os
 import re
 import shutil
@@ -162,12 +164,15 @@ def call_after_comma(src: str, cursor: int) -> int | None:
     if not before or not (before[-1].isidentifier() or before[-1].isdigit() or before[-1] in ")]"):
         return None  # a tuple or a group, not a call
     words = before.split()
+    if keyword.iskeyword(re.split(r"\W", words[-1])[-1]):
+        return None  # `return (a=1, |)`: a group after a keyword, not a call
     if len(words) >= 2 and words[-2] in ("def", "class"):
         return None  # a signature, not a call
     return k
 
 
 RECORD_TARGET_RE = re.compile(r"^\s*[A-Za-z_][\w.]*\s*:(?P<annotation>[^=]+)=\s*$")
+RETURN_RE = re.compile(r"\breturn\s*$")
 ARGUMENT_RE = re.compile(r"(?:[(,]|[A-Za-z_]\w*\s*=)\s*$")  # what comes before an argument: `f(`, `, `, `name=`
 RECORD_ITEM_RE = re.compile(r"^\s*(\*\*\s*[\w.]+|[A-Za-z_]\w*\s*=.*)\s*$", re.DOTALL)
 
@@ -295,6 +300,46 @@ def pretty(text: str) -> str:
         i = j
     out.append(text[i:])
     return "".join(out).replace("_byname_AnyRec", "(...)")  # a spread record whose fields aren't known
+
+
+def return_type(src: str, k: int, close: int, path) -> str | None:
+    """The return annotation, as written, of the innermost def around `return (...)` whose literal is src[k:close+1];
+    None in a lambda or a def without one. The def is found in the translation, `0` standing in for the literal."""
+    tr = Translation(src[:k] + "0" + src[close + 1 :], path)
+    if tr.error is not None:
+        return None
+    hidden = tr.hidden
+    try:
+        tree = ast.parse(hidden)
+    except SyntaxError:
+        return None
+    h = tr._to_hidden(k, False)
+    line = hidden.count("\n", 0, h) + 1
+    col = len(hidden[hidden.rfind("\n", 0, h) + 1 : h].encode())
+    starts = LineIndex(hidden).starts
+
+    def offset(lineno: int, col_offset: int) -> int:
+        start = starts[lineno - 1]
+        return start + len(hidden[start:].encode()[:col_offset].decode(errors="ignore"))
+
+    def find(node: ast.AST, fn: ast.FunctionDef | ast.AsyncFunctionDef | None) -> str | None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            fn = node
+        elif isinstance(node, ast.Lambda):
+            fn = None
+        if isinstance(node, ast.Return) and node.value and (node.value.lineno, node.value.col_offset) == (line, col):
+            if fn is None or fn.returns is None:
+                return None
+            r = fn.returns
+            a = tr._from_hidden(offset(r.lineno, r.col_offset), False)
+            b = tr._from_hidden(offset(r.end_lineno or r.lineno, r.end_col_offset or 0), True)
+            return None if a is None or b is None else src[a[0] : b[0]].strip() or None
+        for child in ast.iter_child_nodes(node):
+            if (got := find(child, fn)) is not None:
+                return got
+        return None
+
+    return find(tree, None)
 
 
 def positional_fields(msg: str) -> list[str] | None:
@@ -1061,6 +1106,11 @@ class Proxy:
             lit = record_literal_slot(tr.source, cursor)
             if lit and ARGUMENT_RE.search(tr.source[: lit[0]]) and self.ask_record_argument(msg, key, doc, lit):
                 return True
+            if lit and RETURN_RE.search(tr.source[: lit[0]]):
+                k, close, ws, we, given = lit
+                written = return_type(tr.source, k, close, doc.path)
+                if written and self.complete_record_type(msg, key, doc, (k, close, written, ws, we, given)):
+                    return True
             if ctx.get("triggerKind") == 2 and ctx.get("triggerCharacter") in self.own_triggers:
                 self.client.send({"jsonrpc": "2.0", "id": mid, "result": {"isIncomplete": False, "items": []}})
                 return True  # our extra trigger outside a pattern, a call and a record literal: nothing to offer

@@ -732,6 +732,20 @@ def test_completion_in_an_annotated_record_literal_offers_the_types_fields(lsp):
     assert {i["label"] for i in items} == {"x=", "y="}
     _, items = complete(c, uri, pre + "f((|), u=(name='x', age=1), o=(x=1, y=''))\n")
     assert "print" in {i["label"] for i in items}  # an int parameter: not a record
+    # a returned literal: the fields of the innermost def's return type, closed or open, named or written out
+    pre = MAIN + "type User = (name: str, age: int)\n"
+    _, items = complete(c, uri, pre + "def g(u: User) -> User:\n    return (**u, name='x', |)\n")
+    assert {i["label"] for i in items} == {"age="}
+    text = "def g() -> User:\n    def h() -> (..., x: int, y: str):\n        return (|)\n    return (name='', age=1)\n"
+    _, items = complete(c, uri, pre + text)
+    assert {i["label"] for i in items} == {"x=", "y="}
+    text = "def g() -> User:\n    def h() -> int:\n        return 1\n    return (|)\n"
+    _, items = complete(c, uri, pre + text)
+    assert {i["label"] for i in items} == {"name=", "age="}
+    _, items = complete(c, uri, pre + "def g() -> int:\n    return (|)\n")
+    assert "print" in {i["label"] for i in items}  # not a record
+    _, items = complete(c, uri, pre + "def g():\n    return (|)\n")
+    assert "print" in {i["label"] for i in items}  # no annotation
     # an annotation that isn't a record type: names in scope
     _, items = complete(c, uri, pre + "n: int = (|)\n")
     assert "print" in {i["label"] for i in items}
