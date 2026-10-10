@@ -172,7 +172,7 @@ def call_after_comma(src: str, cursor: int) -> int | None:
 
 
 RECORD_TARGET_RE = re.compile(r"^\s*[A-Za-z_][\w.]*\s*:(?P<annotation>[^=]+)=\s*$")
-RETURN_RE = re.compile(r"\breturn\s*$")
+FLOW_RE = re.compile(r"\b(?P<kw>return|yield(?P<frm>\s+from)?)\s*$")  # `return (`, `yield (`, `yield from [`
 ARGUMENT_RE = re.compile(r"(?:[(,]|[A-Za-z_]\w*\s*=)\s*$")  # what comes before an argument: `f(`, `, `, `name=`
 RECORD_ITEM_RE = re.compile(r"^\s*(\*\*\s*[\w.]+|[A-Za-z_]\w*\s*=.*)\s*$", re.DOTALL)
 
@@ -180,6 +180,7 @@ RECORD_ITEM_RE = re.compile(r"^\s*(\*\*\s*[\w.]+|[A-Za-z_]\w*\s*=.*)\s*$", re.DO
 SEQUENCES = {"list", "set", "frozenset", "Sequence", "MutableSequence", "Iterable", "Collection", "AbstractSet"}
 SEQUENCES |= {"MutableSet", "Iterator", "deque"}
 MAPPINGS = {"dict", "Mapping", "MutableMapping", "defaultdict", "OrderedDict"}
+YIELDS = {"Iterator", "Iterable", "AsyncIterator", "AsyncIterable", "Generator", "AsyncGenerator"}
 
 
 def split_top(text: str, sep: str) -> list[str]:
@@ -200,9 +201,10 @@ def split_top(text: str, sep: str) -> list[str]:
 
 
 def container_step(src: str, k: int, close: int) -> tuple[int, int, tuple[str, int] | None] | None:
-    """The list, set, dict or tuple that src[k:close+1] is a whole item of: (its opener, its closer, the step in:
-    ("item", 0) in a list or set, ("value", 0) in a dict, ("tuple", i) in a tuple, None in a plain group); None
-    if it's an item of nothing (a call's argument, a subscript, a comprehension, part of a larger expression)."""
+    """The list, set, dict or tuple that src[k:close+1] is a whole item of, or the comprehension it's the element
+    of: (its opener, its closer, the step in: ("item", 0) in a list or set or a comprehension's element, ("key", 0)
+    or ("value", 0) in a dict, ("tuple", i) in a tuple, None in a plain group); None if it's an item of nothing (a
+    call's argument, a subscript, part of a larger expression)."""
     depth, o = 0, k
     while o > 0:
         o -= 1
@@ -234,7 +236,10 @@ def container_step(src: str, k: int, close: int) -> tuple[int, int, tuple[str, i
     items = split_top(src[o + 1 : k] + "\0" + src[close + 1 : c], ",")
     i = next(n for n, it in enumerate(items) if "\0" in it)
     head, tail = items[i].split("\0")
-    if tail.strip():
+    comprehension = len(items) == 1 and re.match(r"\s*(async\s+)?for\b", tail)
+    if tail.strip() and not comprehension:
+        if src[o] == "{" and not head.strip() and tail.lstrip().startswith(":"):
+            return o, c, ("key", 0)
         return None
     if src[o] == "{":
         colons = split_top(head, ":")
@@ -245,14 +250,16 @@ def container_step(src: str, k: int, close: int) -> tuple[int, int, tuple[str, i
         return None
     if head.strip():
         return None
-    if src[o] == "[":
+    if src[o] == "[" or comprehension:
         return o, c, ("item", 0)
     return o, c, (("tuple", i) if len(items) > 1 else None)
 
 
 def element_type(written: str, steps: list[tuple[str, int]]) -> str | None:
     """The type expected at the end of `steps` in a value of type `written`, as written: list[User] and
-    ("item", 0) -> User; a union keeps the members that have one (`list[User] | None` -> User); None if none do."""
+    ("item", 0) -> User; a union keeps the members that have one (`list[User] | None` -> User); None if none do.
+    Besides container_step's steps, ("yield", 0) is what a generator annotated `written` yields and ("result", 0)
+    what it returns (Generator[Y, S, R] -> R)."""
     for kind, i in steps:
         found = []
         for member in split_top(written, "|"):
@@ -262,8 +269,14 @@ def element_type(written: str, steps: list[tuple[str, int]]) -> str | None:
             name, args = m[1].rsplit(".", 1)[-1], [a.strip() for a in split_top(m[2], ",")]
             if kind == "item" and name in SEQUENCES and len(args) == 1:
                 found.append(args[0])
-            elif kind == "value" and name in MAPPINGS and len(args) == 2:
-                found.append(args[1])
+            elif kind in ("key", "value") and name in MAPPINGS and len(args) == 2:
+                found.append(args[kind == "value"])
+            elif kind == "yield" and name in YIELDS:
+                found.append(args[0])
+            elif kind == "result" and name == "Generator" and len(args) == 3:
+                found.append(args[2])
+            elif kind == "tuple" and name in SEQUENCES and len(args) == 1:
+                found.append(args[0])
             elif kind == "tuple" and name in ("tuple", "Tuple"):
                 if len(args) == 2 and args[1] == "...":
                     found.append(args[0])
@@ -389,9 +402,10 @@ def pretty(text: str) -> str:
     return "".join(out).replace("_byname_AnyRec", "(...)")  # a spread record whose fields aren't known
 
 
-def return_type(src: str, k: int, close: int, path) -> str | None:
-    """The return annotation, as written, of the innermost def around `return (...)` whose literal is src[k:close+1];
-    None in a lambda or a def without one. The def is found in the translation, `0` standing in for the literal."""
+def function_type(src: str, k: int, close: int, path) -> tuple[str, bool] | None:
+    """The return annotation, as written, of the innermost def around `return (...)`, `yield (...)` or
+    `yield from [...]` whose value is src[k:close+1], and whether that def is a generator; None in a lambda or a def
+    without one. The def is found in the translation, `0` standing in for the value."""
     tr = Translation(src[:k] + "0" + src[close + 1 :], path)
     if tr.error is not None:
         return None
@@ -404,23 +418,33 @@ def return_type(src: str, k: int, close: int, path) -> str | None:
     line = hidden.count("\n", 0, h) + 1
     col = len(hidden[hidden.rfind("\n", 0, h) + 1 : h].encode())
     starts = LineIndex(hidden).starts
+    scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 
     def offset(lineno: int, col_offset: int) -> int:
         start = starts[lineno - 1]
         return start + len(hidden[start:].encode()[:col_offset].decode(errors="ignore"))
 
-    def find(node: ast.AST, fn: ast.FunctionDef | ast.AsyncFunctionDef | None) -> str | None:
+    def yields(node: ast.AST) -> bool:
+        """`node`'s body yields, not counting the defs, lambdas and classes in it."""
+        return any(
+            isinstance(child, (ast.Yield, ast.YieldFrom)) or (not isinstance(child, scopes) and yields(child))
+            for child in ast.iter_child_nodes(node)
+        )
+
+    def find(node: ast.AST, fn: ast.FunctionDef | ast.AsyncFunctionDef | None) -> tuple[str, bool] | None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             fn = node
         elif isinstance(node, ast.Lambda):
             fn = None
-        if isinstance(node, ast.Return) and node.value and (node.value.lineno, node.value.col_offset) == (line, col):
+        value = getattr(node, "value", None) if isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom)) else None
+        if value is not None and (value.lineno, value.col_offset) == (line, col):
             if fn is None or fn.returns is None:
                 return None
             r = fn.returns
             a = tr._from_hidden(offset(r.lineno, r.col_offset), False)
             b = tr._from_hidden(offset(r.end_lineno or r.lineno, r.end_col_offset or 0), True)
-            return None if a is None or b is None else src[a[0] : b[0]].strip() or None
+            written = None if a is None or b is None else src[a[0] : b[0]].strip()
+            return (written, yields(fn)) if written else None
         for child in ast.iter_child_nodes(node):
             if (got := find(child, fn)) is not None:
                 return got
@@ -1246,9 +1270,10 @@ class Proxy:
         self, msg: dict, key: Path | str, doc: Doc, lit: tuple[int, int, int, int, set[str]]
     ) -> bool:
         """Field names in a record literal whose type is known from where it stands: the value of an annotated
-        assignment (`user: User = (|)`), an argument (`f(u=(|))`) or a returned value (`return (|)`), or an item
-        of a list, set, dict or tuple standing there (`users: list[User] = [(|)]`), whose element type is read
-        off the annotation as written (element_type), so an alias of `list[User]` gets plain completion."""
+        assignment (`user: User = (|)`), an argument (`f(u=(|))`), a returned or yielded value (`return (|)`,
+        `yield (|)`, `yield from [(|)]`), or an item of a list, set, dict or tuple, or a comprehension's element,
+        standing there (`users: list[User] = [(|)]`), whose element type is read off the annotation as written
+        (element_type), so an alias of `list[User]` gets plain completion."""
         k, close, ws, we, given = lit
         src = doc.tr.source
         o, c, steps = k, close, []
@@ -1259,8 +1284,16 @@ class Proxy:
         before = src[:o]
         if m := RECORD_TARGET_RE.match(before[before.rfind("\n") + 1 :]):
             written = m["annotation"].strip()
-        elif RETURN_RE.search(before):
-            written = return_type(src, o, c, doc.path)
+        elif flow := FLOW_RE.search(before):
+            if (got := function_type(src, o, c, doc.path)) is None:
+                return False
+            written, generator = got
+            if flow["kw"] == "return":
+                steps = [("result", 0)] * generator + steps
+            elif flow["frm"]:  # `yield from` takes any iterable of what the generator yields
+                written = (y := element_type(written, [("yield", 0)])) and f"Iterable[{y}]"
+            else:
+                steps = [("yield", 0)] + steps
         elif ARGUMENT_RE.search(before):
             return self.ask_record_argument(msg, key, doc, lit, o, c, steps)
         else:

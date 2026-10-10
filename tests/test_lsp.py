@@ -759,10 +759,37 @@ def test_completion_in_an_annotated_record_literal_offers_the_types_fields(lsp):
         c, uri, pre + "from collections.abc import Sequence\ndef h(*, us: Sequence[User]): ...\nh(us=[(|)])\n"
     )
     assert {i["label"] for i in items} == {"name=", "age="}
-    # not an item: a key, a comprehension, a subscript
-    for text in ["d: dict[User, int] = {(|): 1}\n", "us: list[User] = [(name=n|) for n in 'ab']\n"]:
-        _, items = complete(c, uri, pre + text)
+    # a dict key, a comprehension's element, a tuple under Sequence[T]
+    for text, want in [
+        ("d: dict[User, int] = {(name='a', |): 1}\n", {"age="}),
+        ("us: list[User] = [(name=n, |) for n in 'ab']\n", {"age="}),
+        ("by: dict[str, User] = {n: (|) for n in 'ab'}\n", {"name=", "age="}),
+        ("us: Sequence[User] = ((name='a', age=1), (|))\n", {"name=", "age="}),
+    ]:
+        _, items = complete(c, uri, pre + "from collections.abc import Sequence\n" + text)
+        assert {i["label"] for i in items} == want
+    # yielded: Y in Iterator[Y] or Generator[Y, S, R], an iterable of Y after `yield from`; a generator returns R
+    gen = "from collections.abc import AsyncIterator, Generator, Iterator\n"
+    for text, want in [
+        ("def g() -> Iterator[User]:\n    yield (name='a', |)\n", {"age="}),
+        ("def g() -> Iterator[User]:\n    yield from [(|)]\n", {"name=", "age="}),
+        ("async def g() -> AsyncIterator[User]:\n    yield (age=1, |)\n", {"name="}),
+        (
+            "def g() -> Generator[User, None, (n: int, ok: bool)]:\n    yield (name='a', age=1)\n    return (n=1, |)\n",
+            {"ok="},
+        ),
+    ]:
+        _, items = complete(c, uri, pre + gen + text)
+        assert {i["label"] for i in items} == want
+    # a generator's return under Iterator[Y] has no type to complete; a yield in a nested def isn't the outer one's
+    for text in [
+        "def g() -> Iterator[User]:\n    yield (name='a', age=1)\n    return (|)\n",
+    ]:
+        _, items = complete(c, uri, pre + gen + text)
         assert "print" in {i["label"] for i in items}
+    text = "def g() -> User:\n    def h() -> Iterator[int]:\n        yield 1\n    return (|)\n"
+    _, items = complete(c, uri, pre + gen + text)
+    assert {i["label"] for i in items} == {"name=", "age="}
     # an annotation that isn't a record type: names in scope
     _, items = complete(c, uri, pre + "n: int = (|)\n")
     assert "print" in {i["label"] for i in items}
