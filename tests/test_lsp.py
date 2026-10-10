@@ -746,6 +746,23 @@ def test_completion_in_an_annotated_record_literal_offers_the_types_fields(lsp):
     assert "print" in {i["label"] for i in items}  # not a record
     _, items = complete(c, uri, pre + "def g():\n    return (|)\n")
     assert "print" in {i["label"] for i in items}  # no annotation
+    # an item of a list, set, dict or tuple: the element type read off the annotation, in all three places
+    _, items = complete(c, uri, pre + "users: list[User] = [(name='a', age=1), (name='b', |)]\n")
+    assert {i["label"] for i in items} == {"age="}
+    _, items = complete(c, uri, pre + "by: dict[str, list[User] | None] = {'a': [(^)]}\n", "^")
+    assert {i["label"] for i in items} == {"name=", "age="}
+    _, items = complete(c, uri, pre + "pair: tuple[int, (x: int, y: str)] = (1, (|))\n")
+    assert {i["label"] for i in items} == {"x=", "y="}
+    _, items = complete(c, uri, pre + "def g() -> list[User]:\n    return [(|)]\n")
+    assert {i["label"] for i in items} == {"name=", "age="}
+    _, items = complete(
+        c, uri, pre + "from collections.abc import Sequence\ndef h(*, us: Sequence[User]): ...\nh(us=[(|)])\n"
+    )
+    assert {i["label"] for i in items} == {"name=", "age="}
+    # not an item: a key, a comprehension, a subscript
+    for text in ["d: dict[User, int] = {(|): 1}\n", "us: list[User] = [(name=n|) for n in 'ab']\n"]:
+        _, items = complete(c, uri, pre + text)
+        assert "print" in {i["label"] for i in items}
     # an annotation that isn't a record type: names in scope
     _, items = complete(c, uri, pre + "n: int = (|)\n")
     assert "print" in {i["label"] for i in items}

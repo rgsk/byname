@@ -177,15 +177,102 @@ ARGUMENT_RE = re.compile(r"(?:[(,]|[A-Za-z_]\w*\s*=)\s*$")  # what comes before 
 RECORD_ITEM_RE = re.compile(r"^\s*(\*\*\s*[\w.]+|[A-Za-z_]\w*\s*=.*)\s*$", re.DOTALL)
 
 
-def record_type_slot(src: str, cursor: int) -> tuple[int, int, str, int, int, set[str]] | None:
-    """(the `(`, its `)`, the annotation, word start, word end, the fields given) if `cursor` is at a field position
-    of a record literal that is the whole value of an annotated assignment, `user: User = (name=, |)`; else None."""
-    if (lit := record_literal_slot(src, cursor)) is None:
+SEQUENCES = {"list", "set", "frozenset", "Sequence", "MutableSequence", "Iterable", "Collection", "AbstractSet"}
+SEQUENCES |= {"MutableSet", "Iterator", "deque"}
+MAPPINGS = {"dict", "Mapping", "MutableMapping", "defaultdict", "OrderedDict"}
+
+
+def split_top(text: str, sep: str) -> list[str]:
+    """`text` split at each `sep` outside brackets."""
+    parts, depth, cur = [], 0, ""
+    for ch in text:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == sep and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    return parts
+
+
+def container_step(src: str, k: int, close: int) -> tuple[int, int, tuple[str, int] | None] | None:
+    """The list, set, dict or tuple that src[k:close+1] is a whole item of: (its opener, its closer, the step in:
+    ("item", 0) in a list or set, ("value", 0) in a dict, ("tuple", i) in a tuple, None in a plain group); None
+    if it's an item of nothing (a call's argument, a subscript, a comprehension, part of a larger expression)."""
+    depth, o = 0, k
+    while o > 0:
+        o -= 1
+        if src[o] in ")]}":
+            depth += 1
+        elif src[o] in "([{":
+            if depth == 0:
+                break
+            depth -= 1
+    else:
         return None
-    k, close, ws, we, given = lit
-    if (m := RECORD_TARGET_RE.match(src[src.rfind("\n", 0, k) + 1 : k])) is None:
+    if src[o] not in "([{":
         return None
-    return k, close, m["annotation"].strip(), ws, we, given
+    depth, c = 0, None
+    for j in range(o + 1, len(src)):
+        if src[j] in "([{":
+            depth += 1
+        elif src[j] in ")]}":
+            if depth == 0:
+                c = j
+                break
+            depth -= 1
+    if c is None:
+        return None
+    before = src[:o].rstrip()
+    word = re.search(r"\w*$", before)[0]
+    if src[o] in "([" and before and (before[-1] in ")]" or (word and not keyword.iskeyword(word))):
+        return None  # a call or a subscript
+    items = split_top(src[o + 1 : k] + "\0" + src[close + 1 : c], ",")
+    i = next(n for n, it in enumerate(items) if "\0" in it)
+    head, tail = items[i].split("\0")
+    if tail.strip():
+        return None
+    if src[o] == "{":
+        colons = split_top(head, ":")
+        if len(colons) == 1 and not head.strip():
+            return o, c, ("item", 0)
+        if len(colons) == 2 and colons[0].strip() and not colons[1].strip() and "**" not in colons[0]:
+            return o, c, ("value", 0)
+        return None
+    if head.strip():
+        return None
+    if src[o] == "[":
+        return o, c, ("item", 0)
+    return o, c, (("tuple", i) if len(items) > 1 else None)
+
+
+def element_type(written: str, steps: list[tuple[str, int]]) -> str | None:
+    """The type expected at the end of `steps` in a value of type `written`, as written: list[User] and
+    ("item", 0) -> User; a union keeps the members that have one (`list[User] | None` -> User); None if none do."""
+    for kind, i in steps:
+        found = []
+        for member in split_top(written, "|"):
+            m = re.fullmatch(r"\s*([\w.]+)\s*\[(.*)\]\s*", member, re.DOTALL)
+            if m is None:
+                continue
+            name, args = m[1].rsplit(".", 1)[-1], [a.strip() for a in split_top(m[2], ",")]
+            if kind == "item" and name in SEQUENCES and len(args) == 1:
+                found.append(args[0])
+            elif kind == "value" and name in MAPPINGS and len(args) == 2:
+                found.append(args[1])
+            elif kind == "tuple" and name in ("tuple", "Tuple"):
+                if len(args) == 2 and args[1] == "...":
+                    found.append(args[0])
+                elif i < len(args):
+                    found.append(args[i])
+        if not found:
+            return None
+        written = " | ".join(found)
+    return written
 
 
 def record_literal_slot(src: str, cursor: int) -> tuple[int, int, int, int, set[str]] | None:
@@ -1100,17 +1187,9 @@ class Proxy:
                 self.pending[mid] = ("after_comma", (doc, params["position"]))
                 self.send_server({**msg, "params": self.to_checker(at_paren, doc)})
                 return True
-            rec = record_type_slot(tr.source, cursor)
-            if rec is not None and self.complete_record_type(msg, key, doc, rec):
-                return True
             lit = record_literal_slot(tr.source, cursor)
-            if lit and ARGUMENT_RE.search(tr.source[: lit[0]]) and self.ask_record_argument(msg, key, doc, lit):
+            if lit is not None and self.complete_record_literal(msg, key, doc, lit):
                 return True
-            if lit and RETURN_RE.search(tr.source[: lit[0]]):
-                k, close, ws, we, given = lit
-                written = return_type(tr.source, k, close, doc.path)
-                if written and self.complete_record_type(msg, key, doc, (k, close, written, ws, we, given)):
-                    return True
             if ctx.get("triggerKind") == 2 and ctx.get("triggerCharacter") in self.own_triggers:
                 self.client.send({"jsonrpc": "2.0", "id": mid, "result": {"isIncomplete": False, "items": []}})
                 return True  # our extra trigger outside a pattern, a call and a record literal: nothing to offer
@@ -1163,30 +1242,55 @@ class Proxy:
         self.send_server({**msg, "params": sent})
         return True
 
-    def ask_record_argument(
+    def complete_record_literal(
         self, msg: dict, key: Path | str, doc: Doc, lit: tuple[int, int, int, int, set[str]]
     ) -> bool:
-        """Field names in `f(s, schedule=(|))`. With no annotation to read, the checker is first asked for the
-        signature there, `0` standing in for the literal; the parameter's type then serves as the annotation
-        (answer_record_argument)."""
+        """Field names in a record literal whose type is known from where it stands: the value of an annotated
+        assignment (`user: User = (|)`), an argument (`f(u=(|))`) or a returned value (`return (|)`), or an item
+        of a list, set, dict or tuple standing there (`users: list[User] = [(|)]`), whose element type is read
+        off the annotation as written (element_type), so an alias of `list[User]` gets plain completion."""
         k, close, ws, we, given = lit
         src = doc.tr.source
-        ttr = Translation(src[:k] + "0" + src[close + 1 :], doc.path)
+        o, c, steps = k, close, []
+        while (step := container_step(src, o, c)) is not None:
+            o, c, kind = step
+            if kind is not None:
+                steps.insert(0, kind)
+        before = src[:o]
+        if m := RECORD_TARGET_RE.match(before[before.rfind("\n") + 1 :]):
+            written = m["annotation"].strip()
+        elif RETURN_RE.search(before):
+            written = return_type(src, o, c, doc.path)
+        elif ARGUMENT_RE.search(before):
+            return self.ask_record_argument(msg, key, doc, lit, o, c, steps)
+        else:
+            return False
+        written = written and element_type(written, steps)
+        return bool(written) and self.complete_record_type(msg, key, doc, (k, close, written, ws, we, given))
+
+    def ask_record_argument(
+        self, msg: dict, key: Path | str, doc: Doc, lit: tuple, o: int, c: int, steps: list
+    ) -> bool:
+        """Field names in `f(s, schedule=(|))` or `f(users=[(|)])`. With no annotation to read, the checker is
+        first asked for the signature there, `0` standing in for the argument src[o:c+1]; the parameter's type
+        then serves as the annotation (answer_record_argument)."""
+        src = doc.tr.source
+        ttr = Translation(src[:o] + "0" + src[c + 1 :], doc.path)
         if ttr.error is not None:
             return False
-        h = ttr._to_hidden(k + 1, False, touch=True)
+        h = ttr._to_hidden(o + 1, False, touch=True)
         self.send_text(key, ttr.hidden, None)
         sid = f"byname-signature-{msg['id']}"
-        self.pending[sid] = ("record_argument", (msg, key, doc, lit))
+        self.pending[sid] = ("record_argument", (msg, key, doc, lit, steps))
         position = LineIndex(ttr.hidden).position(h)
         params = {"textDocument": {"uri": self.editor_uri(key)}, "position": position}
         self.send_server({"jsonrpc": "2.0", "id": sid, "method": "textDocument/signatureHelp", "params": params})
         return True
 
-    def answer_record_argument(self, help, msg: dict, key: Path | str, doc: Doc, lit: tuple) -> None:
+    def answer_record_argument(self, help, msg: dict, key: Path | str, doc: Doc, lit: tuple, steps: list) -> None:
         """Completes the fields of the parameter's type; not in a call or no parameter there, plain completion."""
         k, close, ws, we, given = lit
-        written = parameter_type(help)
+        written = (written := parameter_type(help)) and element_type(written, steps)
         if written and self.complete_record_type(msg, key, doc, (k, close, written, ws, we, given)):
             return
         latest = self.docs.get(key, [doc])[-1]
