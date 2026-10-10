@@ -789,9 +789,14 @@ def test_completion_in_an_annotated_record_literal_offers_the_types_fields(lsp):
         ("p: Pair = (1, (age=1, |))\n", {"name="}),
         ("def g() -> Stream:\n    yield (name='a', |)\n", {"age="}),
         ("def h(*, us: Users): ...\nh(us=[(name='a', |)])\n", {"age="}),
+        ("def g() -> Stream:\n    yield from [(name='a', |)]\n", {"age="}),
+        ("def g() -> Stream:\n    yield from ((name='a', age=1), (age=2, |))\n", {"name="}),
     ]:
         _, items = complete(c, uri, pre + alias + text)
         assert {i["label"] for i in items} == want
+    # an alias in a union: None left out of the cast, which iter() of an Optional has no element type for
+    _, items = complete(c, uri, pre + alias + "us: Users | None = [(name='a', ^)]\n", "^")
+    assert {i["label"] for i in items} == {"age="}
     # yielded: Y in Iterator[Y] or Generator[Y, S, R], an iterable of Y after `yield from`; a generator returns R
     gen = "from collections.abc import AsyncIterator, Generator, Iterator\n"
     for text, want in [

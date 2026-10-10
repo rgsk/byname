@@ -298,10 +298,12 @@ def expected_value(written: str, steps: list[tuple[str, int | str]]) -> str | No
     union's members that fit: `list[User] | None`). A field's type is the checker's to know (`(lead: User)` may be
     named `Team`), as is an alias's (`type Users = list[User]`), so from the first step that can't be read off the
     text each step is an expression: `.lead`, `next(iter(...))` for an item or what a generator yields, `[i]` for a
-    tuple's. A generator's return type has no expression: None."""
+    tuple's. A generator's return type has no expression: None. `None` in a union is left out of the cast: a
+    literal there isn't it, and `iter()` of an Optional has no element type (`Users | None`)."""
     n = 0
     while n < len(steps) and steps[n][0] != "field" and (inner := element_type(written, steps[n : n + 1])):
         written, n = inner, n + 1
+    written = " | ".join(m.strip() for m in split_top(written, "|") if m.strip() != "None") or written
     value = f"_t.cast({written}, None)"
     for kind, i in steps[n:]:
         if kind == "field":
@@ -1320,8 +1322,10 @@ class Proxy:
             written, generator = got
             if flow["kw"] == "return":
                 steps = [("result", 0)] * generator + steps
-            elif flow["frm"]:  # `yield from` takes any iterable of what the generator yields
-                written = (y := element_type(written, [("yield", 0)])) and f"Iterable[{y}]"
+            elif flow["frm"]:  # `yield from` takes an iterable of what the generator yields: its items are that
+                if not steps or steps[0][0] not in ("item", "tuple", "key"):
+                    return False
+                steps = [("yield", 0)] + steps[1:]
             else:
                 steps = [("yield", 0)] + steps
         elif ARGUMENT_RE.search(before):
