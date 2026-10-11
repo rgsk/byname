@@ -967,6 +967,7 @@ def test_rest_of_a_record_made_in_an_imported_module_is_typed_too(tmp_path):
         reveal_type(r3)
         r1.age
         r1.agee
+        s = (**u, zip=1)  # a spread translates the file twice: the second pass reads the imports too
         """,
         tmp_path,
     )

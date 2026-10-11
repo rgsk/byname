@@ -1384,7 +1384,7 @@ def transform(
         body = body[: e.start] + e.text + body[e.end :]
     # checker: spread records of names whose fields the file shows get their exact type (known_build)
     if checker and known is None and builds and (k := known_fields(body, lookup)):
-        return transform(src, path, tolerant, portable, checker, known=k)
+        return transform(src, path, tolerant, portable, checker, known=k, lookup=lookup)
 
     prelude = ""
     omit_defs = ""
