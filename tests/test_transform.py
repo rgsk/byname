@@ -547,6 +547,15 @@ def test_spread_records_of_known_names_are_plain_records():
     assert "_rec_" not in transform(SPREADS).body.split("both = ")[1].split("\n")[0]  # runtime: _byname_rec
 
 
+def test_a_spread_of_a_call_whose_function_shows_its_fields_is_a_plain_record():
+    # the call written once, its value kept for the other fields; checker only: what runs is _byname_rec
+    src = "def make():\n    return (name='a', age=1)\nx = (**make(), zip=1)\ny = (**make(), **make())\n"
+    body = transform(src, checker=True).body.splitlines()
+    assert body[2] == "x = _rec_name__age__zip(name=(_byname_v0 := make()).name, age=_byname_v0.age, zip=1)"
+    assert body[3].startswith("y = _byname_ctx(")  # the second overrides every field of the first: generic path
+    assert transform(src).body.splitlines()[2] == "x = _byname_rec({**make(), 'zip': 1})"
+
+
 def test_spread_records_as_call_arguments_fall_back_to_a_record():
     # a whole call argument gets _byname_arg (unknown type: a record, so a non-record overload rejects it);
     # anywhere else _byname_ctx (unknown type: Any)

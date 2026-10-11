@@ -379,15 +379,19 @@ def parse_around_errors(body: str, tries: int = 10) -> ast.Module | None:
 @dataclass(frozen=True)
 class Known:
     """A name's record fields, read off the file (known_fields). is_dict: it holds a record's `_asdict()`,
-    so a spread reads it as `d["name"]`, not `d.name`."""
+    so a spread reads it as `d["name"]`, not `d.name`. returns: it's a function, and these are the fields
+    of what a call to it returns."""
 
     fields: tuple[str, ...]
     is_dict: bool = False
+    returns: bool = False
 
 
 # the record fields of a name another module defines: (module, level, name) -> Known, or None if it shows none
 Lookup = Callable[[str, int, str], "Known | None"]  # imports.Modules, which also has .shapes(module, level)
-Source = tuple[str, ast.expr] | tuple[str, tuple[str, int, str]]  # where a binding's fields show (_Bind.source)
+# where a binding's fields show (_Bind.source): ("value" | "type", expr), ("import", (module, level, name)),
+# ("def", the function), whose fields are those of what it returns
+Source = tuple[str, ast.expr] | tuple[str, tuple[str, int, str]] | tuple[str, ast.FunctionDef]
 
 
 @dataclass(eq=False)
@@ -438,6 +442,9 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
     shared: set[str] = set()  # names in a `nonlocal`: rebound across scopes, never known
     sources: dict[int, tuple[str, ast.expr]] = {}  # id(Name target) -> its binding's source
     reads: list[tuple[str, int, _Scope, int]] = []  # name, line, scope, statement index
+    scopes: dict[int, _Scope] = {}  # id(def) -> its body's scope
+    returns: dict[int, list[tuple[ast.expr, int]]] = {}  # id(scope) -> its functions' `return` values, statement index
+    no_record: set[int] = set()  # id(scope) of functions that may return no record: a bare `return`, or a generator
 
     def bind(
         scope: _Scope,
@@ -482,7 +489,11 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
                     visit(d, scope, at, straight)
                 if node.returns is not None:
                     visit(node.returns, scope, at, straight)
-                bind(scope, node.name, at, straight)
+                # a call to a plain `def` returns what its annotation or its `return`s show; not an `async def`
+                # (a coroutine) or a decorated one (the decorator may return anything)
+                plain = isinstance(node, ast.FunctionDef) and not node.decorator_list
+                bind(scope, node.name, at, straight, ("def", node) if plain else None)
+                scopes[id(node)] = inner
             params(node.args, scope, inner, at, straight)
             if isinstance(node, ast.Lambda):
                 visit(node.body, inner, 0, True)
@@ -509,6 +520,13 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
             for e in [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]:
                 visit(e, inner, 0, True)
             return
+        if isinstance(node, ast.Return):
+            if node.value is None:
+                no_record.add(id(scope))
+            else:
+                returns.setdefault(id(scope), []).append((node.value, at))
+        elif isinstance(node, (ast.Yield, ast.YieldFrom)):
+            no_record.add(id(scope))
         if isinstance(node, ast.Name):
             if isinstance(node.ctx, ast.Load):
                 reads.append((node.id, node.lineno, scope, at))
@@ -580,13 +598,33 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
         kind, node = b.source
         if isinstance(node, tuple):  # ("import", (module, level, name))
             memo[id(b)] = lookup(*node) if lookup is not None else None
+        elif isinstance(node, ast.FunctionDef):
+            got = of_def(node, *b.where)
+            memo[id(b)] = Known(got.fields, returns=True) if got is not None else None
         else:
             memo[id(b)] = of_value(node, *b.where) if kind == "value" else of_type(node, *b.where)
         return memo[id(b)]
 
+    def of_def(d: ast.FunctionDef, scope: _Scope, at: int) -> Known | None:
+        """The fields of what a call to d returns: its return annotation's (read where d is defined), or else
+        those every `return` shows, when they all show the same ones (a function returning another's result
+        is followed). A bare `return` or a `yield`: none."""
+        if d.returns is not None:
+            got = of_type(d.returns, scope, at)
+            return got if got is not None and not got.is_dict else None
+        inner = scopes[id(d)]
+        if id(inner) in no_record or not (rs := returns.get(id(inner))):
+            return None
+        got = [of_value(v, inner, k) for v, k in rs]
+        first = got[0]
+        if first is None or first.is_dict or any(k != first for k in got):
+            return None
+        return first
+
     def of_value(e: ast.expr, scope: _Scope, at: int) -> Known | None:
         if isinstance(e, ast.Name):
-            return resolve(e.id, scope, at)
+            got = resolve(e.id, scope, at)
+            return got if got is None or not got.returns else None  # a function isn't a record
         if (  # `rec._asdict()`: a dict with the record's fields
             isinstance(e, ast.Call)
             and isinstance(e.func, ast.Attribute)
@@ -595,7 +633,7 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
             and not e.args
             and not e.keywords
         ):
-            got = resolve(e.func.value.id, scope, at)
+            got = of_value(e.func.value, scope, at)
             return Known(got.fields, is_dict=True) if got is not None and not got.is_dict else None
         if not isinstance(e, ast.Call) or not isinstance(e.func, ast.Name):
             return None
@@ -603,7 +641,7 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
             return Known(tuple(k.arg for k in e.keywords if k.arg))  # a record literal
         if e.func.id.startswith("_byname_omit_") and len(e.args) == 1 and isinstance(e.args[0], ast.Name):
             # `rest` of `(name=, **rest) = u`: u's fields but those taken (omit_name)
-            got = resolve(e.args[0].id, scope, at)
+            got = of_value(e.args[0], scope, at)
             taken = set(e.func.id.removeprefix("_byname_omit_").split("__"))
             return Known(tuple(f for f in got.fields if f not in taken)) if got and not got.is_dict else None
         if e.func.id in ("_byname_ctx", "_byname_arg"):  # a spread record: its dict display, in order
@@ -613,8 +651,8 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
             out: dict[str, None] = {}
             for k, v in zip(d.keys, d.values):
                 if k is None:
-                    inner = v.args[0] if isinstance(v, ast.Call) and v.args else v
-                    got = resolve(inner.id, scope, at) if isinstance(inner, ast.Name) else None
+                    inner = v.args[0] if isinstance(v, ast.Call) and v.args else v  # _byname_kw(x) / _pick(x, ...)
+                    got = of_value(inner, scope, at)
                     if got is None:
                         return None
                     out.update(dict.fromkeys(got.fields))
@@ -623,14 +661,15 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
                 else:
                     return None
             return Known(tuple(out))
-        return None
+        got = resolve(e.func.id, scope, at)  # a call to a function that shows what it returns (of_def)
+        return Known(got.fields) if got is not None and got.returns else None
 
     def of_type(t: ast.expr, scope: _Scope, at: int) -> Known | None:
         if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id.startswith("_typ_"):
             return Known(tuple(t.value.id.removeprefix("_typ_").split("__")))  # exact types only, not `_opn_`
         if isinstance(t, ast.Name):
             got = resolve(t.id, scope, at)
-            return got if got is None or not got.is_dict else None  # a dict isn't a type
+            return got if got is None or not (got.is_dict or got.returns) else None  # a dict isn't a type
         return None
 
     if exports:
@@ -735,6 +774,7 @@ def transform(
                 standins.append((at, at, SHORT))
 
     kw_used = builds = False
+    calls = 0  # `_byname_v<n>`: a spread call's value in a known build
     type_groups: set[int] = set()  # `(` of record types, for their fields' types and `(name: str)(...)`
 
     def wrap_kw(its: list[list[int]]) -> None:
@@ -769,19 +809,26 @@ def transform(
         return toks[before - 1].string in ("(", ",")
 
     def known_build(i: int, close: int, its: list[list[int]]) -> bool:
-        """Checker only: a spread record whose `**` items are all names with known fields (known_fields) is
-        built as a plain record, `(**u, age=27)` -> `_rec_name__age(name=u.name, age=27)`, so it has its
+        """Checker only: a spread record whose `**` items are all names or calls with known fields
+        (known_fields) is built as a plain record, `(**u, age=27)` -> `_rec_name__age(name=u.name, age=27)`,
+        `(**make(), age=27)` -> `_rec_name__age(name=(_byname_v0 := make()).name, age=27)`, so it has its
         exact type without an expected type. A later item wins and the first position stays, as at runtime.
         False: left to the generic path, which also reports any mistakes."""
+        nonlocal calls
         order: dict[str, list[int]] = {}  # field -> the item that gives it
 
         def of(t: tokenize.TokenInfo) -> Known | None:
             return (known or {}).get((t.string, t.start[0]))  # the translation keeps the source's lines
 
+        def is_call(it: list[int]) -> bool:  # `**f(...)`
+            return len(it) >= 4 and toks[it[2]].string == "(" and pair.get(it[2]) == it[-1]
+
         for it in its:
             first = toks[it[0]]
             if first.string == "**":
-                if len(it) != 2 or not is_name(toks[it[1]]) or (got := of(toks[it[1]])) is None:
+                if not is_name(toks[it[1]]) or (len(it) != 2 and not is_call(it)) or (got := of(toks[it[1]])) is None:
+                    return False
+                if got.returns != is_call(it):  # a call to a function that shows its fields; else a record
                     return False
                 for f in got.fields:
                     if f in order and toks[order[f][0]].string != "**":
@@ -808,9 +855,13 @@ def transform(
                 name, (first, *rest) = toks[it[1]].string, given[it[0]]
                 is_dict = (got := of(toks[it[1]])) is not None and got.is_dict
                 read = (lambda f: f'["{f}"]') if is_dict else (lambda f: f".{f}")
-                at = off(toks[it[1]].end)
-                edits.append(Edit(off(toks[it[0]].start), off(toks[it[0]].end), f"{first}=", span(it[1])))
-                tail = read(first) + "".join(f", {f}={name}{read(f)}" for f in rest)
+                head, at, close_call = f"{first}=", off(toks[it[1]].end), ""
+                if is_call(it):  # `**make()`: the call once, as written, its value kept for the other fields
+                    name, at, close_call = f"_byname_v{calls}", off(toks[it[-1]].end), ")"
+                    head = f"{first}=({name} := "
+                    calls += 1
+                edits.append(Edit(off(toks[it[0]].start), off(toks[it[0]].end), head, span(it[1])))
+                tail = close_call + read(first) + "".join(f", {f}={name}{read(f)}" for f in rest)
                 edits.append(Edit(at, at, tail, span(it[1])))
             else:
                 # the field name as generated text, like the generic path: the checker would colour a

@@ -123,12 +123,16 @@ q: (name: str, age: int, sex: str, surname: str) = (**u, **r)   # or write the t
 
 A spread record is checked against the type expected where it stands, so you never have to name one.
 With no type expected, like `x = (**u, **r)`, it still gets its exact type when every spread is a name
-the file shows the fields of: bound to a record or a spread of such names, to `rec._asdict()`, or
-annotated with a record type (a parameter's too). Then `x` is `(name: str, age: int, sex: str, surname: str)`
-and a typo like `x.surnme` is an error. Names are scoped as in Python, and a name rebound in straight-line
+the file shows the fields of: bound to a record or a spread of such names, to `rec._asdict()`, to a call
+of a function that shows them, or annotated with a record type (a parameter's too). Then `x` is
+`(name: str, age: int, sex: str, surname: str)` and a typo like `x.surnme` is an error. A function shows
+the fields of what it returns by its return annotation, or by its `return`s when they all show the same
+ones (`return (name=, age=)`, or another such function's call, in other modules too), so
+`(**make(), zip=1)` is typed. Not an `async def` or a decorated function: annotate it. Names are scoped as in Python, and a name rebound in straight-line
 code is read at its nearest binding before the spread, so `u = (**u, city="pune")` stays typed. When more than
 one binding may have run (an `if`, a loop, a function reading a module name) they must all have the same
-fields. Otherwise (bindings with different fields, from a call, an import) it's `Any`. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
+fields. Otherwise (bindings with different fields, a call to a method or to a function that shows no one
+record) it's `Any`. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
 `f((**u, **r))`.
 A field can't be called `keys`: records have a `keys()` method, which is what lets `**` work.
 

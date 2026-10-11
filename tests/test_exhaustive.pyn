@@ -682,6 +682,61 @@ def test_a_record_built_from_spreads_takes_the_later_field_in_the_first_position
     assert repr(cfg) == "(lr=0.003, eval_iters=100, batch_size=32)"
 
 
+def test_a_spread_of_a_call_is_typed_when_the_function_shows_its_fields(tmp_path):
+    # a function shows the fields of what it returns by its annotation, or by its `return`s when they all
+    # show the same ones (a function returning another's result is followed, into other modules too)
+    (tmp_path / "people.pyn").write_text("def load():\n    return (name='ann', city='oslo')\n")
+    verdicts = checker(
+        """\
+        from people import load
+        def make(n: int):
+            return (name="ann", age=n)
+        def relay():
+            return load()
+        x = make(1)
+        s1 = (**x, zip=1)
+        s2 = (**make(1), zip=1)
+        s3 = (**relay(), name=2)
+        reveal_type(s1)
+        reveal_type(s2)
+        reveal_type(s3)
+        s1.zpi
+        s4 = (**make("1"), zip=nope)
+        """,
+        tmp_path,
+    )
+    assert verdicts[10] == 'Type of "s1" is "(name: str, age: int, zip: int)"'
+    assert verdicts[11] == 'Type of "s2" is "(name: str, age: int, zip: int)"'
+    assert verdicts[12] == 'Type of "s3" is "(name: int, city: str)"'  # a later field wins, in the first place
+    assert verdicts[13].startswith('Cannot access attribute "zpi"')
+    errors = verdicts[14].split("\n\n")  # the call is written out once: each mistake reported once
+    assert len(errors) == 2
+    assert 'Argument of type "Literal[\'1\']"' in errors[0] and '"nope" is not defined' in errors[1]
+    assert sorted(verdicts) == [10, 11, 12, 13, 14]
+
+
+def test_a_spread_of_a_call_whose_function_shows_no_one_record_is_unknown(tmp_path):
+    verdicts = checker(
+        """\
+        import functools
+        def either(c: bool):
+            if c:
+                return (name="a")
+            return (name="a", age=1)
+        @functools.cache
+        def cached():
+            return (name="a")
+        e = (**either(True), zip=1)
+        c = (**cached(), zip=1)
+        reveal_type(e)
+        reveal_type(c)
+        """,
+        tmp_path,
+    )
+    # returns of different fields, or a decorator, which may return anything; annotate the function instead
+    assert verdicts == {11: 'Type of "e" is "Unknown"', 12: 'Type of "c" is "Unknown"'}
+
+
 def test_a_spread_of_known_records_is_typed_without_an_annotation(tmp_path):
     verdicts = checker(
         """\
