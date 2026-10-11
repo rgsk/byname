@@ -188,6 +188,9 @@ class Result:
     fields: list[tuple[int, int]] = field(default_factory=list)  # source spans of record field names, for highlighting
     # source spans of walrus names labelling a returned tuple
     labels: list[tuple[int, int]] = field(default_factory=list)
+    # every record shape the translation defines, (fields, is_open): what another module's `**rest` can take
+    # the rest of (imports.Modules.shapes)
+    shapes: list[tuple[tuple[str, ...], bool]] = field(default_factory=list)
 
 
 def field_error(name: str) -> str:
@@ -382,7 +385,7 @@ class Known:
 
 
 # the record fields of a name another module defines: (module, level, name) -> Known, or None if it shows none
-Lookup = Callable[[str, int, str], "Known | None"]
+Lookup = Callable[[str, int, str], "Known | None"]  # imports.Modules, which also has .shapes(module, level)
 Source = tuple[str, ast.expr] | tuple[str, tuple[str, int, str]]  # where a binding's fields show (_Bind.source)
 
 
@@ -1344,6 +1347,36 @@ def transform(
 
     tuples = label_returns() if checker else {}
 
+    def imported_shapes() -> list[tuple[tuple[str, ...], bool]]:
+        """The record shapes of the .pyn modules this file imports (`from m import f`, `import m`), so a rest of
+        a record made there, `(name=, **rest) = f()`, has an omit overload too (omit_def). Not their imports'."""
+        shapes_of = getattr(lookup, "shapes", None)
+        if shapes_of is None:
+            return []
+        modules: list[tuple[str, int]] = []
+        for k, t in enumerate(toks):
+            if t.type != tokenize.NAME or t.string not in ("from", "import"):
+                continue
+            if k and toks[k - 1].type not in STMT_START and toks[k - 1].string != ";":
+                continue  # `yield from`, `raise X from e`, the `import` of `from m import`
+            j, level, name = k + 1, 0, ""
+            while toks[j].type not in (tokenize.NEWLINE, tokenize.ENDMARKER) and toks[j].string != ";":
+                s = toks[j].string
+                if t.string == "from" and s == "import":
+                    break
+                if s in (".", "...") and not name:
+                    level += len(s)
+                elif s == "as":
+                    j += 1  # the alias
+                elif s == ",":  # `import a, b`
+                    modules.append((name, 0))
+                    name = ""
+                elif s != "(":
+                    name += s
+                j += 1
+            modules.append((name, level))
+        return [s for m in dict.fromkeys(modules) for s in shapes_of(*m)]
+
     # apply edits back-to-front
     edits.sort(key=lambda e: (e.start, e.end))
     body = src
@@ -1356,7 +1389,9 @@ def transform(
     prelude = ""
     omit_defs = ""
     if omits:  # checker: `**rest` typed per record shape (omit_def), so the types it returns must exist too
-        shapes = list(dict.fromkeys([*((f, False) for f in records), *types]))
+        imported = imported_shapes()
+        shapes = list(dict.fromkeys([*((f, False) for f in records), *types, *imported]))
+        types.update(dict.fromkeys(imported))  # an overload's parameter type, defined here like the file's own
         for taken in omits:
             omit_defs += omit_def(taken, shapes)
             types.update(dict.fromkeys(omit_types(taken, shapes)))
@@ -1397,7 +1432,8 @@ def transform(
     if record_used:
         prelude += "from typing import cast as _cast\n"
     standins.sort()
-    return Result(prelude, body, edits, problems, standins, sorted(field_spans), sorted(label_spans))
+    shapes = list(dict.fromkeys([*((f, False) for f in records), *types]))
+    return Result(prelude, body, edits, problems, standins, sorted(field_spans), sorted(label_spans), shapes)
 
 
 def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:

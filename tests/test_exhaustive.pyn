@@ -942,7 +942,41 @@ def test_rest_is_typed_from_the_source_s_record_type(tmp_path):
     assert sorted(verdicts) == [10, 11, 12, 13, 14, 17]
 
 
-def test_rest_of_a_record_whose_shape_the_file_does_not_show_is_any_record(tmp_path):
+def test_rest_of_a_record_made_in_an_imported_module_is_typed_too(tmp_path):
+    # the shapes of the .pyn modules the file imports count as its own: an inferred return, an annotated
+    # one, through an imported alias
+    (tmp_path / "people.pyn").write_text(
+        dedent(
+            """\
+            type User = (name: str, age: int, city: str)
+            def make(name: str):
+                return (name=, age=30, city="oslo")
+            def load() -> User: ...
+            """
+        )
+    )
+    verdicts = checker(
+        """\
+        from people import User, load, make
+        (name=, **r1) = make("ann")
+        (name=, **r2) = load()
+        u: User = load()
+        (name=, **r3) = u
+        reveal_type(r1)
+        reveal_type(r2)
+        reveal_type(r3)
+        r1.age
+        r1.agee
+        """,
+        tmp_path,
+    )
+    for line, name in [(6, "r1"), (7, "r2"), (8, "r3")]:
+        assert verdicts[line] == f'Type of "{name}" is "(age: int, city: str)"'
+    assert sorted(verdicts) == [6, 7, 8, 10]  # r1.age is fine, r1.agee isn't
+    assert verdicts[10].startswith('Cannot access attribute "agee"')
+
+
+def test_rest_of_a_record_whose_shape_no_file_shows_is_any_record(tmp_path):
     # the checker can't take fields out of a type, so byname types a rest per record shape the file has
     verdicts = checker(
         """\

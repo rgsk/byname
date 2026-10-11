@@ -1,4 +1,5 @@
-"""Record types imported from other .pyn modules, for the checker translation's spreads (known_fields).
+"""Record types imported from other .pyn modules, for the checker translation's spreads (known_fields), and
+the record shapes those modules define, for its `**rest` (Modules.shapes).
 
 `from train import TrainConfig` then `(**cfg)` with `cfg: TrainConfig`: the spread is typed only if its
 fields are known, and they're in train.pyn. The module is found as the checker would find it: relative to
@@ -19,6 +20,7 @@ CONFIGS = ("pyproject.toml", "pyrightconfig.json")
 # module file -> (its names' fields, the stat of every file they were read from: it and its imports')
 _exports: dict[Path, tuple[dict[str, Known], dict[Path, tuple[int, int] | None]]] = {}
 _roots: dict[Path, list[Path]] = {}  # project root -> its search folders
+_shapes: dict[Path, tuple[list[tuple[tuple[str, ...], bool]], tuple[int, int] | None]] = {}  # file -> (shapes, stat)
 
 
 def project_root(start: Path) -> Path | None:
@@ -89,6 +91,23 @@ class Modules:
         self.used |= {f, *inner}
         self.cut |= cut
         return names.get(name)
+
+    def shapes(self, module: str, level: int) -> list[tuple[tuple[str, ...], bool]]:
+        """The record shapes module's translation defines (transform's Result.shapes), for `**rest` of a
+        record made there."""
+        f = find_module(self.importer, module, level)
+        if f is None or f in self.seen:
+            return []
+        self.used.add(f)
+        before = stamp(f)
+        if (hit := _shapes.get(f)) and hit[1] == before:
+            return hit[0]
+        try:
+            got = transform(f.read_text(encoding="utf-8"), str(f), tolerant=True, checker=True, known={}).shapes
+        except (OSError, SyntaxError, ValueError):
+            return []
+        _shapes[f] = (got, before)
+        return got
 
 
 def stamp(f: Path) -> tuple[int, int] | None:
