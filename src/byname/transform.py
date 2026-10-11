@@ -191,6 +191,7 @@ class Result:
     # every record shape the translation defines, (fields, is_open): what another module's `**rest` can take
     # the rest of (imports.Modules.shapes)
     shapes: list[tuple[tuple[str, ...], bool]] = field(default_factory=list)
+    imports: list[tuple[str, int]] = field(default_factory=list)  # the modules it imports, (module, level)
 
 
 def field_error(name: str) -> str:
@@ -1347,12 +1348,8 @@ def transform(
 
     tuples = label_returns() if checker else {}
 
-    def imported_shapes() -> list[tuple[tuple[str, ...], bool]]:
-        """The record shapes of the .pyn modules this file imports (`from m import f`, `import m`), so a rest of
-        a record made there, `(name=, **rest) = f()`, has an omit overload too (omit_def). Not their imports'."""
-        shapes_of = getattr(lookup, "shapes", None)
-        if shapes_of is None:
-            return []
+    def imports() -> list[tuple[str, int]]:
+        """The modules this file imports, `from m import f` / `import m`, as (module, level)."""
         modules: list[tuple[str, int]] = []
         for k, t in enumerate(toks):
             if t.type != tokenize.NAME or t.string not in ("from", "import"):
@@ -1375,7 +1372,13 @@ def transform(
                     name += s
                 j += 1
             modules.append((name, level))
-        return [s for m in dict.fromkeys(modules) for s in shapes_of(*m)]
+        return list(dict.fromkeys(modules))
+
+    def imported_shapes() -> list[tuple[tuple[str, ...], bool]]:
+        """The record shapes of the .pyn modules this file imports and theirs in turn (imports.Modules.shapes),
+        so a rest of a record made there, `(name=, **rest) = f()`, has an omit overload too (omit_def)."""
+        shapes_of = getattr(lookup, "shapes", None)
+        return [] if shapes_of is None else [s for m in imports() for s in shapes_of(*m)]
 
     # apply edits back-to-front
     edits.sort(key=lambda e: (e.start, e.end))
@@ -1433,7 +1436,7 @@ def transform(
         prelude += "from typing import cast as _cast\n"
     standins.sort()
     shapes = list(dict.fromkeys([*((f, False) for f in records), *types]))
-    return Result(prelude, body, edits, problems, standins, sorted(field_spans), sorted(label_spans), shapes)
+    return Result(prelude, body, edits, problems, standins, sorted(field_spans), sorted(label_spans), shapes, imports())
 
 
 def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:

@@ -185,9 +185,9 @@ for (id=, **data) in rows: ...         # loops and nested patterns too
   of fields to take the rest of. Anything else is a checker error and a `TypeError` at runtime.
 - **Empty or whole:** naming every field gives an empty record, `()`; `(**rest) = r` is a copy, equal to `r`.
 - **Typed by the source's record shape:** a checker can't take fields out of a type, so byname writes
-  one case per record shape in the file and in the .pyn modules it imports: an exact type gives exactly
-  the other fields, an open one `(..., age: int)` stays open. A record whose shape none of them shows (made
-  two imports away, or typed `Any`) gives `(...)`: any record, read with brackets (`rest["age"]`) only.
+  one case per record shape in the file and in the .pyn modules it imports, theirs included: an exact type
+  gives exactly the other fields, an open one `(..., age: int)` stays open. A record whose shape none of them
+  shows (typed `Any`, say) gives `(...)`: any record, read with brackets (`rest["age"]`) only.
 
 **Why `images=x0`, not `x0=images`:** in a pattern the field is on the left and the new name on the right,
 so `(images=x0) = load_mnist()` puts the field `images` into `x0`. It reads backwards from `x0 = images`,

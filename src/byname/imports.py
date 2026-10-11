@@ -20,7 +20,8 @@ CONFIGS = ("pyproject.toml", "pyrightconfig.json")
 # module file -> (its names' fields, the stat of every file they were read from: it and its imports')
 _exports: dict[Path, tuple[dict[str, Known], dict[Path, tuple[int, int] | None]]] = {}
 _roots: dict[Path, list[Path]] = {}  # project root -> its search folders
-_shapes: dict[Path, tuple[list[tuple[tuple[str, ...], bool]], tuple[int, int] | None]] = {}  # file -> (shapes, stat)
+# file -> (its own record shapes, the modules it imports, its stat)
+_shapes: dict[Path, tuple[list[tuple[tuple[str, ...], bool]], list[tuple[str, int]], tuple[int, int] | None]] = {}
 
 
 def project_root(start: Path) -> Path | None:
@@ -93,20 +94,26 @@ class Modules:
         return names.get(name)
 
     def shapes(self, module: str, level: int) -> list[tuple[tuple[str, ...], bool]]:
-        """The record shapes module's translation defines (transform's Result.shapes), for `**rest` of a
-        record made there."""
+        """The record shapes module's translation defines (transform's Result.shapes) and those of the
+        modules it imports, and theirs in turn, for `**rest` of a record made there: `make2()` in rough.pyn
+        returning what `make()` in pending.pyn built. A module already on the import chain adds nothing."""
         f = find_module(self.importer, module, level)
         if f is None or f in self.seen:
             return []
         self.used.add(f)
         before = stamp(f)
-        if (hit := _shapes.get(f)) and hit[1] == before:
-            return hit[0]
-        try:
-            got = transform(f.read_text(encoding="utf-8"), str(f), tolerant=True, checker=True, known={}).shapes
-        except (OSError, SyntaxError, ValueError):
-            return []
-        _shapes[f] = (got, before)
+        if (hit := _shapes.get(f)) and hit[2] == before:
+            own, modules = hit[0], hit[1]
+        else:
+            try:
+                r = transform(f.read_text(encoding="utf-8"), str(f), tolerant=True, checker=True, known={})
+            except (OSError, SyntaxError, ValueError):
+                return []
+            own, modules = r.shapes, r.imports
+            _shapes[f] = (own, modules, before)
+        inner = Modules(f, self.seen)
+        got = own + [s for m in modules for s in inner.shapes(*m)]
+        self.used |= inner.used
         return got
 
 

@@ -977,6 +977,30 @@ def test_rest_of_a_record_made_in_an_imported_module_is_typed_too(tmp_path):
     assert verdicts[10].startswith('Cannot access attribute "agee"')
 
 
+def test_rest_follows_imports_to_the_module_that_made_the_record(tmp_path):
+    # people.pyn makes it, relay.pyn passes it on writing no shape: two imports away, and an import back
+    # from people to relay (a cycle) ends the chain
+    (tmp_path / "people.pyn").write_text(
+        dedent(
+            """\
+            import relay
+            def make():
+                return (name="ann", age=30, city="oslo")
+            """
+        )
+    )
+    (tmp_path / "relay.pyn").write_text("from people import make\ndef make2():\n    return make()\n")
+    verdicts = checker(
+        """\
+        from relay import make2
+        (name=, **r) = make2()
+        reveal_type(r)
+        """,
+        tmp_path,
+    )
+    assert verdicts == {3: 'Type of "r" is "(age: int, city: str)"'}
+
+
 def test_rest_of_a_record_whose_shape_no_file_shows_is_any_record(tmp_path):
     # the checker can't take fields out of a type, so byname types a rest per record shape the file has
     verdicts = checker(
