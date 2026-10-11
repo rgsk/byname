@@ -783,3 +783,16 @@ def test_a_record_not_imported_from_byname_is_left_alone():
 def test_record_call_is_an_error_in_output_files():
     with pytest.raises(SyntaxError, match="record\\(\\) needs byname at runtime"):
         to_python(RECORD_CALL, portable=True)
+
+
+def test_a_rest_defines_only_the_imported_shapes_it_can_take_apart():
+    # a project's imports can bring hundreds of record shapes; a rest needs those holding its taken fields
+    class Lookup:
+        def __call__(self, module, level, name):
+            return None
+
+        def shapes(self, module, level):
+            return [(("name", "age"), False), *(((f"f{i}", f"g{i}"), False) for i in range(50))]
+
+    r = transform("import many\n(name=, **rest) = many.load()\n", checker=True, lookup=Lookup())
+    assert "class _typ_name__age[" in r.prelude and "class _typ_f0__g0" not in r.prelude

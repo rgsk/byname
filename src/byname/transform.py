@@ -1445,7 +1445,9 @@ def transform(
     if omits:  # checker: `**rest` typed per record shape (omit_def), so the types it returns must exist too
         imported = imported_shapes()
         shapes = list(dict.fromkeys([*((f, False) for f in records), *types, *imported]))
-        types.update(dict.fromkeys(imported))  # an overload's parameter type, defined here like the file's own
+        # an overload's parameter type, defined here like the file's own: only those holding a rest's taken
+        # fields (the others have no overload, and a project's imports can bring hundreds)
+        types.update(dict.fromkeys(s for s in imported if s[0] and any(set(t) <= set(s[0]) for t in omits)))
         for taken in omits:
             omit_defs += omit_def(taken, shapes)
             types.update(dict.fromkeys(omit_types(taken, shapes)))
