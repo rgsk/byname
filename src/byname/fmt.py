@@ -3,6 +3,7 @@
     fn(x=)            -> fn(x=__p)
     (x=, y=1)         -> __P(x=__p, y=1)
     (x=, y=t) = r     -> __P[x:__p, y:t] = r       (a subscript is a valid assignment target)
+    (x=, **rest) = r  -> __P[x:__p, *rest] = r    (so is a starred item in it)
     -> (x: int)       -> -> __T[x: int]            (record type)
 
 Stand-ins are a few characters wider than the real syntax, so a line right at the length limit
@@ -96,6 +97,8 @@ def decode(code: str) -> str:
                     prev_end = off(toks[sig[pos[j] - 1]].end)
                     after = nxt(j)
                     edits.append((prev_end, off(toks[after].start), sep))
+                elif s == "*" and t.string == PAT:  # `*rest` -> `**rest`
+                    edits.append((off(toks[j].start), off(toks[j].end), "**"))
                 j = nxt(j)
     edits.sort()
     out = code

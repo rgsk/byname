@@ -102,13 +102,17 @@ def uri_to_path(uri: str) -> Path:
     return Path(url2pathname(urlparse(uri).path))
 
 
-REC_RE = re.compile(r"_(rec|dct|typ|opn|tup)_(\w+)|_(opn)_()")
+REC_RE = re.compile(r"_(rec|dct|typ|opn|tup)_(\w+)|_(opn|typ|rec|dct)_(?!\w)")
 GENERATED_PREFIXES = ("_rec_", "_dct_", "_typ_", "_opn_", "_tup_")
 # an exact record type's field-set mismatch, as pyright reports it: "...Literal['a,b,c']" ... "...Literal['a,b']"
 FIELDSET_RE = re.compile(r"""Literal\['([\w,]*)'\]" is not assignable to type "(?:\(\) -> )?Literal\['([\w,]*)'\]""")
 TARGET_RE = re.compile(r'is incompatible with protocol "_typ_(\w+?)\[')
 # both full field sets from the first protocol line; the Literal lines can be cut short ('...vocab_si…')
 PROTOCOL_RE = re.compile(r'"_(?:rec|typ|opn)_(\w+?)\[[^"]*" is incompatible with protocol "_typ_(\w+?)\[')
+# `(name=, **rest) = x` where x isn't a record (see omit_def in transform.py)
+OMIT_RE = re.compile(
+    r'Argument of type "(.*?)" cannot be assigned to parameter "x" of type "[^"]*" in function "_byname_omit_\w*"'
+)
 LITERAL_RE = re.compile(r"Literal\['([\w,]*)'\]")
 DICT_MISSING_RE = re.compile(r'"(\w+)" is required in "_dct_')
 DICT_EXTRA_RE = re.compile(r'"(\w+)" is an undefined item in type "_dct_')
@@ -404,8 +408,8 @@ def pretty(text: str) -> str:
     out, i = [], 0
     while m := REC_RE.search(text, i):
         out.append(text[i : m.start()])
-        if m.group(3):  # `(...)`: an open type with no fields
-            out.append("(...)")
+        if m.group(3):  # no fields: `(...)`, any record, or `()`, the rest of a record once every field is taken
+            out.append({"opn": "(...)", "dct": "{}"}.get(m.group(3), "()"))
             i = m.end()
             continue
         fields = m.group(2).split("__")
@@ -540,6 +544,13 @@ def explain_fields(msg: str) -> str:
         if rule := RULE_RE.search(lines[-1]):
             out[-1] += f" ({rule[1]})"
         return "\n".join(out)
+    if m := OMIT_RE.search(msg):  # the CLI's message starts with its location
+        rule = RULE_RE.search(msg.split("\n")[-1])
+        return (
+            msg[: m.start()]
+            + f'"{m[1]}" is not a record: **rest takes the rest of a record'
+            + (f" ({rule[1]})" if rule else "")
+        )
     if fields := positional_fields(msg):
         msg = add_line(msg, f"records are read by name: ({', '.join(f + '=' for f in fields)})")
     msg = KEY_RE.sub('"str"', msg)  # a record's key type, aliased only to carry its fields
@@ -1249,16 +1260,15 @@ class Proxy:
                 self.client.send({"jsonrpc": "2.0", "id": mid, "result": {"isIncomplete": False, "items": []}})
                 return True  # our extra trigger outside a pattern, a call and a record literal: nothing to offer
             return False
-        ws, we, close, listed = slot
+        ws, we, _, listed = slot
         src = tr.source
         word = src[ws:cursor] or PLACEHOLDER
-        temp = src[:ws] + word + src[we:]
-        close += len(word) - (we - ws)
-        temp = temp[:close] + ", __byname_kw=" + temp[close:]  # makes `(x) = y` a pattern too
-        ttr = Translation(temp, doc.path)
+        # an item before the word makes `(x) = y` a pattern too; not after it, where a `**rest` must stay last
+        kw = "__byname_kw=, "
+        ttr = Translation(src[:ws] + kw + word + src[we:], doc.path)
         if ttr.error is not None:
             return False
-        h = ttr._to_hidden(ws + len(word), False, touch=True)
+        h = ttr._to_hidden(ws + len(kw) + len(word), False, touch=True)
         hidden = ttr.hidden
         if word == PLACEHOLDER:  # leave `_ds.` with nothing after it: complete every field
             hidden, h = hidden[: h - len(word)] + hidden[h:], h - len(word)

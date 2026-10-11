@@ -139,7 +139,10 @@ class Translation:
 
     def quiet(self, start: int, message: str) -> bool:
         """The checker (or Ruff's F841) calls a walrus that labels a returned tuple unused: it's bound to
-        name a position."""
+        name a position. And `**rest` of a value that isn't a record: the checker says no overload of
+        `_byname_omit_...` fits, and again which argument didn't (explain_fields words that one)."""
+        if 'No overloads for "_byname_omit_' in message:
+            return True
         return start in self.labels and ("is not accessed" in message or "is assigned to but never used" in message)
 
     def _to_hidden(self, off: int, end: bool, touch: bool = False) -> int:

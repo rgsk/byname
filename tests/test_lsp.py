@@ -578,6 +578,24 @@ def test_completion_in_for_and_nested_slots(lsp):
     assert {i["label"] for i in items} == {"name", "greeting"}
 
 
+REST = """\
+type User = (name: str, age: int, city: str)
+def load() -> User: ...
+(name=, **rest) = load()
+"""
+
+
+def test_a_rest_hovers_as_the_fields_not_named_and_fields_complete_before_it(lsp):
+    c, root, uri = lsp
+    _, items = complete(c, uri, REST.replace("(name=, **rest)", "(name=, |, **rest)"))
+    assert {i["label"] for i in items} == {"age", "city"}
+    path = root / "rest.pyn"
+    path.write_text(REST)
+    rest_uri = c.open(path)
+    assert "rest: (age: int, city: str)" in hover_text(c, rest_uri, pos(REST, "rest)"))
+    assert [d["message"] for d in c.wait_diags(rest_uri) if d.get("severity", 1) == 1] == []
+
+
 def test_completion_on_a_class_instance_offers_methods(lsp):
     # destructuring reads attributes, so methods and properties are slots too
     c, root, uri = lsp

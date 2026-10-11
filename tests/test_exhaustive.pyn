@@ -843,6 +843,125 @@ def test_a_spread_is_checked_against_the_type_expected_where_it_stands(tmp_path)
     assert "extra field: zip" in verdicts[7]  # against the parameter
 
 
+# `**rest` in a pattern: the fields not named, as a record. The other way round from building one,
+# `(**rest, name=)`, and written the way `match` writes it for a dict: `case {"name": n, **rest}`
+
+
+def test_rest_collects_the_fields_not_named_as_a_record():
+    (name=, **rest) = (name="ann", age=30, city="oslo")
+    assert name == "ann"
+    assert rest == (age=30, city="oslo")
+
+
+def test_rest_keeps_the_order_the_source_wrote_its_fields_in():
+    (age=, **rest) = (city="oslo", age=30, name="ann")
+    assert repr(rest) == "(city='oslo', name='ann')"
+
+
+def test_take_a_few_fields_and_pass_the_rest_on():
+    def model(*, n_layer: int, n_head: int) -> str:
+        return f"{n_layer}x{n_head}"
+
+    (lr=, **model_args) = (lr=3e-4, n_layer=6, n_head=8)
+    assert (lr, model(**model_args)) == (3e-4, "6x8")
+
+
+def test_rest_is_one_call_after_the_fields():
+    assert (
+        transform("(name=, age=a, **rest) = r").body
+        == "_ds = r; name = _ds.name; a = _ds.age; rest = _byname_omit(_ds, ('age', 'name'))"
+    )
+
+
+def test_rest_in_loops_and_nested_patterns():
+    rows = [(id=1, name="ann", age=30), (id=2, name="bo", age=4)]
+    assert [data for (id=, **data) in rows if id == 2] == [(name="bo", age=4)]
+    (user=(name=, **more), **top) = (user=(name="ann", age=30), ok=True)
+    assert (name, more, top) == ("ann", (age=30), (ok=True))
+
+
+def test_rest_can_be_empty_or_the_whole_record():
+    r = (name="ann", age=30)
+    (name=, age=, **empty) = r
+    assert empty._asdict() == {} and repr(empty) == "()"
+    (**whole) = r  # a copy, equal to r; `whole = r` says the same, records being immutable
+    assert whole == r
+
+
+def test_rest_targets_are_any_assignment_target():
+    class Box:
+        rest: object = None
+
+    box = Box()
+    (name=, **box.rest) = (name="ann", age=30)
+    (name=, **_) = (name="ann", age=30)  # `_` is a name like any other, as in `first, *_ = xs`
+    assert box.rest == (age=30)
+
+
+def test_rest_takes_the_rest_of_a_record_only():
+    # plain destructuring reads attributes, so it works on any object; a rest needs the record's field list
+    @dataclass
+    class D:
+        name: str
+        age: int
+
+    with pytest.raises(TypeError, match="\\*\\*rest takes the rest of a record, not of D"):
+        (name=, **rest) = D("ann", 30)  # pyright: ignore[reportArgumentType]
+
+
+def test_rest_is_typed_from_the_source_s_record_type(tmp_path):
+    verdicts = checker(
+        """\
+        type User = (name: str, age: int, city: str)
+        def load() -> User: ...
+        def make():
+            return (name="a", age=1, score=2.5)
+        def f(u: User, o: (..., name: str, age: int)) -> None:
+            (name=, **r1) = load()
+            (name=, **r2) = make()
+            (name=, **r3) = o
+            (name=, age=, city=, **r4) = u
+            reveal_type(r1)
+            reveal_type(r2)
+            reveal_type(r3)
+            reveal_type(r4)
+            r1.name
+            (name=, **r5) = u
+            more = (**r5, zip=1)
+            reveal_type(more)
+        """,
+        tmp_path,
+    )
+    assert verdicts[10] == 'Type of "r1" is "(age: int, city: str)"'  # an annotated return
+    assert verdicts[11] == 'Type of "r2" is "(age: int, score: float)"'  # an inferred one
+    assert verdicts[12] == 'Type of "r3" is "(..., age: int)"'  # an open type stays open
+    assert verdicts[13] == 'Type of "r4" is "()"'
+    assert verdicts[14].startswith('Cannot access attribute "name" for class "(age: int, city: str)"')
+    # a rest of a name the file shows the fields of spreads back exactly (a rest of a call: see section 8's spreads)
+    assert verdicts[17] == 'Type of "more" is "(age: int, city: str, zip: int)"'
+    assert sorted(verdicts) == [10, 11, 12, 13, 14, 17]
+
+
+def test_rest_of_a_record_whose_shape_the_file_does_not_show_is_any_record(tmp_path):
+    # the checker can't take fields out of a type, so byname types a rest per record shape the file has
+    verdicts = checker(
+        """\
+        from dataclasses import dataclass
+        from typing import Any
+        @dataclass
+        class D:
+            name: str
+        def f(x: Any, d: D) -> None:
+            (name=, **r) = x
+            reveal_type(r)
+            (name=, **s) = d
+        """,
+        tmp_path,
+    )
+    assert verdicts[8] == 'Type of "r" is "(...)"'
+    assert verdicts[9].startswith('"D" is not a record: **rest takes the rest of a record')
+
+
 # ============================================================================
 # 9. WHAT BYNAME REJECTS, AND WHY
 # ============================================================================
@@ -866,6 +985,20 @@ def test_a_field_appears_once():
 def test_a_pattern_reads_by_name_never_by_position():
     with pytest.raises(SyntaxError, match="pattern item 'a' needs '=': write a= or a=target"):
         transform("(a, b=) = r\n")
+
+
+@pytest.mark.parametrize(
+    ("src", "msg"),
+    [
+        ("(**rest, name=) = u\n", "`\\*\\*rest` goes last in a pattern"),  # as in `match`: what's left is what comes last
+        ("(name=, **a, **b) = u\n", "`\\*\\*rest` goes last in a pattern"),  # so there's one
+        ("(name=, **f()) = u\n", "cannot bind the rest to 'f\\(\\)'"),
+        ("(name=, 1, **rest) = u\n", "a pattern takes `field=`, `field=target` and a last `\\*\\*rest`"),
+    ],
+)
+def test_a_rest_goes_last_into_an_assignment_target(src, msg):
+    with pytest.raises(SyntaxError, match=msg):
+        transform(src)
 
 
 def test_a_spread_record_takes_only_spreads_and_named_fields():

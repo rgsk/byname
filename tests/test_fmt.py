@@ -34,6 +34,13 @@ def test_nested_pattern_stand_in(tmp_path):
     assert format_pyn("(id= ,user=( name=,age = a ))=r\n", cwd=tmp_path) == src
 
 
+def test_rest_stand_in(tmp_path):
+    # `**rest` -> `*rest`: a starred item is valid in a subscript, so the pattern stays one target
+    src = "(name=, **rest) = r\nfor (a=, b=(c=, **more), **top) in xs:\n    pass\n"
+    assert encode(src) == "__P[name:__p, *rest] = r\nfor __P[a:__p, b:__P[c:__p, *more], *top] in xs:\n    pass\n"
+    assert format_pyn("(name= ,** rest)=r\nfor (a=,b=(c=,**more),**top) in xs :\n  pass\n", cwd=tmp_path) == src
+
+
 def test_spreads_format(tmp_path):
     src = "both = (**u,**r)\nx=(**u, age =27, name=)\nfn(**u, **r)\n"
     want = "both = (**u, **r)\nx = (**u, age=27, name=)\nfn(**u, **r)\n"

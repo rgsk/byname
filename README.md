@@ -30,6 +30,7 @@ always your local. A bare `field=` means `field=field`.
 | record | `(name=, score=99.5)` | an immutable record with fields `name`, `score` |
 | destructure | `(name=, age=) = r` | `name = r.name; age = r.age` |
 | rename | `(name=who) = r` | `who = r.name` |
+| rest | `(name=, **rest) = r` | `rest`: a record of r's other fields |
 | loop | `for (name=, age=) in rs:` | each item destructured, also in comprehensions |
 | record type | `def f() -> (name: str, age: int):` | a record with these fields, in any order; `(..., …)` for at least these |
 
@@ -167,6 +168,26 @@ for (x=, y=) in pts: ...               # for-loop targets
 [x * y for (x=, y=) in pts]            # comprehension targets
 (id=, user=(name=, age=a)) = r         # nested: name = r.user.name
 ```
+
+**Rest:** `**rest` collects the fields you didn't name into a record, the way `match` does for a dict
+(`case {"name": n, **rest}`). It's how you take a few fields and pass the others on:
+
+```python
+(lr=, **model_args) = cfg              # cfg: (lr: float, n_layer: int, n_head: int)
+Model(**model_args)                    # model_args: (n_layer: int, n_head: int), checked against Model
+for (id=, **data) in rows: ...         # loops and nested patterns too
+```
+
+- **Last, and once:** it collects what's left, so it comes after the fields it leaves out. Its target is
+  any assignment target, `_` included.
+- **The source's order:** `rest` keeps the fields in the order the source wrote them.
+- **Records only:** destructuring reads attributes, so it works on any object, but only a record has a list
+  of fields to take the rest of. Anything else is a checker error and a `TypeError` at runtime.
+- **Empty or whole:** naming every field gives an empty record, `()`; `(**rest) = r` is a copy, equal to `r`.
+- **Typed by the source's record shape:** a checker can't take fields out of a type, so byname writes
+  one case per record shape in the file: an exact type gives exactly the other fields, an open one
+  `(..., age: int)` stays open. A record whose shape the file doesn't show, like the inferred return of
+  a function in another module, gives `(...)`: any record, unchecked. Annotate the source to fix that.
 
 **Why `images=x0`, not `x0=images`:** in a pattern the field is on the left and the new name on the right,
 so `(images=x0) = load_mnist()` puts the field `images` into `x0`. It reads backwards from `x0 = images`,
