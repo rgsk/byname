@@ -31,9 +31,15 @@ DS = "_ds"
 # formatting stand-ins: `x=` -> `x=__p`, record `(` -> `__P(`, pattern -> `__P[...]`, record type -> `__T[...]`
 SHORT, PAT, TYP = "__p", "__P", "__T"
 REPR = "_byname_repr"
+# packages allowed to iterate a record at runtime: they treat any NamedTuple as a pytree and rebuild it as
+# `type(t)(*(f(v) for v in t))` (torch's DataLoader pin_memory, pytree, default_collate), which gives the same
+# record back, as iterating and the constructor both use the storage order. Add a package when it raises
+# "read by name only" from inside its own code
+ITER_CALLERS = ("torch.",)
 ORDER = "_byname_order"  # a record class's fields in the order written; `_fields` is the sorted storage order
 PRELUDE = (
     "from typing import NamedTuple as _NT\n"
+    "import sys as _byname_sys\n"
     f"def {REPR}(self) -> str: return '(' + ', '.join(f'{{k}}={{getattr(self, k)!r}}' for k in self.{ORDER}) + ')'\n"
     # records are mappings by field name at runtime, so `f(**rec)` and `{**rec}` work (see RESERVED)
     f"def _byname_keys(self): return self.{ORDER}\n"
@@ -45,8 +51,15 @@ PRELUDE = (
     # Records are read by name only, at runtime too: the tuple underneath stores the fields sorted by name, so
     # iterating, indexing, ordering or concatenating would expose an order nobody wrote (`a, b = (name=, age=)`
     # gave age, name). pickle, copy and _replace iterate in NamedTuple's own versions, hence their own here.
+    # The one exception is iterating from inside ITER_CALLERS, for libraries that rebuild the record.
     "def _byname_positional(self, *_):\n"
     "    raise TypeError(f'{type(self).__name__} is read by name only: use .field, keys() or _asdict()')\n"
+    # iterating is allowed only when the code iterating is in one of ITER_CALLERS (see above): the frame
+    # one up from __iter__ is the Python code that asked, also when it asked through list(), zip() or *
+    "def _byname_iter(self):\n"
+    f"    if _byname_sys._getframe(1).f_globals.get('__name__', '').startswith({ITER_CALLERS!r}):\n"
+    "        return tuple.__iter__(self)\n"
+    "    _byname_positional(self)\n"
     "def _byname_unordered(self, o): return NotImplemented\n"
     "def _byname_args(self): return tuple.__getitem__(self, slice(None))\n"
     "def _byname_replace(self, **kw):\n"
@@ -71,7 +84,8 @@ PRELUDE = (
     f"    c.{ORDER}, c.__repr__, c.keys, c.__getitem__ = order, {REPR}, _byname_keys, _byname_item\n"
     "    c.__eq__, c.__ne__, c._asdict = _byname_eq, _byname_ne, _byname_asdict\n"
     "    c.__contains__ = _byname_has\n"
-    "    c.__iter__ = c.__add__ = c.__mul__ = c.__rmul__ = _byname_positional\n"
+    "    c.__iter__ = _byname_iter\n"
+    "    c.__add__ = c.__mul__ = c.__rmul__ = _byname_positional\n"
     "    c.__lt__ = c.__le__ = c.__gt__ = c.__ge__ = _byname_unordered\n"
     "    c.__getnewargs__, c._replace = _byname_args, _byname_replace\n"
 )

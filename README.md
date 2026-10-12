@@ -41,7 +41,11 @@ record is built and nothing that reads it changes meaning.
 - **Access:** `.field` access, destructuring by name, `rec._asdict()` and `rec._replace(age=27)`. Reading
   by position (`a, b = rec`, `rec[0]`, `for v in rec`, `f(*rec)`, `sorted(recs)`) is a checker error and
   raises `TypeError` at runtime, and the editor offers a quick fix: `x, y = get_batch()` becomes
-  `(x=, y=) = get_batch()`. Want positions? Return a tuple. Like a dict, `"name" in rec` asks for a field
+  `(x=, y=) = get_batch()`. Want positions? Return a tuple. One exception at runtime: PyTorch may iterate a
+  record, because it moves any NamedTuple as `type(t)(*(f(v) for v in t))` (`DataLoader(pin_memory=True)`,
+  pytree, `default_collate`) and that gives the same record back. Iterating from your own code, `json`
+  or any other package still raises. A package that raises "read by name only" from inside its own code
+  for the same reason goes in `ITER_CALLERS` in `transform.py`. Like a dict, `"name" in rec` asks for a field
   name and `{**rec}` gives a dict (`json.dumps({**rec})`; `json.dumps(rec)` raises).
 - **`rec.name` is checked, `rec["name"]` isn't:** brackets take any string key and give `Any`, on any record
   type, open types and unions of records included. It's the way around the checker when you know better

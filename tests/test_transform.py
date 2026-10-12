@@ -363,6 +363,21 @@ def test_output_files_read_records_by_name_only_too():
         sorted([ns["r"], ns["r"]])
 
 
+def test_only_iter_callers_may_iterate_a_record():
+    # torch rebuilds any NamedTuple as type(t)(*(f(v) for v in t)), so code in a torch module may iterate;
+    # the rebuild gives the same record, as both use the storage order (sorted by name)
+    ns = {}
+    exec(to_python("r = (name='a', age=1)\n"), ns)
+    rebuild = "out = type(r)(*(v for v in r))\nvalues = list(r)\n"
+    torch_ns = {"__name__": "torch.utils.data._utils.pin_memory", "r": ns["r"]}
+    exec(rebuild, torch_ns)
+    assert torch_ns["out"] == ns["r"] and repr(torch_ns["out"]) == "(name='a', age=1)"
+    assert torch_ns["values"] == [1, "a"]  # age, name: sorted, not as written
+    for caller in ("__main__", "json.encoder", "torchvision_like"):  # a prefix match needs the dot
+        with pytest.raises(TypeError, match="read by name only"):
+            exec(rebuild, {"__name__": caller, "r": ns["r"]})
+
+
 def test_a_returned_tuple_is_labelled_for_the_checker_only():
     src = "def f(n):\n    lo = n\n    return lo, n + 1\ndef g() -> tuple[int, int]:\n    a = 1\n    return a, a\n"
     r = transform(src, checker=True)
