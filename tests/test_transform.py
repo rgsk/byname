@@ -378,6 +378,62 @@ def test_only_iter_callers_may_iterate_a_record():
             exec(rebuild, {"__name__": caller, "r": ns["r"]})
 
 
+def test_audited_iter_callers_may_index_a_record_too():
+    # accelerate's find_batch_size reads `data[0]`, and concatenate rebuilds with `d[i]`; only the audited
+    # module may, not the rest of the package
+    ns = {}
+    exec(to_python("r = (name='a', age=1)\n"), ns)
+    read = "first = r[0]\nout = type(r)(*list(r))\n"
+    for caller in ("accelerate.utils.operations", "lightning_utilities.core.apply_func", "torch"):
+        caller_ns = {"__name__": caller, "r": ns["r"]}
+        exec(read, caller_ns)
+        assert caller_ns["first"] == 1 and caller_ns["out"] == ns["r"]
+    for caller in ("accelerate.tracking", "lightning.pytorch.loggers.csv_logs"):
+        with pytest.raises(TypeError, match="read by name only"):
+            exec(read, {"__name__": caller, "r": ns["r"]})
+    assert ns["r"]["name"] == "a"  # by name, as ever
+
+
+def test_a_project_adds_iter_callers_in_pyproject(tmp_path):
+    (tmp_path / "pyproject.toml").write_text('[tool.byname]\niter-callers = ["mylib.collate"]\n')
+    (tmp_path / "pkg").mkdir()
+    app = tmp_path / "pkg" / "app.pyn"  # the nearest pyproject.toml above the file
+    app.write_text("r = (name='a', age=1)\n")
+    ns = {}
+    exec(to_python(app.read_text(), str(app)), ns)
+    rebuild = "out = type(r)(*(v for v in r))\n"
+    for caller in ("mylib.collate", "mylib.collate.inner", "torch.utils._pytree"):  # on top of the defaults
+        exec(rebuild, {"__name__": caller, "r": ns["r"]})
+    for caller in ("mylib", "mylib.collated"):
+        with pytest.raises(TypeError, match="read by name only"):
+            exec(rebuild, {"__name__": caller, "r": ns["r"]})
+    # an edit to pyproject.toml applies to the next translation
+    (tmp_path / "pyproject.toml").write_text('[tool.byname]\niter-callers = ["otherlib"]\n')
+    exec(to_python(app.read_text(), str(app)), ns)
+    exec(rebuild, {"__name__": "otherlib.x", "r": ns["r"]})
+    with pytest.raises(TypeError, match="read by name only"):
+        exec(rebuild, {"__name__": "mylib.collate", "r": ns["r"]})
+
+
+def test_a_malformed_iter_callers_is_an_error(tmp_path):
+    (tmp_path / "pyproject.toml").write_text('[tool.byname]\niter-callers = "mylib"\n')
+    app = tmp_path / "app.pyn"
+    app.write_text("r = (name='a')\n")
+    with pytest.raises(ValueError, match="iter-callers must be a list of module names"):
+        to_python(app.read_text(), str(app))
+    assert transform(app.read_text(), str(app), checker=True).prelude  # the editor's translation doesn't read it
+
+
+def test_records_from_record_follow_the_callers_project(tmp_path):
+    (tmp_path / "pyproject.toml").write_text('[tool.byname]\niter-callers = ["mylib"]\n')
+    app = tmp_path / "app.pyn"
+    app.write_text("from byname import record\ntype U = (name: str)\nr = record(U, {'name': 'a'})\n")
+    ns = {"__file__": str(app)}
+    exec(to_code(app.read_text(), str(app)), ns)
+    exec("out = list(r)\n", caller_ns := {"__name__": "mylib.x", "r": ns["r"]})
+    assert caller_ns["out"] == ["a"]
+
+
 def test_a_returned_tuple_is_labelled_for_the_checker_only():
     src = "def f(n):\n    lo = n\n    return lo, n + 1\ndef g() -> tuple[int, int]:\n    a = 1\n    return a, a\n"
     r = transform(src, checker=True)

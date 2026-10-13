@@ -27,15 +27,12 @@ import tokenize
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from .config import ITER_CALLERS, iter_callers
+
 DS = "_ds"
 # formatting stand-ins: `x=` -> `x=__p`, record `(` -> `__P(`, pattern -> `__P[...]`, record type -> `__T[...]`
 SHORT, PAT, TYP = "__p", "__P", "__T"
 REPR = "_byname_repr"
-# packages allowed to iterate a record at runtime: they treat any NamedTuple as a pytree and rebuild it as
-# `type(t)(*(f(v) for v in t))` (torch's DataLoader pin_memory, pytree, default_collate), which gives the same
-# record back, as iterating and the constructor both use the storage order. Add a package when it raises
-# "read by name only" from inside its own code
-ITER_CALLERS = ("torch.",)
 ORDER = "_byname_order"  # a record class's fields in the order written; `_fields` is the sorted storage order
 PRELUDE = (
     "from typing import NamedTuple as _NT\n"
@@ -44,21 +41,25 @@ PRELUDE = (
     # records are mappings by field name at runtime, so `f(**rec)` and `{**rec}` work (see RESERVED)
     f"def _byname_keys(self): return self.{ORDER}\n"
     "def _byname_item(self, k):\n"
-    "    if not isinstance(k, str): _byname_positional(self)\n"
+    "    if not isinstance(k, str):\n"
+    "        if _byname_lib(): return tuple.__getitem__(self, k)\n"
+    "        _byname_positional(self)\n"
     f"    if k in self.{ORDER}: return getattr(self, k)\n"
     "    raise KeyError(k)\n"
     f"def _byname_has(self, k): return k in self.{ORDER}\n"
     # Records are read by name only, at runtime too: the tuple underneath stores the fields sorted by name, so
     # iterating, indexing, ordering or concatenating would expose an order nobody wrote (`a, b = (name=, age=)`
     # gave age, name). pickle, copy and _replace iterate in NamedTuple's own versions, hence their own here.
-    # The one exception is iterating from inside ITER_CALLERS, for libraries that rebuild the record.
+    # The one exception is reading by position from inside the iter callers (config.ITER_CALLERS and the
+    # project's `iter-callers`), libraries that rebuild the record. `{iter_callers}` is them, each with a dot.
     "def _byname_positional(self, *_):\n"
     "    raise TypeError(f'{type(self).__name__} is read by name only: use .field, keys() or _asdict()')\n"
-    # iterating is allowed only when the code iterating is in one of ITER_CALLERS (see above): the frame
-    # one up from __iter__ is the Python code that asked, also when it asked through list(), zip() or *
+    # whether the code reading by position is in an iter caller (see above): the frame two up from here,
+    # one up from __iter__ or __getitem__, is the Python code that asked, also through list(), zip() or *
+    "def _byname_lib():\n"
+    "    return (_byname_sys._getframe(2).f_globals.get('__name__', '') + '.').startswith({iter_callers})\n"
     "def _byname_iter(self):\n"
-    f"    if _byname_sys._getframe(1).f_globals.get('__name__', '').startswith({ITER_CALLERS!r}):\n"
-    "        return tuple.__iter__(self)\n"
+    "    if _byname_lib(): return tuple.__iter__(self)\n"
     "    _byname_positional(self)\n"
     "def _byname_unordered(self, o): return NotImplemented\n"
     "def _byname_args(self): return tuple.__getitem__(self, slice(None))\n"
@@ -89,6 +90,13 @@ PRELUDE = (
     "    c.__lt__ = c.__le__ = c.__gt__ = c.__ge__ = _byname_unordered\n"
     "    c.__getnewargs__, c._replace = _byname_args, _byname_replace\n"
 )
+
+
+def prelude_for(callers: tuple[str, ...]) -> str:
+    """PRELUDE letting the modules in callers read a record by position (config.iter_callers)."""
+    return PRELUDE.replace("{iter_callers}", repr(tuple(m + "." for m in callers)))
+
+
 # basedpyright infers a mixed list like [(age="90"), (age=23)] as list[Unknown], which switches off every
 # check on what comes out of it. Strict inference gives list[A | B]. A comment, not a config setting: the
 # checker runs in the user's project, and these aren't language-server settings.
@@ -1454,6 +1462,10 @@ def transform(
     if checker and known is None and builds and (k := known_fields(body, lookup)):
         return transform(src, path, tolerant, portable, checker, known=k, lookup=lookup)
 
+    def base_prelude() -> str:
+        # the checker's translation never runs, so it doesn't read the project's config
+        return prelude_for(ITER_CALLERS if checker else iter_callers(path))
+
     prelude = ""
     omit_defs = ""
     if omits:  # checker: `**rest` typed per record shape (omit_def), so the types it returns must exist too
@@ -1466,7 +1478,7 @@ def transform(
             omit_defs += omit_def(taken, shapes)
             types.update(dict.fromkeys(omit_types(taken, shapes)))
     if records or types:  # only files with records: plain Python is left exactly as written
-        prelude = PRELUDE
+        prelude = base_prelude()
         if not portable:
             dicts = dict.fromkeys([*records, *(f for f, o in types if not o)])
             prelude += CHECKER_DIRECTIVE + TYPED_PRELUDE + "".join(dict_def(f) for f in dicts)
@@ -1480,7 +1492,7 @@ def transform(
         prelude += "".join(record_def(f, portable) for f in records)
     if builds or kw_used or omit_used:
         if not prelude:
-            prelude = PRELUDE
+            prelude = base_prelude()
         if not portable:
             prelude += HASDICT + (KW_PRELUDE if kw_used else "")
         rec = builds or (omit_used and not checker)  # the checker types a rest with omit_defs instead

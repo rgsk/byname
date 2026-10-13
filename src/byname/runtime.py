@@ -15,25 +15,30 @@ and a mapping there is built into a record. Generics like `list[int]` are checke
 container's type only, not its elements.
 """
 
+import sys
 import types
 import typing
 from collections import namedtuple
 from collections.abc import Mapping
 from typing import Any, TypeAliasType
 
-from .transform import ORDER, PRELUDE
+from .config import iter_callers
+from .transform import ORDER, prelude_for
 
-# the same record classes and methods every translated module gets: equal to records built there
-_ns: dict[str, Any] = {}
-exec(PRELUDE, _ns)  # noqa: S102 -- byname's own prelude, not user input
-_classes: dict[tuple[str, ...], type] = {}
+# the same record classes and methods every translated module gets: equal to records built there. One
+# prelude per set of iter callers, as the calling file's project has them (config.iter_callers)
+_ns: dict[tuple[str, ...], dict[str, Any]] = {}
+_classes: dict[tuple[tuple[str, ...], tuple[str, ...]], type] = {}
 
 
-def _build(fields: tuple[str, ...], values: dict[str, object]) -> object:
-    c = _classes.get(fields)
+def _build(fields: tuple[str, ...], values: dict[str, object], callers: tuple[str, ...]) -> object:
+    c = _classes.get((callers, fields))
     if c is None:
-        c = _classes[fields] = namedtuple("_rec_" + "__".join(fields), sorted(fields))
-        _ns["_byname_setup"](c, fields)
+        if (ns := _ns.get(callers)) is None:
+            ns = _ns[callers] = {}
+            exec(prelude_for(callers), ns)  # noqa: S102 -- byname's own prelude, not user input
+        c = _classes[callers, fields] = namedtuple("_rec_" + "__".join(fields), sorted(fields))
+        ns["_byname_setup"](c, fields)
     return c(**values)
 
 
@@ -76,7 +81,7 @@ def _is_mapping(value: object) -> bool:
     return isinstance(value, Mapping) or _is_record(value)
 
 
-def _convert(value: object, tp: object, path: str, errors: list[str]) -> object:
+def _convert(value: object, tp: object, path: str, errors: list[str], callers: tuple[str, ...]) -> object:
     """value (the field at dotted path) checked against tp, problems appended to errors; a mapping where
     a record type is expected comes back as that record."""
     at = f"field {path!r}"
@@ -86,14 +91,14 @@ def _convert(value: object, tp: object, path: str, errors: list[str]) -> object:
         return value
     if _record_type(tp) is not None:
         if _is_mapping(value):
-            return _from_mapping(tp, value, path, errors)
+            return _from_mapping(tp, value, path, errors, callers)
         errors.append(f"{at}: expected {_type_name(tp)}, got {type(value).__name__}")
         return value
     origin = typing.get_origin(tp)
     if origin is typing.Union or origin is types.UnionType:
         for member in typing.get_args(tp):
             member_errors: list[str] = []
-            converted = _convert(value, member, path, member_errors)
+            converted = _convert(value, member, path, member_errors, callers)
             if not member_errors:
                 return converted
         errors.append(f"{at}: expected {_type_name(tp)}, got {type(value).__name__} ({value!r})")
@@ -119,7 +124,7 @@ def _convert(value: object, tp: object, path: str, errors: list[str]) -> object:
     return value
 
 
-def _from_mapping(tp: object, data: object, prefix: str, errors: list[str]) -> object:
+def _from_mapping(tp: object, data: object, prefix: str, errors: list[str], callers: tuple[str, ...]) -> object:
     rt = _record_type(tp)
     assert rt is not None
     fields, is_open = rt
@@ -131,7 +136,7 @@ def _from_mapping(tp: object, data: object, prefix: str, errors: list[str]) -> o
         if field not in keys:
             errors.append(f"missing field {path!r}")
             continue
-        values[field] = _convert(data[field], field_type, path, errors)  # pyright: ignore[reportIndexIssue]
+        values[field] = _convert(data[field], field_type, path, errors, callers)  # pyright: ignore[reportIndexIssue]
     extra = [k for k in keys if k not in names]
     for k in extra:
         if is_open:
@@ -139,7 +144,7 @@ def _from_mapping(tp: object, data: object, prefix: str, errors: list[str]) -> o
         else:
             errors.append(f"unexpected field {(f'{prefix}.{k}' if prefix else k)!r}")
     order = tuple(names + extra) if is_open else tuple(names)
-    return _build(order, values) if not errors else None
+    return _build(order, values, callers) if not errors else None
 
 
 def record(t: object, data: object, /) -> object:
@@ -150,7 +155,9 @@ def record(t: object, data: object, /) -> object:
     if not _is_mapping(data):
         raise TypeError(f"record() needs a mapping of field names, got {type(data).__name__}")
     errors: list[str] = []
-    result = _from_mapping(t, data, "", errors)
+    # its records let the same modules read them by position as the caller's own records do
+    callers = iter_callers(sys._getframe(1).f_globals.get("__file__") or "<pyn>")
+    result = _from_mapping(t, data, "", errors, callers)
     if errors:
         raise TypeError(f"{_type_name(t)}: " + "; ".join(errors))
     return result
