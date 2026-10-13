@@ -155,6 +155,16 @@ def test_body_keeps_line_count():
     assert r.body.count("\n") == src.count("\n")
 
 
+def test_pattern_over_several_lines_keeps_line_numbers():
+    # the pattern's line breaks stay in a parenthesised target, so what follows keeps its line
+    src = "def f(r):\n    (\n        a=,\n        b=,\n    ) = r; c = 1\n    return a + c\n\n\nraise ValueError(f((a=1, b=2)))\n"
+    assert transform(src).body.splitlines()[1:5] == ["    (_ds", "", "", ") = r; a = _ds.a; b = _ds.b; c = 1"]
+    assert source_ast(src).body[1].lineno == 9
+    with pytest.raises(ValueError, match="2") as e:
+        exec(to_code(src, "lines.pyn"), {})
+    assert e.traceback[-1].lineno + 1 == 9  # pytest's lineno counts from 0
+
+
 # --- nested patterns ----------------------------------------------------------
 
 

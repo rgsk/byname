@@ -1364,7 +1364,10 @@ def transform(
             marks: list[Mark] = []
             binds = bindings(tree, [], "", marks)
             stmt_end = off(toks[j - 1].end)
-            edits.append(Edit(*group, DS, group))
+            # a pattern over several lines keeps its line breaks, `(_ds\n\n)`, so the lines after it keep
+            # their numbers (tracebacks, source_ast)
+            breaks = src.count("\n", *group)
+            edits.append(Edit(*group, f"({DS}{chr(10) * breaks})" if breaks else DS, group))
             edits.append(Edit(stmt_end, stmt_end, binds, group, marks))
             continue
 
