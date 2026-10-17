@@ -54,7 +54,7 @@ only" from inside its own code.
 ## Still to fix in byname
 
 1. **`source_ast` line numbers drift after a multi-line destructure pattern,** 7 lines too low after an
-   8-line one. scripts/any_check.py then looks in the wrong function and flags a name that is
+   8-line one. any-check (../ml-tools) then looks in the wrong function and flags a name that is
    annotated. Workaround: write the destructure as a grid.
 2. **`byname format` packs a grid's later rows by the first row's width in characters,** so this
    becomes 3 uneven rows (repro in `asr/src/scratch.pyn`):

@@ -156,8 +156,9 @@ Neither checks types at runtime. Destructuring by name and the `name=` shorthand
    file unchanged. The editor's format and organize-imports on save do work.
 5. **Fixture parameters are `Unknown`,** so `def test_x(tok):` shows white. byname could infer the type
    from the fixture function of the same name.
-6. **`Any` from untyped calls:** every `nn.Module` call, e.g. `h = self.ln1(x)`. `scripts/any_check.py`
-   finds them; a built-in check in `byname tool` would replace it.
+6. **`Any` from untyped calls:** every `nn.Module` call, e.g. `h = self.ln1(x)`. `any-check` finds
+   them. It lives in `../ml-tools`, shared by the ML projects, and not in byname on purpose, because
+   byname also serves projects without torch.
 7. **Spreading a parameter whose record type is imported gives `Unknown`:** `(**cfg, name="small")`
    with `cfg: GPTConfig` from another module. A same-file alias works.
 8. **Editor completion.** Fixed: after a comma in `_replace(x=1, |)`, and record literals in
