@@ -8,6 +8,7 @@ Three coordinate systems:
 LSP positions are (line, UTF-16 column), so LineIndex converts to and from offsets.
 """
 
+from bisect import bisect_right
 from pathlib import Path
 
 from .transform import Edit, Mark, prelude_offset, transform
@@ -115,13 +116,13 @@ class Translation:
         self.error: Exception | None = None
         self.problems: list[dict] = []  # byname diagnostics from tolerant translation
         self.fields: list[tuple[int, int]] = []  # source spans of record field names
-        self.finals: list[tuple[int, int]] = []  # shorthand items of Final patterns (see Result.finals)
+        self.shorthands: list[tuple[int, int]] = []  # every bare `x=` (see Result.shorthands)
         self.labels: set[int] = set()  # where a walrus labelling a returned tuple starts (see Result.labels)
         try:
             r = transform(source, tolerant=True, checker=True, lookup=lookup)
             body, prelude, edits = r.body, r.prelude, r.edits
             self.fields = r.fields
-            self.finals = r.finals
+            self.shorthands = r.shorthands
             self.labels = {s for s, _ in r.labels}
         except Exception as e:  # mid-edit code: send it raw; the checker reports the syntax error
             self.error = e
@@ -177,6 +178,28 @@ class Translation:
             if e.kind == "shorthand" and e.display[0] <= off <= e.display[1]:
                 g = gs + min(off - e.display[0], len(e.text))
                 return self.hid_lines.position(g + self.plen if g >= self.at and self.plen else g)
+        return None
+
+    def shorthand_from_hidden(self, r: dict) -> dict | None:
+        """If the range is exactly the implicit local of a shorthand, `x` in `fn(x=x)` from `fn(x=)` or in
+        `x = _ds.x` from `(x=) = r`, the range of the `x` written. Semantic tokens colour it as that local."""
+        hs = self.hid_lines.offset(r["start"]["line"], r["start"]["character"])
+        he = self.hid_lines.offset(r["end"]["line"], r["end"]["character"])
+        if self.plen and self.at <= hs < self.at + self.plen:
+            return None  # inside the prelude
+        if self.plen and hs >= self.at + self.plen:
+            hs, he = hs - self.plen, he - self.plen
+        # the edits whose text could hold the range: several may start at one offset (empty ones)
+        for k in range(bisect_right(self.map.gstart, hs) - 1, -1, -1):
+            e, gs = self.map.edits[k], self.map.gstart[k]
+            if gs + len(e.text) < he:
+                break
+            span = e.display if e.kind == "shorthand" and (hs, he) == (gs, gs + len(e.text)) else None
+            for m in e.marks:
+                if m.os == m.oe and m.display and (hs, he) == (gs + m.ts, gs + m.te):
+                    span = m.display
+            if span is not None:
+                return {"start": self.src_lines.position(span[0]), "end": self.src_lines.position(span[1])}
         return None
 
     def position_from_hidden(self, pos: dict) -> dict | None:

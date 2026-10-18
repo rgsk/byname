@@ -381,7 +381,8 @@ def test_semantic_tokens_cover_only_source_text(lsp):
     assert "_ds" not in seen and not any(w.startswith("_rec_") for w in seen)
     assert "variable" in seen["years"]  # the renamed local gets variable colouring
     assert "function" in seen["make"]
-    assert "property" in seen["greeting"]  # record field names, which the checker leaves uncoloured
+    assert seen["greeting"] == {"variable"}  # `greeting=` declares the local, so it's coloured as one
+    assert "property" in seen["age"]  # a renamed item's label is only the field
 
 
 def test_spread_names_and_fields_keep_their_colours(lsp):
@@ -413,8 +414,9 @@ def test_spread_names_and_fields_keep_their_colours(lsp):
 
 
 def test_pattern_labels_reading_methods_are_coloured_as_methods(lsp):
-    # a pattern label reads an attribute, so it's coloured like one: `decode=` as `tok.decode` (method),
-    # `n=` as `tok.n` (property); a shorthand is also the local
+    # a renamed item's label reads an attribute, so it's coloured like one: `decode=` as `tok.decode`
+    # (method). A shorthand is also the local, so it takes the local's colour: `encode=` like `renamed`
+    # (a bound method in a local is a function), `n=` a variable
     c, root, uri = lsp
     text = (
         "class Tok:\n    def __init__(self): self.n = 65\n    def encode(self, s: str) -> int: return 1\n"
@@ -439,18 +441,26 @@ def test_pattern_labels_reading_methods_are_coloured_as_methods(lsp):
             "params": {"textDocument": {"uri": uri, "version": 995}, "contentChanges": [{"text": MAIN}]},
         }
     )
-    assert got[(4, "encode")] == got[(4, "decode")] == "method" and got[(4, "renamed")] == "function", got
-    assert got[(4, "n")] == "property", got
+    assert got[(4, "decode")] == "method" and got[(4, "encode")] == got[(4, "renamed")] == "function", got
+    assert got[(4, "n")] == "variable", got
     assert got[(5, "encode")] == "function", got  # a record built from the local `encode`
 
 
-def test_final_pattern_shorthand_is_coloured_as_the_final_local(lsp):
-    # `age=` in a Final pattern declares a Final local, so it's coloured like `value` in `value: Final = 1`
-    # (and like its later uses); a renamed item's field stays a field, its target is the Final local
+def test_a_shorthand_is_coloured_as_the_local_it_passes(lsp):
+    # `x=` is also the local `x` (Ctrl+click goes there), so it takes that local's colour in calls, records,
+    # patterns and loops: a Final `step` is readonly in `log(step=)` as everywhere else. A renamed item's
+    # label is only the parameter or field
     c, root, uri = lsp
     text = (
-        "from typing import Final\nvalue: Final = 1\nr = (age=26, name='r')\n"
-        "(age=, name=who): Final = r\nprint(age, who, value)\n"
+        "from typing import Final\n"
+        "def log(*, step: int, lr: float): ...\n"
+        "def run(lr: float):\n"
+        "    step: Final = 1\n"
+        "    log(step=, lr=)\n"
+        "    rec = (step=)\n"
+        "    (step=s): Final = rec\n"
+        "    (rate=) = (rate=lr)\n"
+        "    for (x=) in [(x=s)]: print(x, rate)\n"
     )
     c.send(
         {
@@ -465,18 +475,22 @@ def test_final_pattern_shorthand_is_coloured_as_the_final_local(lsp):
         dl, dc, length, typ, mods = data[i : i + 5]
         line, col = line + dl, (col + dc if dl == 0 else dc)
         named = {m for k, m in enumerate(legend["tokenModifiers"]) if mods >> k & 1}
-        got[(line, lines[line][col : col + length])] = (legend["tokenTypes"][typ], named)
+        got.setdefault((line, lines[line][col : col + length]), []).append((legend["tokenTypes"][typ], named))
     c.send(
         {
             "method": "textDocument/didChange",
             "params": {"textDocument": {"uri": uri, "version": 997}, "contentChanges": [{"text": MAIN}]},
         }
     )
-    declared, pattern, used = 1, 3, 4
-    assert got[(pattern, "age")] == got[(declared, "value")], got
-    assert got[(pattern, "age")][0] == "variable" and "readonly" in got[(pattern, "age")][1], got
-    assert got[(pattern, "name")] == ("property", set()), got
-    assert got[(used, "age")][0] == "variable" and "readonly" in got[(used, "age")][1], got
+    declared, call, record, renamed, pattern, loop = 3, 4, 5, 6, 7, 8
+    final_step = got[(declared, "step")][0]
+    assert final_step[0] == "variable" and "readonly" in final_step[1], got
+    assert got[(call, "step")] == [final_step], got  # the call passes the Final local
+    assert got[(call, "lr")] == [("parameter", {"parameter"})], got  # it passes run's parameter
+    assert got[(record, "step")] == [final_step], got
+    assert ("property", set()) in got[(renamed, "step")], got  # renamed: `step` is only the field
+    assert got[(pattern, "rate")][0][0] == "variable", got  # `(rate=) = ...` declares the local `rate`
+    assert got[(loop, "x")][0][0] == "variable", got
 
 
 def test_fields_read_through_record_types_look_like_record_fields(lsp):

@@ -238,9 +238,9 @@ class Result:
     # the rest of (imports.Modules.shapes)
     shapes: list[tuple[tuple[str, ...], bool]] = field(default_factory=list)
     imports: list[tuple[str, int]] = field(default_factory=list)  # the modules it imports, (module, level)
-    # source spans of shorthand items in Final patterns, `age` in `(age=): Final = r`: coloured as the Final
-    # local they declare, not as a field (lsp.remap_tokens)
-    finals: list[tuple[int, int]] = field(default_factory=list)
+    # source spans of every bare `x=` (calls, records, patterns, loops): `x` is also the local, so it's
+    # coloured as that local (lsp.remap_tokens)
+    shorthands: list[tuple[int, int]] = field(default_factory=list)
 
 
 def field_error(name: str) -> str:
@@ -810,7 +810,7 @@ def transform(
     problems: list[tuple[int, int, str]] = []
     standins: list[tuple[int, int, str]] = []
     field_spans: list[tuple[int, int]] = []  # every record field name: in records, patterns and record types
-    final_spans: list[tuple[int, int]] = []  # shorthand items of Final patterns: also a Final local
+    shorthand_spans: list[tuple[int, int]] = []  # every bare `x=`, see Result.shorthands
     label_spans: list[tuple[int, int]] = []  # `x` in `return (x := ..., ...)`: bound to name a position, never read
 
     def span(a: int, b: int | None = None) -> tuple[int, int]:
@@ -821,6 +821,7 @@ def transform(
             if is_short(it):
                 at = off(toks[it[1]].end)
                 edits.append(Edit(at, at, toks[it[0]].string, span(it[0]), kind="shorthand"))
+                shorthand_spans.append(span(it[0]))
                 standins.append((at, at, SHORT))
 
     kw_used = builds = False
@@ -947,6 +948,7 @@ def transform(
                 if is_short(it):
                     at = off(toks[it[1]].end)
                     edits.append(Edit(at, at, first.string, span(it[0]), kind="shorthand"))
+                    shorthand_spans.append(span(it[0]))
                     standins.append((at, at, SHORT))
             else:
                 raise err("a record built from spreads takes `**record` and `name=value` items", first)
@@ -1080,8 +1082,7 @@ def transform(
                 text = omit(node, chain, assign(text), marks)
                 continue
             if kind == "short":  # target is implicit: insertion point right after `field=`
-                if ann is not None:
-                    final_spans.append(span(it[0]))
+                shorthand_spans.append(span(it[0]))
                 ts, at = len(text), off(toks[it[1]].end)
                 text += toks[it[0]].string
                 marks.append(Mark(ts, len(text), at, at, span(it[0])))
@@ -1349,6 +1350,7 @@ def transform(
                         edits.append(Edit(*span(it[0]), "", span(it[0])))
                     elif kind == "short":
                         edits.append(Edit(*span(it[1]), "", span(it[0])))
+                        shorthand_spans.append(span(it[0]))
                     else:
                         edits.append(Edit(off(toks[it[0]].start), off(toks[it[2]].start), "", span(it[0])))
                         if kind == "nested":
@@ -1582,7 +1584,7 @@ def transform(
         sorted(label_spans),
         shapes,
         imports(),
-        final_spans,
+        sorted(shorthand_spans),
     )
 
 

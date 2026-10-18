@@ -702,7 +702,6 @@ class Proxy:
         self.field_type: int | None = None  # semantic token type for record field names ("property")
         self.final_field: tuple[int, int] | None = None  # (readonly, static) modifier bits
         self.callable_types: set[int] = set()  # "function", "method": beat the field colour (see remap_tokens)
-        self.final_local: tuple[int, int] | None = None  # "variable" and its readonly bit: a Final local
         self.output_on_save = False  # byname.outputOnSave: write <file>.pyn.py on every save
         self.strip_main = False  # byname.outputStripMain: drop `if __name__ == "__main__":` from it
         # byname.diagnosticsOnSave: hold diagnostics back while typing, show the saved text's ones
@@ -1671,8 +1670,6 @@ class Proxy:
                         mods = stp.get("legend", {}).get("tokenModifiers", [])
                         if "readonly" in mods and "static" in mods:
                             self.final_field = (1 << mods.index("readonly"), 1 << mods.index("static"))
-                        if "variable" in types and "readonly" in mods:
-                            self.final_local = (types.index("variable"), 1 << mods.index("readonly"))
                     # notebooks: their cells are synced whole through notebookDocument/*, see on_notebook
                     caps["notebookDocumentSync"] = {
                         "notebookSelector": [{"notebook": "jupyter-notebook", "cells": [{"language": "python"}]}]
@@ -1691,7 +1688,6 @@ class Proxy:
                                 self.field_type,
                                 self.final_field,
                                 self.callable_types,
-                                self.final_local,
                             )
                         },
                     }
@@ -1825,7 +1821,6 @@ def remap_tokens(
     field_type: int | None = None,
     final_field: tuple[int, int] | None = None,
     callable_types: frozenset[int] | set[int] = frozenset(),
-    final_local: tuple[int, int] | None = None,
 ) -> list[int]:
     """Semantic tokens come as 5-int groups, positions relative to the previous token.
     Decode, map each token to the source, drop those on generated text, re-encode.
@@ -1834,40 +1829,45 @@ def remap_tokens(
     `p: (age: int, ...)`) is a Final Protocol attribute, `readonly static`; a record's own field is just
     `static`. Dropping `readonly` from that pair colours both alike.
     callable_types: a field name the checker colours as a function or method keeps that colour. A pattern
-    label reads an attribute (`(decode=d) = tok` is `d = tok.decode`), so it looks like `tok.decode`; a
-    shorthand (`(encode=) = tok`, `(f=)`) is also the local. Record-literal labels are keyword arguments.
-    final_local: (type, modifiers) of a Final local. A shorthand in a Final pattern, `age` in
-    `(age=): Final = r`, declares one, so it's coloured like `value` in `value: Final = 1`, as its later uses are."""
+    label reads an attribute (`(decode=d) = tok` is `d = tok.decode`), so it looks like `tok.decode`.
+    A bare `x=` (call, record, pattern, loop) is also the local `x`, and Ctrl+click goes there, so it takes
+    the checker's colour for that local: `step=` passing a Final `step` is readonly like every other `step`,
+    `(age=) = r` declares `age`. Only a renamed item's label stays a field or parameter."""
     if doc is None:
         return data
     tokens, line, col = [], 0, 0
+    local_colours: dict[tuple[int, int, int], tuple[int, int]] = {}  # shorthand `x` -> its local's (type, mods)
     for i in range(0, len(data) - 4, 5):
         dl, dc, length, typ, mods = data[i : i + 5]
         line, col = line + dl, (col + dc if dl == 0 else dc)
         r = doc.tr.range_from_hidden_exact(
             {"start": {"line": line, "character": col}, "end": {"line": line, "character": col + length}}
         )
-        if r is None or r["start"]["line"] != r["end"]["line"] or r["end"]["character"] <= r["start"]["character"]:
+        if r is None:  # generated text; the implicit local of a shorthand gives the `x` written its colour
+            rng = {"start": {"line": line, "character": col}, "end": {"line": line, "character": col + length}}
+            if (sh := doc.tr.shorthand_from_hidden(rng)) is not None and sh["start"]["line"] == sh["end"]["line"]:
+                s, e = sh["start"], sh["end"]
+                local_colours[(s["line"], s["character"], e["character"] - s["character"])] = (typ, mods)
+            continue
+        if r["start"]["line"] != r["end"]["line"] or r["end"]["character"] <= r["start"]["character"]:
             continue
         s, e = r["start"], r["end"]
         if final_field and typ == field_type and mods & (both := final_field[0] | final_field[1]) == both:
             mods &= ~final_field[0]
         tokens.append((s["line"], s["character"], e["character"] - s["character"], typ, mods))
     if field_type is not None:
-        spans, finals = set(), set()
+        spans = set()
         for fs, fe in doc.tr.fields:
             p = doc.tr.src_lines.position(fs)
             spans.add((p["line"], p["character"], fe - fs))
-        if final_local is not None:
-            for fs, fe in doc.tr.finals:
-                p = doc.tr.src_lines.position(fs)
-                finals.add((p["line"], p["character"], fe - fs))
-            spans -= finals
-            tokens = [t for t in tokens if t[:3] not in finals]
-            tokens += [(*sp, *final_local) for sp in finals]
+        for fs, fe in doc.tr.shorthands:  # coloured as their locals, below; a loop's is real text already
+            p = doc.tr.src_lines.position(fs)
+            spans.discard((p["line"], p["character"], fe - fs))
         callables = {t[:3] for t in tokens if t[3] in callable_types and t[:3] in spans}
         tokens = [t for t in tokens if t[:3] not in callables or t[3] in callable_types]
         tokens += [(*sp, field_type, 0) for sp in spans - callables]
+    tokens = [t for t in tokens if t[:3] not in local_colours]
+    tokens += [(*sp, *colour) for sp, colour in local_colours.items()]
     out, pl, pc, last_end = [], 0, 0, (-1, -1)
     for ln, c, length, typ, mods in sorted(tokens):
         if (ln, c) < last_end:
