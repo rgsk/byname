@@ -31,6 +31,7 @@ always your local. A bare `field=` means `field=field`.
 | destructure | `(name=, age=) = r` | `name = r.name; age = r.age` |
 | rename | `(name=who) = r` | `who = r.name` |
 | rest | `(name=, **rest) = r` | `rest`: a record of r's other fields |
+| final | `(name=, age=): Final = r` | `name: Final = r.name; age: Final = r.age` |
 | loop | `for (name=, age=) in rs:` | each item destructured, also in comprehensions |
 | record type | `def f() -> (name: str, age: int):` | a record with these fields, in any order; `(..., …)` for at least these |
 
@@ -205,6 +206,26 @@ for (id=, **data) in rows: ...         # loops and nested patterns too
   one case per record shape in the file and in the .pyn modules it imports, theirs included: an exact type
   gives exactly the other fields, an open one `(..., age: int)` stays open. A record whose shape none of them
   shows (typed `Any`, say) gives `(...)`: any record, read with brackets (`rest["age"]`) only.
+
+**Final:** `: Final` after a pattern makes every local it binds `Final`, nested, renamed and rest ones
+included, so a checker rejects changing one later in the scope:
+
+```python
+from typing import Final
+
+(batch_size=, schedule=(max_steps=, max_lr=)): Final = train_cfg
+max_steps += 1                         # error: "max_steps" is declared as Final and cannot be reassigned
+```
+
+- **Opt-in:** a plain pattern stays a plain assignment. `x = x.to(device)` after a destructure, or one state
+  updated and returned with `return (frames=, position=)`, is ordinary step-by-step code.
+- **One binding per scope:** `Final` covers the whole scope, so a Final pattern that takes over a name bound
+  earlier (`model = …` then `(model=): Final = ckpt`) is an error on the pattern.
+- **Imported like any annotation:** `Final` (or `typing.Final`) is copied onto each local as written, and
+  at module level Python evaluates it.
+- **Not in loops:** `for (a=): Final in xs` is an error, since a loop binds its names on every pass; a Final
+  pattern inside a loop's body is the checker's error. Only `Final` goes after a pattern: its fields have
+  their types already.
 
 **Why `images=x0`, not `x0=images`:** in a pattern the field is on the left and the new name on the right,
 so `(images=x0) = load_mnist()` puts the field `images` into `x0`. It reads backwards from `x0 = images`,
@@ -488,6 +509,9 @@ positions line up with your `.pyn`.
 ## Development
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for design decisions, status and the code map.
+
+[tests/test_exhaustive.pyn](tests/test_exhaustive.pyn) walks through every feature, top to bottom. A new
+feature gets a test there in the same change, besides its edge cases in the other test files.
 
 ```
 uv sync --all-extras

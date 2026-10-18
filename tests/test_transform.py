@@ -115,6 +115,57 @@ def test_destructure_rhs_spanning_lines():
     assert transform(src).body == "_ds = fn(\n    x=x,\n); a = _ds.a\nz = 1\n"
 
 
+# --- Final patterns -----------------------------------------------------------
+
+
+def test_final_pattern_makes_every_local_final():
+    # `_ds` stays plain (every pattern rebinds it); each local gets the annotation as written
+    src = "(name=, age=): Final = user\n"
+    assert transform(src).body == "_ds = user; name: Final = _ds.name; age: Final = _ds.age\n"
+
+
+def test_final_reaches_renamed_nested_and_rest_locals():
+    src = "(id=n, user=(name=), **rest): typing.Final = r\n"
+    body = "_ds = r; n: typing.Final = _ds.id; name: typing.Final = _ds.user.name; "
+    body += "rest: typing.Final = _byname_omit(_ds, ('id', 'user'))\n"
+    assert transform(src).body == body
+
+
+def test_final_pattern_over_several_lines_keeps_line_numbers():
+    src = "def f(r):\n    (\n        a=,\n    ): Final = r; c = 1\n    return a + c\n"
+    assert transform(src).body.splitlines()[1:4] == ["    (_ds", "", ") = r; a: Final = _ds.a; c = 1"]
+
+
+def test_final_pattern_runs():
+    # at module level Python evaluates the annotation, so `Final` is imported like in any Python file
+    ns = {}
+    exec(compile_pyn("from typing import Final\nr = (name='Rahul', age=26)\n(name=, age=): Final = r\n"), ns)
+    assert (ns["name"], ns["age"]) == ("Rahul", 26)
+
+
+def test_pattern_annotation_other_than_final_is_an_error():
+    with pytest.raises(SyntaxError, match="annotation can only be Final"):
+        transform("(name=): str = r\n")
+
+
+def test_half_typed_pattern_annotation_is_a_problem_in_the_editor():
+    r = transform("(name=): Fin = r\n", tolerant=True)
+    assert r.body == "_ds = r; name = _ds.name\n"
+    assert r.problems == [(9, 12, "a pattern's annotation can only be Final: its fields have their types already")]
+
+
+def test_loop_pattern_cannot_be_final():
+    # a Final name is bound once; a loop binds it on every pass
+    with pytest.raises(SyntaxError, match="loop pattern can't be Final"):
+        transform("for (a=): Final in xs:\n    pass\n")
+
+
+def test_annotated_python_targets_stay_python():
+    # no `field=` in the group: `(x): int = 3` is valid Python, and an annotated tuple is Python's error
+    assert transform("(x): int = 3\n").body == "(x): int = 3\n"
+    assert transform("(x, y): Final = 1, 2\n").body == "(x, y): Final = 1, 2\n"
+
+
 # --- things that must NOT change --------------------------------------------
 
 
@@ -312,6 +363,7 @@ def test_tolerant_mode_turns_half_typed_item_into_attribute_access():
         ("(gre|eting=g) = r\n", ("greeting", [])),  # renaming the field of an item
         ("for (age=, |) in rows:\n", ("", ["age"])),  # for-loop target
         ("(id=, user=(name=, |)) = r\n", ("", ["name"])),  # nested group
+        ("(age=, |): Final = r\n", ("", ["age"])),  # Final pattern
     ],
 )
 def test_pattern_slot_finds_field_positions(src, expected):

@@ -34,6 +34,13 @@ def test_nested_pattern_stand_in(tmp_path):
     assert format_pyn("(id= ,user=( name=,age = a ))=r\n", cwd=tmp_path) == src
 
 
+def test_final_pattern_stand_in(tmp_path):
+    # an annotated subscript is a valid target, so the annotation needs no stand-in of its own
+    src = "(name=, age=a): Final = r\n"
+    assert encode(src) == "__P[name:__p, age:a]: Final = r\n"
+    assert format_pyn("(name= ,age = a):Final=r\n", cwd=tmp_path) == src
+
+
 def test_rest_stand_in(tmp_path):
     # `**rest` -> `*rest`: a starred item is valid in a subscript, so the pattern stays one target
     src = "(name=, **rest) = r\nfor (a=, b=(c=, **more), **top) in xs:\n    pass\n"

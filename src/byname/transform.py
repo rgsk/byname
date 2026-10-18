@@ -6,6 +6,7 @@ Everything is built on the `name=` shorthand from PEP 736 (rejected):
     (name=, age=)             record       -> _rec_name__age(name=name, age=age)
     (name=, age=) = expr      destructure  -> _ds = expr; name = _ds.name; age = _ds.age
     (name=n) = expr           rename       -> _ds = expr; n = _ds.name
+    (name=): Final = expr     final        -> _ds = expr; name: Final = _ds.name
     for (name=, age=) in xs:  loop         -> for (name, age) in ((_ds.name, _ds.age) for _ds in xs):
     (user=(name=)) = expr     nested       -> _ds = expr; name = _ds.user.name
 
@@ -173,6 +174,29 @@ FIELDSET = "_byname_fieldset"  # a record's field names, sorted: what an exact r
 STMT_START = {tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT}
 
 
+def annotation_eq(toks: list[tokenize.TokenInfo], pair: dict[int, int], k: int) -> int | None:
+    """If toks[k] is the `:` of an annotated pattern, `(...): Final = r`, the index of its `=`, so the
+    annotation is toks[k + 1 : eq]. None with no annotation, or no value after it."""
+    if toks[k].string != ":":
+        return None
+    j = k + 1
+    while toks[j].type not in (tokenize.NEWLINE, tokenize.ENDMARKER) and toks[j].string not in ("=", ";"):
+        j = pair.get(j, j) + 1
+    return j if j > k + 1 and toks[j].string == "=" else None
+
+
+def is_final(toks: list[tokenize.TokenInfo]) -> bool:
+    """`Final` or a dotted name ending in it, `typing.Final`: the one annotation a pattern takes."""
+    names = [t.string for t in toks[::2]]
+    dots = [t.string for t in toks[1::2]]
+    return (
+        len(toks) % 2 == 1
+        and names[-1] == "Final"
+        and all(t.type == tokenize.NAME for t in toks[::2])
+        and all(d == "." for d in dots)
+    )
+
+
 class BynameError(SyntaxError):
     """A byname rule broken (e.g. shorthand in a parameter's default), as opposed to Python that doesn't
     tokenize. The editor shows only this then: the checker, sent the raw .pyn, would echo it as noise."""
@@ -214,6 +238,9 @@ class Result:
     # the rest of (imports.Modules.shapes)
     shapes: list[tuple[tuple[str, ...], bool]] = field(default_factory=list)
     imports: list[tuple[str, int]] = field(default_factory=list)  # the modules it imports, (module, level)
+    # source spans of shorthand items in Final patterns, `age` in `(age=): Final = r`: coloured as the Final
+    # local they declare, not as a field (lsp.remap_tokens)
+    finals: list[tuple[int, int]] = field(default_factory=list)
 
 
 def field_error(name: str) -> str:
@@ -783,6 +810,7 @@ def transform(
     problems: list[tuple[int, int, str]] = []
     standins: list[tuple[int, int, str]] = []
     field_spans: list[tuple[int, int]] = []  # every record field name: in records, patterns and record types
+    final_spans: list[tuple[int, int]] = []  # shorthand items of Final patterns: also a Final local
     label_spans: list[tuple[int, int]] = []  # `x` in `return (x := ..., ...)`: bound to name a position, never read
 
     def span(a: int, b: int | None = None) -> tuple[int, int]:
@@ -1027,31 +1055,42 @@ def transform(
             return access(chain, text + omit_name(taken) + "(", marks) + ")"
         return access(chain, text + "_byname_omit(", marks) + f", {taken!r})"
 
-    def bindings(node: list, chain: list[int], text: str, marks: list[Mark]) -> str:
+    def bindings(node: list, chain: list[int], text: str, marks: list[Mark], ann: tuple[int, int] | None) -> str:
         """Append `; local = _ds.field` for each item of a parsed pattern, marked back to the source.
         (field=) binds local `field`; (field=target) binds `target`; (field=(...)) reads deeper;
-        (**rest) binds `rest` to a record of the fields not named."""
+        (**rest) binds `rest` to a record of the fields not named.
+        ann: the source span of the pattern's `Final`, copied onto every local it binds, `local: Final = ...`."""
+
+        def assign(text: str) -> str:
+            if ann is not None:
+                text += ": "
+                marks.append(Mark(len(text), len(text) + ann[1] - ann[0], *ann))
+                text += src[ann[0] : ann[1]]
+            return text + " = "
+
         for it, kind, val in node:
             if kind == "nested":
-                text = bindings(val, [*chain, it[0]], text, marks)
+                text = bindings(val, [*chain, it[0]], text, marks, ann)
                 continue
             text += "; "
             if kind == "rest":
                 ts = len(text)
                 text += val
                 marks.append(Mark(ts, len(text), *span(it[1], it[-1])))
-                text = omit(node, chain, text + " = ", marks)
+                text = omit(node, chain, assign(text), marks)
                 continue
             if kind == "short":  # target is implicit: insertion point right after `field=`
+                if ann is not None:
+                    final_spans.append(span(it[0]))
                 ts, at = len(text), off(toks[it[1]].end)
                 text += toks[it[0]].string
                 marks.append(Mark(ts, len(text), at, at, span(it[0])))
-                text += " = "
+                text = assign(text)
             elif kind == "target":
                 ts = len(text)
                 text += val
                 marks.append(Mark(ts, len(text), *span(it[2], it[-1])))
-                text += " = "
+                text = assign(text)
             # bare (half-typed): just the attribute access, for completion
             text = access([*chain, it[0]], text, marks)
         return text
@@ -1278,8 +1317,11 @@ def transform(
                 edits.append(Edit(off(toks[d].start), off(toks[named[0][0]].start), "", span(d)))
             continue
         at_stmt_start = prev is None or prev.type in STMT_START or prev.string == ";"
-        is_pattern = at_stmt_start and toks[close + 1].string == "="
+        eq = annotation_eq(toks, pair, close + 1) if at_stmt_start else None  # `(...): Final = r`
+        is_pattern = at_stmt_start and (toks[close + 1].string == "=" or eq is not None)
         is_for = prev is not None and prev.string == "for" and toks[close + 1].string == "in"
+        if prev is not None and prev.string == "for" and toks[close + 1].string == ":" and pattern_items(i):
+            raise err("a loop pattern can't be Final: the loop binds its names again on every pass", toks[close + 1])
         # a record built from spreads: `(**u, **r, age=27)`; as a pattern, `(name=, **rest) = u`, it's a rest
         if any(toks[it[0]].string == "**" for it in its) and not (is_pattern or is_for):
             build(i, close, its)
@@ -1362,12 +1404,24 @@ def transform(
             while toks[j].type not in (tokenize.NEWLINE, tokenize.ENDMARKER) and toks[j].string != ";":
                 j = pair.get(j, j) + 1
             marks: list[Mark] = []
-            binds = bindings(tree, [], "", marks)
+            # `(...): Final = r`: the annotation leaves `_ds` (each pattern rebinds it) for every local bound
+            ann = None
+            replaced = group
+            if eq is not None:
+                ann = span(close + 2, eq - 1)
+                replaced = (group[0], ann[1])
+                if not is_final(toks[close + 2 : eq]):
+                    msg = "a pattern's annotation can only be Final: its fields have their types already"
+                    if not tolerant:
+                        raise err(msg, toks[close + 2])
+                    problems.append((*ann, msg))  # half-typed, `(a=): Fin = r`: bound as if unannotated
+                    ann = None
+            binds = bindings(tree, [], "", marks, ann)
             stmt_end = off(toks[j - 1].end)
             # a pattern over several lines keeps its line breaks, `(_ds\n\n)`, so the lines after it keep
             # their numbers (tracebacks, source_ast)
-            breaks = src.count("\n", *group)
-            edits.append(Edit(*group, f"({DS}{chr(10) * breaks})" if breaks else DS, group))
+            breaks = src.count("\n", *replaced)
+            edits.append(Edit(*replaced, f"({DS}{chr(10) * breaks})" if breaks else DS, group))
             edits.append(Edit(stmt_end, stmt_end, binds, group, marks))
             continue
 
@@ -1518,12 +1572,23 @@ def transform(
         prelude += "from typing import cast as _cast\n"
     standins.sort()
     shapes = list(dict.fromkeys([*((f, False) for f in records), *types]))
-    return Result(prelude, body, edits, problems, standins, sorted(field_spans), sorted(label_spans), shapes, imports())
+    return Result(
+        prelude,
+        body,
+        edits,
+        problems,
+        standins,
+        sorted(field_spans),
+        sorted(label_spans),
+        shapes,
+        imports(),
+        final_spans,
+    )
 
 
 def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:
-    """If offset `at` is a field position in a destructuring pattern `(...) = expr` or `for (...) in xs`
-    (an empty item, or the field name being typed):
+    """If offset `at` is a field position in a destructuring pattern `(...) = expr`, `(...): Final = expr` or
+    `for (...) in xs` (an empty item, or the field name being typed):
     (word_start, word_end, close_paren, fields_already_listed).
     Used for completion; also matches `(x|) = y`, which is plain Python but a pattern in the making."""
     try:
@@ -1591,7 +1656,9 @@ def pattern_slot(src: str, at: int) -> tuple[int, int, int, list[str]] | None:
         if prev is not None and prev.string == "for":  # for (...) in xs
             if toks[close + 1].string != "in":
                 continue
-        elif not (prev is None or prev.type in STMT_START or prev.string == ";") or toks[close + 1].string != "=":
+        elif not (prev is None or prev.type in STMT_START or prev.string == ";") or (
+            toks[close + 1].string != "=" and annotation_eq(toks, pair, close + 1) is None
+        ):
             continue
         if not off(t.end) <= at <= off(toks[close].start):
             continue

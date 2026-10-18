@@ -115,11 +115,13 @@ class Translation:
         self.error: Exception | None = None
         self.problems: list[dict] = []  # byname diagnostics from tolerant translation
         self.fields: list[tuple[int, int]] = []  # source spans of record field names
+        self.finals: list[tuple[int, int]] = []  # shorthand items of Final patterns (see Result.finals)
         self.labels: set[int] = set()  # where a walrus labelling a returned tuple starts (see Result.labels)
         try:
             r = transform(source, tolerant=True, checker=True, lookup=lookup)
             body, prelude, edits = r.body, r.prelude, r.edits
             self.fields = r.fields
+            self.finals = r.finals
             self.labels = {s for s, _ in r.labels}
         except Exception as e:  # mid-edit code: send it raw; the checker reports the syntax error
             self.error = e

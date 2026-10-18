@@ -11,7 +11,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
-from typing import Literal, overload
+from typing import Final, Literal, overload
 
 import pytest
 
@@ -378,6 +378,41 @@ def test_a_method_can_unpack_self_and_fill_many_attributes():
             return x * x + y * y
 
     assert Point(3, 4).norm2() == 25
+
+
+def test_final_on_a_pattern_makes_every_local_it_binds_final():
+    (name=, age=years): Final = (name="rahul", age=26)
+    assert (name, years) == ("rahul", 26)
+    # the annotation goes on each local, never on `_ds`, which every pattern binds again
+    assert transform("(name=, age=years): Final = r").body == "_ds = r; name: Final = _ds.name; years: Final = _ds.age"
+
+
+def test_the_checker_rejects_changing_a_final_local(tmp_path):
+    verdicts = checker(
+        """\
+        from typing import Final
+        type Cfg = (lr: float, schedule: (max_steps: int))
+        def train(cfg: Cfg):
+            (lr=, schedule=(max_steps=)): Final = cfg
+            max_steps += 1
+            model = "trained"
+            (model=): Final = (model="best")
+            return lr, max_steps, model
+        """,
+        tmp_path,
+    )
+    nested_changed, overwritten = 5, 7
+    assert verdicts[nested_changed].startswith('"max_steps" is declared as Final and cannot be reassigned')
+    # Final means one binding in the whole scope, so a Final pattern can't take over a name either
+    assert verdicts[overwritten].startswith('"model" is declared as Final and cannot be reassigned')
+    assert len(verdicts) == 2
+
+
+def test_a_final_pattern_is_not_a_loop_and_takes_no_other_annotation():
+    with pytest.raises(SyntaxError, match="loop pattern can't be Final"):
+        transform("for (name=): Final in people: pass")
+    with pytest.raises(SyntaxError, match="annotation can only be Final"):
+        transform("(name=): str = r")
 
 
 # ============================================================================

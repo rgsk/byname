@@ -444,6 +444,41 @@ def test_pattern_labels_reading_methods_are_coloured_as_methods(lsp):
     assert got[(5, "encode")] == "function", got  # a record built from the local `encode`
 
 
+def test_final_pattern_shorthand_is_coloured_as_the_final_local(lsp):
+    # `age=` in a Final pattern declares a Final local, so it's coloured like `value` in `value: Final = 1`
+    # (and like its later uses); a renamed item's field stays a field, its target is the Final local
+    c, root, uri = lsp
+    text = (
+        "from typing import Final\nvalue: Final = 1\nr = (age=26, name='r')\n"
+        "(age=, name=who): Final = r\nprint(age, who, value)\n"
+    )
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 996}, "contentChanges": [{"text": text}]},
+        }
+    )
+    legend = c.init["capabilities"]["semanticTokensProvider"]["legend"]
+    data = c.request("textDocument/semanticTokens/full", {"textDocument": {"uri": uri}})["data"]
+    lines, line, col, got = text.splitlines(), 0, 0, {}
+    for i in range(0, len(data), 5):
+        dl, dc, length, typ, mods = data[i : i + 5]
+        line, col = line + dl, (col + dc if dl == 0 else dc)
+        named = {m for k, m in enumerate(legend["tokenModifiers"]) if mods >> k & 1}
+        got[(line, lines[line][col : col + length])] = (legend["tokenTypes"][typ], named)
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 997}, "contentChanges": [{"text": MAIN}]},
+        }
+    )
+    declared, pattern, used = 1, 3, 4
+    assert got[(pattern, "age")] == got[(declared, "value")], got
+    assert got[(pattern, "age")][0] == "variable" and "readonly" in got[(pattern, "age")][1], got
+    assert got[(pattern, "name")] == ("property", set()), got
+    assert got[(used, "age")][0] == "variable" and "readonly" in got[(used, "age")][1], got
+
+
 def test_fields_read_through_record_types_look_like_record_fields(lsp):
     # `p.age` through a record type reads a Final Protocol attribute (readonly static); a record's own
     # field is static. Both must get the same token, or themes colour them differently

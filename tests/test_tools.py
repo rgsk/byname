@@ -297,6 +297,26 @@ def test_destructured_parameters_are_typed(project):
     assert "_byname" not in out and out.count(" - error") == 3
 
 
+def test_final_pattern_locals_cannot_be_rebound(project):
+    # changing a Final local, nested ones too, is an error on the line that does it, and so is a
+    # Final pattern rebinding a name the scope already has
+    (project / "final.pyn").write_text(
+        "from typing import Final\n"
+        "type Cfg = (lr: float, schedule: (max_steps: int))\n"
+        "def f(cfg: Cfg):\n"
+        "    (lr=, schedule=(max_steps=)): Final = cfg\n"
+        "    max_steps += 1\n"
+        "    model = 'trained'\n"
+        "    (model=): Final = (model='best')\n"
+        "    return lr, max_steps, model\n"
+    )
+    out, rc = tool(project, "basedpyright", "final.pyn")
+    assert rc == 1
+    assert 'final.pyn:5:5 - error: "max_steps" is declared as Final and cannot be reassigned' in out
+    assert 'final.pyn:7:6 - error: "model" is declared as Final and cannot be reassigned' in out
+    assert out.count(" - error") == 2
+
+
 def test_ruff_clean_file_passes_despite_generated_header(project):
     # people.pyn is clean; complaints about the record header are hidden and don't fail the run
     out, rc = tool(project, "ruff", "check", "--output-format=concise", "people.pyn")
