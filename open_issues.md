@@ -96,6 +96,40 @@ item to a `Literal["r", "w"]` parameter. Workaround: annotate the function (`-> 
 annotated functions aren't rewritten. Accepted: labels in hover are worth more than literals here. Showing the
 labels in hover text only (the proxy) would keep literals but work only on the definition's own hover.
 
+## A function in a record field doesn't match its type from another module
+
+```python
+# a.pyn
+type Fn = (fn: Callable[[Tensor], Tensor], name: str)
+def takes_fn(f: Fn) -> None: ...
+
+# b.pyn
+from a import takes_fn
+def double(x: Tensor) -> Tensor: ...
+takes_fn((fn=double, name="b"))   # error: "Could not bind method "double"", passes in a.pyn
+```
+
+Found in world-model-final (`../byname/feedbacks/world_model_final.md`). Within one module the literal is the
+same Protocol class as the type and is matched by its type arguments; from another module it's a different
+class, matched member by member. Record fields are `name: Final[T0]` in the Protocol's body, and `Final` in a
+class body is a class variable, so a field holding a function is bound as a method (`self` passed as its first
+argument) and the match fails. Only functions: an `int` into a `float` field and a subclass into an
+`nn.Module` field pass across modules. Related to "A record doesn't widen" above (the `_replace` mismatch in
+the message follows from the same comparison).
+
+**Fix on branch `record-fields-as-properties` (8ddf084), not merged:** for checkers the fields are read-only
+`@property`s (runtime keeps the class annotations, which `record()` reads), and record-literal completion
+looks for property members of a type with `keys()` instead of constants. All 387 tests pass, and it was
+measured to keep int → float, str-into-int errors, read-only fields, open types and exact field types.
+**Blocked on colour:** pyright gives a Final class attribute `property readonly static`, which `remap_tokens`
+turns into the record-field colour (`static`); a property is `property readonly`, the same token as any
+user `@property` (`model.device`), so record fields would change colour, which isn't acceptable. Measured
+and rejected: fields declared as `self.x: Final[T]` in a Protocol `__init__` aren't Protocol members, so
+open types stopped checking their fields. To finish: the proxy must tell record-field reads from ordinary
+properties and keep their `static` colour, then a test in `test_exhaustive.pyn` and the docs.
+Workaround meanwhile: hold an object with a method in the field, typed by a Protocol (`(coder: Coder, ...)`
+where `Coder` has `def codes(...)`); objects match across modules.
+
 ## No syntax for function types; keyword-only callbacks can't be typed
 
 ```python
