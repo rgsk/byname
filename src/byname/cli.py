@@ -26,16 +26,33 @@ def run(path: Path, argv: list[str]) -> None:
     exec(to_code(src, str(path)), mod.__dict__)
 
 
+def ruff_at(path: Path, mirrors: dict[Path, Path]) -> tuple[str, Path | None]:
+    """(filename, cwd) for Ruff on a .pyn: its copy in the mirror of the current directory, as `byname tool`
+    and the editor see it (lsp.ruff_at). Ruff tells first-party imports by the files it finds, and a .pyn is a
+    module only in the mirror, so without it `from helper import f` sorts as third-party.
+    mirrors: the mirror once synced, by root, so a run of many files syncs it once."""
+    from .tools import mirror, mirrored
+
+    root = Path.cwd()
+    rel = mirrored(root, path.resolve())
+    if rel is None:  # outside the project: Ruff on the file where it is
+        return str(path), None
+    if root not in mirrors:
+        mirrors[root] = mirror(root)
+    return str(rel), mirrors[root]
+
+
 def format_files(args: list[str]) -> int:
     from .fmt import FormatError, format_pyn
 
     check = "--check" in args
     changed = 0
+    mirrors: dict[Path, Path] = {}
     for name in (a for a in args if a != "--check"):
         path = Path(name)
         src = path.read_text()
         try:
-            out = format_pyn(src, str(path))
+            out = format_pyn(src, *ruff_at(path, mirrors))
         except (FormatError, SyntaxError) as e:
             print(f"{name}: {e}", file=sys.stderr)
             return 2
@@ -52,11 +69,12 @@ def fix_files(args: list[str]) -> int:
 
     check = "--check" in args
     changed = 0
+    mirrors: dict[Path, Path] = {}
     for name in (a for a in args if a != "--check"):
         path = Path(name)
         src = path.read_text()
         try:
-            out = fix_pyn(src, str(path))
+            out = fix_pyn(src, *ruff_at(path, mirrors))
         except FixError as e:
             print(f"{name}: {e}", file=sys.stderr)
             return 2

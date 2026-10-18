@@ -1,4 +1,6 @@
+import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -88,3 +90,19 @@ def test_byname_notebook_cells_are_fixed_through_their_translation():
         "import os",
         "x: list[int] = [1]\nr = (a=os.sep, b=x)",
     ]
+
+
+def test_the_cli_sorts_a_pyn_module_as_first_party(tmp_path):
+    # Ruff tells first-party imports by the files it finds, and a .pyn is a module only in byname's mirror:
+    # run on the project as it is, `helper` sorted as third-party and joined the `pytest` group
+    (tmp_path / "pyproject.toml").write_text('[tool.ruff]\nsrc = ["src"]\n[tool.ruff.lint]\nselect = ["I"]\n')
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "helper.pyn").write_text("def helper() -> int:\n    return 1\n")
+    unsorted = "import pytest\nimport json\nfrom helper import helper\nprint(json, pytest, helper())\n"
+    (tmp_path / "src" / "main.pyn").write_text(unsorted)
+    env = {**os.environ, "XDG_CACHE_HOME": str(tmp_path / ".cache")}
+    run = [sys.executable, "-m", "byname", "fix", "src/main.pyn"]
+    subprocess.run(run, cwd=tmp_path, env=env, check=True, capture_output=True)
+    stdlib, third_party, first_party = "import json\n", "import pytest\n", "from helper import helper\n"
+    expected = f"{stdlib}\n{third_party}\n{first_party}\nprint(json, pytest, helper())\n"
+    assert (tmp_path / "src" / "main.pyn").read_text() == expected
