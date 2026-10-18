@@ -355,8 +355,17 @@ def type_def(fields: tuple[str, ...], is_open: bool, portable: bool = False) -> 
     out = f"class {name}[{params}](_PR):\n" if fields else f"class {name}(_PR):\n"
     # read-only fields, so records (immutable) match; Final rather than @property, so `p.age` is coloured
     # like a record field (see remap_tokens). Checkers object to a type variable in Final: silenced.
-    for i, f in enumerate(fields):
-        out += f"    {f}: _Fi[T{i}]  # pyright: ignore\n"
+    # For checkers, read-only properties: Final in a class body is a class variable, and a class variable
+    # holding a function is bound as a method when read, so a record with a function in a field didn't
+    # match its type from another module ("could not bind method"). At runtime, class annotations, which
+    # record() reads for the field names and their type parameters.
+    if fields:
+        out += "    if _t.TYPE_CHECKING:\n"
+        for i, f in enumerate(fields):
+            out += f"        @property\n        def {f}(self) -> T{i}: ...\n"
+        out += "    else:\n"
+        for i, f in enumerate(fields):
+            out += f"        {f}: _Fi[T{i}]\n"
     out += f"    def __getitem__(self, k: {key_alias(fields)}, /) -> _Ay: ...\n"  # a str key, never a position
     out += "    def __contains__(self, k: object, /) -> bool: ...\n"  # a field name
     out += "    def keys(self) -> tuple[str, ...]: ...\n"  # what `**rec` reads

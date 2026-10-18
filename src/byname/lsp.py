@@ -46,7 +46,7 @@ NOTEBOOK_FORMAT, NOTEBOOK_FIX_ALL, NOTEBOOK_ORGANIZE = (
     "notebook.source.fixAll",
     "notebook.source.organizeImports",
 )
-METHOD, VARIABLE, CONSTANT = 2, 6, 21  # CompletionItemKind
+METHOD, VARIABLE, PROPERTY = 2, 6, 10  # CompletionItemKind
 # a cell that makes the notebook's cells .pyn (IPython takes one module per %load_ext)
 LOAD_EXT_RE = re.compile(r"^[ \t]*%load_ext[ \t]+byname[ \t]*(?:#.*)?$", re.MULTILINE)
 # methods records and tuples bring along (byname's `keys`, tuple's); a class's own methods stay
@@ -1285,7 +1285,7 @@ class Proxy:
     ) -> bool:
         """Field names in `user: User = (name=, |)`. The checker is shown `user: User = _t.cast(User, None).|`
         in place of the literal and asked for User's members: a record's fields, closed or open, are its
-        read-only members, offered as constants (an open record type has no `_replace` to ask instead; `user.`
+        read-only properties (an open record type has no `_replace` to ask instead; `user.`
         won't do: `user` is unbound in its own assignment). `_t` is the prelude's `import typing as _t`, in
         every file with a record type. `value` is that cast, or an expression on it for a literal nested in another
         (expected_value)."""
@@ -1381,8 +1381,14 @@ class Proxy:
 
     def finish_record_type(self, result, key: Path | str, doc: Doc, rng: dict, given: set[str]) -> dict | None:
         """The fields not yet given, as `name=`; None if the type had none (not a record type)."""
+        raw = result.get("items", []) if isinstance(result, dict) else (result or [])
         out = self.finish_slot(result, key, doc, rng, set())
-        fields = [it for it in out["items"] if it.get("kind") == CONSTANT]
+        # a record type's fields are its properties (finish_slot has dropped `_fields` and `_byname_fieldset`,
+        # as every `_` name). Other types have properties too (int's `real`), so the type must also have
+        # `keys()`, which every record type has; finish_slot drops it, so it's looked for in the raw answer
+        if not any(it.get("label") == "keys" for it in raw):
+            return None
+        fields = [it for it in out["items"] if it.get("kind") == PROPERTY]
         if not fields:
             return None
         items = [
