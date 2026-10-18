@@ -15,7 +15,7 @@ from typing import Final, Literal, overload
 
 import pytest
 
-from byname import record, to_code, transform
+from byname import deepdict, record, to_code, transform
 
 # ============================================================================
 # 1. CALLS: pass locals by name
@@ -1349,7 +1349,7 @@ def test_a_record_spreads_into_a_call_by_name_not_position(tmp_path):
 
 
 # ============================================================================
-# 11. FROM A DICT: `record(T, d)`, checked at runtime
+# 11. FROM A DICT AND BACK: `record(T, d)`, checked at runtime, and `deepdict(rec)`
 # ============================================================================
 
 # A dict's keys aren't known statically, so the checker rejects `(**d)` into a record type, and at runtime
@@ -1401,3 +1401,50 @@ def test_a_field_can_be_overridden_from_the_right():
     # the right wins: reuse a saved config with one field changed, say fine-tuning without dropout
     cfg = record(ModelConfig, {**saved, "dropout": 0.0})
     assert cfg == (n_layer=4, dropout=0.0)
+
+
+# The other way: `_asdict()`, `dict(rec)` and `{**rec}` convert one level, as NamedTuple's `_asdict()` does,
+# so a nested record stays a record, which json.dumps and torch.load(weights_only=True) refuse.
+# `deepdict(rec)` makes dicts all the way down, as `deepcopy` copies all the way down where `copy` stops.
+
+type Schedule = (warmup_steps: int, max_lr: float)
+type EvalRow = (step: int, val_loss: float)
+type TrainConfig = (batch_size: int, schedule: Schedule)
+type Run = (cfg: TrainConfig, history: list[EvalRow])
+
+
+def test_asdict_is_one_level_so_json_refuses_a_nested_record():
+    cfg: TrainConfig = (batch_size=64, schedule=(warmup_steps=200, max_lr=5e-4))
+    assert cfg._asdict()["schedule"] == (warmup_steps=200, max_lr=5e-4)  # still a record
+    with pytest.raises(TypeError):
+        json.dumps(cfg._asdict())
+
+
+def test_deepdict_makes_dicts_all_the_way_down():
+    cfg: TrainConfig = (batch_size=64, schedule=(warmup_steps=200, max_lr=5e-4))
+    assert deepdict(cfg) == {"batch_size": 64, "schedule": {"warmup_steps": 200, "max_lr": 5e-4}}
+    assert json.dumps(deepdict(cfg)) == '{"batch_size": 64, "schedule": {"warmup_steps": 200, "max_lr": 0.0005}}'
+
+
+def test_record_of_deepdict_gives_the_record_back_lists_of_records_too():
+    # record() builds the records in a list[R], tuple[R, ...] or dict[K, R] field, so a run's history
+    # survives being saved as plain data
+    run: Run = (cfg=(batch_size=64, schedule=(warmup_steps=200, max_lr=5e-4)), history=[(step=0, val_loss=2.1)])
+    saved = json.loads(json.dumps(deepdict(run)))
+    assert record(Run, saved) == run
+
+
+def test_deepdict_takes_a_record_and_gives_a_dict_to_the_checker(tmp_path):
+    verdicts = checker(
+        """\
+        from byname import deepdict
+        cfg = (batch_size=64, schedule=(warmup_steps=200, max_lr=5e-4))
+        reveal_type(deepdict(cfg))
+        deepdict([cfg])
+        """,
+        tmp_path,
+    )
+    record_given, list_given = 3, 4
+    assert verdicts[record_given] == 'Type of "deepdict(cfg)" is "dict[str, Any]"'
+    # a list of records is [deepdict(row) for row in rows]
+    assert verdicts[list_given].startswith('Argument of type "list[')

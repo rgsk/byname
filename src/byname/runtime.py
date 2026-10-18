@@ -11,8 +11,13 @@ annotations list the fields in written order (`a: Final[T0]`) and whose subscrip
 
 Type checks follow the checker's rules where it's cheap: isinstance for classes, an int is a float,
 a bool is an int, unions, None, Literal, Any/object. Nested record types are checked recursively,
-and a mapping there is built into a record. Generics like `list[int]` are checked shallowly: the
-container's type only, not its elements.
+and a mapping there is built into a record. A list, tuple or dict of a record type, `list[R]`,
+`tuple[R, ...]` or `dict[K, R]`, has each element built the same way; other generics, like `list[int]`,
+are checked shallowly: the container's type only, not its elements.
+
+`deepdict(rec)` goes the other way: records become dicts all the way down, where `dict(rec)` and
+`rec._asdict()` stop at one level (as `deepcopy` does to `copy`). The data is what json, torch.save and wandb
+take, and `record(T, deepdict(rec)) == rec`.
 """
 
 import sys
@@ -20,7 +25,7 @@ import types
 import typing
 from collections import namedtuple
 from collections.abc import Mapping
-from typing import Any, TypeAliasType
+from typing import Any, Protocol, TypeAliasType
 
 from .config import iter_callers
 from .transform import ORDER, prelude_for
@@ -111,7 +116,17 @@ def _convert(value: object, tp: object, path: str, errors: list[str], callers: t
         if value is not None:
             errors.append(f"{at}: expected None, got {type(value).__name__} ({value!r})")
         return value
-    cls = origin or tp  # shallow for generics: list[int] checks list
+    if origin in (list, tuple, dict) and isinstance(value, origin):
+        # a container of records, `history: list[EvalRow]`: each element built like a field, so the round
+        # trip through deepdict() gives the records back. Other element types stay unchecked
+        args = typing.get_args(tp)
+        if origin is list and len(args) == 1 and _record_type(args[0]) is not None:
+            return [_convert(v, args[0], f"{path}[{k}]", errors, callers) for k, v in enumerate(value)]
+        if origin is tuple and len(args) == 2 and args[1] is Ellipsis and _record_type(args[0]) is not None:
+            return tuple(_convert(v, args[0], f"{path}[{k}]", errors, callers) for k, v in enumerate(value))
+        if origin is dict and len(args) == 2 and _record_type(args[1]) is not None:
+            return {k: _convert(v, args[1], f"{path}[{k!r}]", errors, callers) for k, v in value.items()}  # pyright: ignore[reportAttributeAccessIssue]
+    cls = origin or tp  # shallow for other generics: list[int] checks list
     if not isinstance(cls, type):
         return value  # TypeVars, Callable[...] and other forms: not checked
     ok = isinstance(value, cls)
@@ -161,3 +176,33 @@ def record(t: object, data: object, /) -> object:
     if errors:
         raise TypeError(f"{_type_name(t)}: " + "; ".join(errors))
     return result
+
+
+class _Record(Protocol):
+    """What only a record has, to the checker: `keys()` giving its field names (a dict's gives a view, a
+    NamedTuple has none)."""
+
+    def keys(self) -> tuple[str, ...]: ...
+
+
+def deepdict(rec: _Record, /) -> dict[str, Any]:
+    """rec as a dict, and every record in it too, in written field order: what json.dumps, torch.save (loaded
+    back with weights_only=True) and wandb take, where `dict(rec)` and `rec._asdict()` stop at one level.
+    Inside, it recurses into records and exact lists, tuples (kept tuples) and dicts (their values); anything
+    else, a NamedTuple or a tensor say, is left as it is. The inverse of record():
+    `record(T, deepdict(rec)) == rec`."""
+    if not _is_record(rec):
+        raise TypeError(f"deepdict() takes a record, got {type(rec).__name__}")
+    return _deep(rec)  # pyright: ignore[reportReturnType]
+
+
+def _deep(x: object) -> object:
+    if _is_record(x):
+        return {k: _deep(v) for k, v in x._asdict().items()}  # pyright: ignore[reportAttributeAccessIssue]
+    if type(x) is list:
+        return [_deep(v) for v in x]
+    if type(x) is tuple:
+        return tuple(_deep(v) for v in x)
+    if type(x) is dict:
+        return {k: _deep(v) for k, v in x.items()}
+    return x

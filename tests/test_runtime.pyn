@@ -1,9 +1,9 @@
-# runtime.py's record(T, data) case by case; test_exhaustive.pyn section 11 shows it in use
-from typing import Literal
+# runtime.py's record(T, data) and deepdict(rec) case by case; test_exhaustive.pyn section 11 shows them in use
+from typing import Literal, NamedTuple
 
 import pytest
 
-from byname import record
+from byname import deepdict, record
 
 type Config = (n_layer: int, lr: float, name: str)
 type Run = (cfg: Config, seed: int)
@@ -11,6 +11,8 @@ type Tagged = (..., name: str)
 type Ids = list[int]
 type Batch = (ids: Ids)
 type Opt = (window: int | None, mode: Literal["train", "eval"])
+type Row = (step: int, loss: float)
+type Log = (rows: list[Row], pair: tuple[Row, ...], best: dict[str, Row])
 
 
 def test_takes_a_record_as_well_as_a_dict():
@@ -63,3 +65,56 @@ def test_needs_a_record_type_and_a_mapping():
         record(int, {})
     with pytest.raises(TypeError, match="record\\(\\) needs a mapping of field names, got list"):
         record(Config, [("n_layer", 4)])
+
+
+def test_a_list_tuple_or_dict_of_a_record_type_builds_each_element():
+    saved = {
+        "rows": [{"step": 0, "loss": 2.0}],
+        "pair": ({"step": 1, "loss": 1.5},),
+        "best": {"val": {"step": 1, "loss": 1.5}},
+    }
+    log = record(Log, saved)
+    assert log.rows == [(step=0, loss=2.0)]
+    assert log.pair == ((step=1, loss=1.5),)  # still a tuple
+    assert log.best == {"val": (step=1, loss=1.5)}
+
+
+def test_an_element_s_problem_names_its_index_or_key():
+    with pytest.raises(TypeError, match="field 'rows\\[1\\].loss': expected float, got str"):
+        record(Log, {"rows": [{"step": 0, "loss": 2.0}, {"step": 1, "loss": "low"}], "pair": (), "best": {}})
+    with pytest.raises(TypeError, match="missing field \"best\\['val'\\].loss\""):
+        record(Log, {"rows": [], "pair": (), "best": {"val": {"step": 1}}})
+
+
+def test_deepdict_turns_every_record_into_a_dict_in_written_order():
+    run = (cfg=(n_layer=4, lr=1e-3), seed=0)
+    assert deepdict(run) == {"cfg": {"n_layer": 4, "lr": 1e-3}, "seed": 0}
+    assert list(deepdict((b=1, a=2))) == ["b", "a"]
+
+
+def test_deepdict_recurses_into_lists_tuples_and_dict_values():
+    log = (rows=[(step=0, loss=2.0)], pair=((step=1, loss=1.5),), best={"val": (step=1, loss=1.5)})
+    assert deepdict(log) == {
+        "rows": [{"step": 0, "loss": 2.0}],
+        "pair": ({"step": 1, "loss": 1.5},),  # a tuple stays a tuple
+        "best": {"val": {"step": 1, "loss": 1.5}},
+    }
+
+
+def test_deepdict_leaves_everything_else_inside_as_it_is():
+    class Point(NamedTuple):
+        x: int
+
+    point, tags = Point(1), {(a=1)}
+    assert deepdict((p=point, tags=tags)) == {"p": point, "tags": tags}  # a NamedTuple, a set: not recursed into
+
+
+def test_deepdict_takes_a_record_only():
+    # a list of records is [deepdict(row) for row in rows]
+    with pytest.raises(TypeError, match="deepdict\\(\\) takes a record, got list"):
+        deepdict([(a=1)])  # pyright: ignore[reportArgumentType]
+
+
+def test_record_of_deepdict_gives_the_record_back():
+    log = (rows=[(step=0, loss=2.0)], pair=((step=1, loss=1.5),), best={"val": (step=1, loss=1.5)})
+    assert record(Log, deepdict(log)) == log

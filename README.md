@@ -168,8 +168,33 @@ record(ModelConfig, {**saved, "dropout": 0.0})    # one field changed: the right
 
 - **Names:** every field of `T` must be there, and no others. An open type, `(..., n_layer: int)`, keeps extra keys.
 - **Types,** by the checker's rules: `isinstance` for classes (an `int` is a `float`, a `bool` is an `int`), unions,
-  `None`, `Literal`. A nested record type takes a dict too, and is built into a record. Generics are checked
-  shallowly: `list[int]` checks for a `list`, not its elements.
+  `None`, `Literal`. A nested record type takes a dict too, and is built into a record, and so does each
+  element of a `list[R]`, `tuple[R, ...]` or `dict[K, R]` field (errors name the path, `history[0].loss`).
+  Other generics are checked shallowly: `list[int]` checks for a `list`, not its elements.
+
+**Back to plain data:** `rec._asdict()`, `dict(rec)` and `{**rec}` convert one level, like NamedTuple's own
+`_asdict()`, so a nested record stays a record, and `json.dumps` or `torch.load(weights_only=True)` refuse it.
+`deepdict(rec)` makes dicts all the way down, as `deepcopy` copies all the way down where `copy` stops:
+
+```python
+from byname import deepdict, record
+
+type TrainConfig = (batch_size: int, schedule: (warmup_steps: int, max_lr: float))
+
+deepdict(cfg)       # {'batch_size': 64, 'schedule': {'warmup_steps': 200, 'max_lr': 0.0005}}
+json.dumps(deepdict(cfg))
+record(TrainConfig, json.loads(text)) == cfg     # the way back
+```
+
+- **A record at the top:** anything else is a checker error and a `TypeError`. A list of records is
+  `[deepdict(row) for row in history]`.
+- **What it recurses into:** records (dicts in written field order), and exact `list`s, `tuple`s (kept
+  tuples) and `dict`s (their values). Anything else, a NamedTuple, a set or a tensor, is left as it is.
+- **Typed as `dict[str, Any]`;** `record(T, d)` gives the typed record back.
+- **JSON has no tuples or sets:** `json.dumps` writes a tuple as a list, so `record(T, json.loads(text))`
+  rejects a `tuple[...]` field (`expected tuple[...], got list`), and it refuses a set outright
+  (`Object of type set is not JSON serializable`). `torch.save` keeps both, so that round trip works; for
+  JSON, use list fields.
 - **Every problem in one `TypeError`,** with dotted paths into nested records (`field 'cfg.lr'`).
 - **Not in output files:** it needs byname at runtime, which output files don't have.
 
