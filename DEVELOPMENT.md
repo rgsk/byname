@@ -161,7 +161,6 @@ there run through byname directly; no output files.
 
 ## Conventions
 
-- **Commits:** one-line subjects, no co-author trailer.
 - **Python versions in the checker:** byname's own venv is 3.14, where annotations may name classes defined further down; users' projects (llm: 3.12) aren't. 21f1394 emitted each record's checker function before the `_typ_` Protocol it returns, so on 3.12 every record was `Unknown` and the undefined names were hidden as generated-code diagnostics. Fixed 2026-10-05 (types first); `test_records_are_typed_on_python_before_3_14` pins `pythonVersion` 3.12.
 - **Tests:** `uv run pytest`. They're written to explain the behaviour, with real values in the asserts. `test_lsp.py`, `test_tools.py` and `test_fmt.py` drive the real basedpyright and Ruff, and skip if those aren't installed.
 - **Every feature goes in `tests/test_exhaustive.pyn`:** it's the one walkthrough of everything byname enables, read top to bottom. A new or changed feature gets a test there in its section (runtime behaviour, the translation where it explains the feature, the checker's verdict through `checker()` when the point is typing, and its errors), in the same change as the code. Edge cases go in `test_transform.py` and friends; test_exhaustive shows what a user can write.
