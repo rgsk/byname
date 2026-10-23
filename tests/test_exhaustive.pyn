@@ -764,7 +764,7 @@ def test_a_spread_of_a_call_is_typed_when_the_function_shows_its_fields(tmp_path
     assert sorted(verdicts) == [10, 11, 12, 13, 14]
 
 
-def test_a_spread_of_a_call_whose_function_shows_no_one_record_is_unknown(tmp_path):
+def test_a_spread_of_a_call_whose_function_shows_no_one_record_is_open(tmp_path):
     verdicts = checker(
         """\
         import functools
@@ -782,8 +782,40 @@ def test_a_spread_of_a_call_whose_function_shows_no_one_record_is_unknown(tmp_pa
         """,
         tmp_path,
     )
-    # returns of different fields, or a decorator, which may return anything; annotate the function instead
-    assert verdicts == {11: 'Type of "e" is "Unknown"', 12: 'Type of "c" is "Unknown"'}
+    # returns of different fields, or a decorator, which may return anything: an open record of the fields
+    # written after the spread (see test_a_spread_with_no_type_expected_is_open); annotate the function instead
+    assert verdicts == {11: 'Type of "e" is "(..., zip: int)"', 12: 'Type of "c" is "(..., zip: int)"'}
+
+
+def test_a_spread_with_no_type_expected_is_open(tmp_path):
+    # `**rest` of an open record carries the fields nobody declared, like **kwargs. Rebuilt with nothing to
+    # say what's expected (a return with no `->`, a name with no annotation), the record is open: the fields
+    # written after the last spread are known, the spread's aren't. Where a type is expected it's checked
+    # against that type, as before
+    verdicts = checker(
+        """\
+        def greet(u: (..., name: str, age: int)):
+            (name=, age=, **rest) = u
+            return (**rest, name=name.upper())
+        out = greet((name="rahul", age=26, sex="male"))
+        moved = (**out, city="pune")
+        reveal_type(out)
+        reveal_type(out.name)
+        reveal_type(moved)
+        """,
+        tmp_path,
+    )
+    assert verdicts == {
+        6: 'Type of "out" is "(..., name: str)"',
+        7: 'Type of "out.name" is "str"',
+        8: 'Type of "moved" is "(..., city: str)"',
+    }
+
+    def greet(u: (..., name: str, age: int)):
+        (name=, age=, **rest) = u
+        return (**rest, name=name.upper())
+
+    assert greet((name="rahul", age=26, sex="male")) == (sex="male", name="RAHUL")
 
 
 def test_a_spread_of_known_records_is_typed_without_an_annotation(tmp_path):
@@ -852,7 +884,7 @@ def test_spreading_back_into_the_same_name_keeps_its_type(tmp_path):
 def test_a_spread_is_typed_when_every_binding_that_may_reach_it_has_the_same_fields(tmp_path):
     # a name bound in a branch, a loop or `try`, rebound and read from a function, or rebound through `global`:
     # any of its bindings may be the one that ran, so the spread is typed only when they all have the same
-    # fields (the field types are the checker's union). When they differ it's Unknown: annotate it
+    # fields (the field types are the checker's union). When they differ it's open, `(...)`: annotate it
     verdicts = checker(
         """\
         import random
@@ -889,10 +921,10 @@ def test_a_spread_is_typed_when_every_binding_that_may_reach_it_has_the_same_fie
         tmp_path,
     )
     assert verdicts[26] == 'Type of "e1" is "(name: str, age: str | int)"'  # field types: a union
-    assert verdicts[27] == 'Type of "e2" is "Unknown"'  # the `except` adds a field
+    assert verdicts[27] == 'Type of "e2" is "(...)"'  # the `except` adds a field
     assert verdicts[28] == 'Type of "train()" is "(lr: float, steps: int, seed: int)"'
     assert verdicts[29] == 'Type of "e3" is "(name: str, age: int)"'
-    assert verdicts[30] == 'Type of "e4" is "(a: int) | Unknown"'  # the loop's next pass reads `w = (b=1)`
+    assert verdicts[30] == 'Type of "e4" is "(a: int) | (...)"'  # the loop's next pass reads `w = (b=1)`
 
 
 def test_replace_updates_a_record_and_a_spread_builds_a_new_one(tmp_path):

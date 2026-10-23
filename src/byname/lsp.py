@@ -632,7 +632,7 @@ def is_generated_name(name) -> bool:
     )
 
 
-FIELDS_CLASS_RE = re.compile(r"class _(typ)_(\w+?)\[")
+FIELDS_CLASS_RE = re.compile(r"class _(typ|opn)_(\w+?)\[")
 STUB_RE = re.compile(r"    def _rec_(\w+?)\[")
 
 
@@ -656,7 +656,7 @@ def field_declarations(hidden: str, pos: dict) -> list[dict]:
         else:
             continue
         for d in re.finditer(r"(\w+):", text):
-            if d[1] in owner.split("__") and (kind != "typ" or text.startswith((f"    {d[1]}:", "    def _replace("))):
+            if d[1] in owner.split("__") and (kind == "rec" or text.startswith((f"    {d[1]}:", "    def _replace("))):
                 decls.setdefault((owner, d[1]), []).append({"line": i, "character": d.start()})
     return next(
         (

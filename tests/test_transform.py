@@ -652,7 +652,7 @@ def test_spread_records_of_known_names_are_plain_records():
         "type T = (a: int, b: str)\n"
         "def f(c: T, d):\n"
         "    x = (**c, z=1)\n"  # a parameter's record type
-        "    y = (**d, z=1)\n"  # no type: unknown
+        "    y = (**d, z=1)\n"  # no type: open, the fields written after it
         "t: T = (a=1, b='x')\n"
         "n = (**t,)\n"
         "again = (**n, b='y')\n"  # a spread of a spread
@@ -662,21 +662,22 @@ def test_spread_records_of_known_names_are_plain_records():
         "w2 = (**w,)\n"
         "w = (**w, c=3)\n"  # reads the `w` before it
         "def g():\n"
-        "    return (**w,)\n"  # may run after any binding of `w`, and they differ: unknown
+        "    return (**w,)\n"  # may run after any binding of `w`, and they differ: open
         "if t.a:\n"
         "    w = (a=1,)\n"
-        "w3 = (**w,)\n"  # the branch's `w` or the one before it, which differ: unknown
+        "w3 = (**w,)\n"  # the branch's `w` or the one before it, which differ: open
         "k = [(**t,) for t in [w]]\n"  # the comprehension's `t`: unknown
         "m = [(**t,) for _ in [w]]\n"  # the module's `t`, read there and then
     )
     lines = re.sub(r"___\d+", "", transform(src, checker=True).body).splitlines()
     assert lines[2] == "    x = _rec_a__b__z(a=c.a, b=c.b, z=1)"
-    assert "_byname_ctx(" in lines[3]
+    assert lines[3] == "    y = _rec_z(**_byname_loose(d), z=1)"  # no type expected: open_build
     assert lines[6] == "again = _rec_a__b(a=n.a, b='y')"
     assert lines[8] == "w1 = _rec_a(a=w.a,)"
     assert lines[10] == "w2 = _rec_a__b(a=w.a, b=w.b,)"
     assert lines[11] == "w = _rec_a__b__c(a=w.a, b=w.b, c=3)"
-    assert ["_byname_ctx(" in lines[i] for i in (13, 16, 17)] == [True, True, True]
+    assert lines[13] == "    return _rec_(**_byname_loose(w),)" and lines[16] == "w3 = _rec_(**_byname_loose(w),)"
+    assert "_byname_ctx(" in lines[17]  # a list's element: the generic path
     assert lines[18] == "m = [_rec_a__b(a=t.a, b=t.b,) for _ in [w]]"
     assert "_rec_" not in transform(SPREADS).body.split("both = ")[1].split("\n")[0]  # runtime: _byname_rec
 
@@ -686,17 +687,19 @@ def test_a_spread_of_a_call_whose_function_shows_its_fields_is_a_plain_record():
     src = "def make():\n    return (name='a', age=1)\nx = (**make(), zip=1)\ny = (**make(), **make())\n"
     body = transform(src, checker=True).body.splitlines()
     assert body[2] == "x = _rec_name__age__zip___1(name=(_byname_v0 := make()).name, age=_byname_v0.age, zip=1)"
-    assert body[3].startswith("y = _byname_ctx(")  # the second overrides every field of the first: generic path
+    # the second overrides every field of the first: not a plain record; no type expected, so open (open_build)
+    assert body[3] == "y = _rec____2(**_byname_loose(make()), **_byname_loose(make()))"
     assert transform(src).body.splitlines()[2] == "x = _byname_rec({**make(), 'zip': 1})"
 
 
 def test_spread_records_as_call_arguments_fall_back_to_a_record():
     # a whole call argument gets _byname_arg (unknown type: a record, so a non-record overload rejects it);
-    # anywhere else _byname_ctx (unknown type: Any)
+    # anywhere else _byname_ctx (unknown type: Any), but where no type is expected at all: open_build
     src = "f((**u))\nf(1, k=(**u))\no.m(a, (**u), b)\nx = (**u)\nf([(**u)])\nf((**u).a)\nt = ((**u), 1)\n"
     lines = transform(src, checker=True).body.splitlines()
     assert [ln.count("_byname_arg(") for ln in lines] == [1, 1, 1, 0, 0, 0, 0]
-    assert [ln.count("_byname_ctx(") for ln in lines] == [0, 0, 0, 1, 1, 1, 1]
+    assert [ln.count("_byname_ctx(") for ln in lines] == [0, 0, 0, 0, 1, 1, 1]
+    assert lines[3] == "x = _rec____0(**_byname_loose(u))"
 
 
 def test_spread_record_errors():

@@ -101,7 +101,7 @@ wrote them. To a checker, records with the same fields are the same type whateve
 You rarely need a record type, since return types are inferred. Three cases where you do:
 - **Recursive functions:** checkers can't infer through the recursive call, so its fields come out `Unknown`.
 - **A name bound to records with different fields:** `u = (name=...)`, then `u = (name=..., age=...)` in an
-  `if`: a spread of `u` after it is `Unknown` (see below). Annotate the spread, or use a new name.
+  `if`: a spread of `u` after it doesn't know `u`'s fields (see below). Annotate the spread, or use a new name.
 - **Functions that take part of a config:** `def get_batch(cfg: (..., batch_size: int, block_size: int))`
   accepts any config with those fields, while `f(**cfg)` requires an exact match.
 
@@ -146,7 +146,10 @@ ones (`return (name=, age=)`, or another such function's call, in other modules 
 code is read at its nearest binding before the spread, so `u = (**u, city="pune")` stays typed. When more than
 one binding may have run (an `if`, a loop, a function reading a module name) they must all have the same
 fields. Otherwise (bindings with different fields, a call to a method or to a function that shows no one
-record) it's `Any`. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
+record, an open record's `**rest`) it's open: the fields written after the last spread are known and the
+spread's aren't, so `return (**rest, name=name.upper())` with no `->` is `(..., name: str)`. That's only
+where nothing says what's expected (a `return` with no `->`, a name with no annotation); inside a call or a
+list, say, it's `Any`. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
 `f((**u, **r))`.
 A field can't be called `keys`: records have a `keys()` method, which is what lets `**` work.
 
@@ -219,6 +222,15 @@ for (x=, y=) in pts: ...               # for-loop targets
 (lr=, **model_args) = cfg              # cfg: (lr: float, n_layer: int, n_head: int)
 Model(**model_args)                    # model_args: (n_layer: int, n_head: int), checked against Model
 for (id=, **data) in rows: ...         # loops and nested patterns too
+```
+
+On an open record it's what `**kwargs` is to a function: the fields you declared come out by name, and the
+ones nobody declared travel along in `rest`, unread:
+
+```python
+def greet(u: (..., name: str, age: int)):     # like def greet(name: str, age: int, **kwargs)
+    (name=, age=, **rest) = u                  # rest: (...), the other fields, whatever they are
+    return (**rest, name=name.upper())         # (..., name: str): passed on, name changed
 ```
 
 - **Last, and once:** it collects what's left, so it comes after the fields it leaves out. Its target is

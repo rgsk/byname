@@ -132,3 +132,17 @@ def test_renaming_a_literals_field_leaves_the_type_it_is_checked_against(client)
     src = "user: (name: str, age: int) = (name='rahul', age=26)\nprint(user.name)\n"
     got = rename(client, "declared.pyn", src, pos(src, "name='"), "named")
     assert got == src.replace("(name='", "(named='")
+
+
+def test_renaming_a_field_of_an_open_spread_record_reaches_where_it_is_written(client):
+    # `(**rest, name=...)` with no type expected is its own open record (transform.open_build)
+    src = "def greet(u: (..., name: str)):\n    (name=, **rest) = u\n    return (**rest, name=name.upper())\n\n\nprint(greet((name='a')).name)\n"
+    got = rename(client, "open.pyn", src, pos(src, ").name", delta=2), "who")
+    assert got.splitlines()[2] == "    return (**rest, who=name.upper())"
+    assert got.splitlines()[-1] == "print(greet((name='a')).who)"
+
+
+def test_renaming_a_field_of_a_spread_record_of_known_names_reaches_where_it_is_written(client):
+    src = "u = (a=1)\nr = (**u, b=2)\nprint(r.b)\n"
+    got = rename(client, "known.pyn", src, pos(src, "r.b", delta=2), "c")
+    assert got == "u = (a=1)\nr = (**u, c=2)\nprint(r.c)\n"

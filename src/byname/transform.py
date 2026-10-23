@@ -115,8 +115,8 @@ TYPED_PRELUDE = (  # checker-facing typing: typed methods, record types as Proto
 # the lambda's parameter gets the type expected where the record stands (`fn(x)`, `fn(a=x)`, `p: T = x`,
 # `return x` under `-> T`, ...), and the dict is checked against that type's `_asdict()` TypedDict. Not a
 # generic `def f[T](d: Dict[T]) -> T`: pyright retries a call that fails with its expected type without it,
-# so the error would vanish; one inside a lambda's body doesn't fail the call. With no type expected (or an
-# overloaded callee) it's unchecked.
+# so the error would vanish; one inside a lambda's body doesn't fail the call. With an overloaded callee it's
+# unchecked; with no type expected at all (untyped_builds) it's an open record instead (open_build).
 RESERVED = {"keys"}  # record methods that make `**rec` work
 HASDICT = (
     "from typing import overload as _ov, Any as _A, Protocol as _PR\n"
@@ -150,6 +150,8 @@ CTX_PRELUDE = (  # checker only: T is the type expected where the record is buil
     "    def __getattr__(self, name: str, /) -> _A: ...\n"
     "_byname_R = _TV('_byname_R', bound=_byname_HasDict[_A] | None, default=_byname_AnyRec)\n"
     "def _byname_arg(f: _Cl[[_byname_R], object], /) -> _byname_R: ...  # pyright: ignore\n"
+    # a spread with no type expected (open_build): its fields aren't known, so it's any mapping
+    "def _byname_loose(x: object, /) -> _Mp[str, object]: ...  # pyright: ignore\n"
 )
 BUILD_PORTABLE = (  # what runs in output files: no typing
     "from collections import namedtuple as _ntf\n"
@@ -426,7 +428,10 @@ def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
 def site_def(fields: tuple[str, ...], is_open: bool, n: int, literal: bool) -> str:
     """Checker only: one record literal's or written record type's own class (site_class): the shared type of
     its fields, with the fields (and `_replace`'s keywords) declared again, so they're its own symbols. For
-    a literal, also its function, as record_def's checker side."""
+    a literal, also its function, as record_def's checker side; an open one (open_build) takes any other
+    keywords too."""
+    if not fields:  # open_build's `(**u)`: a record, fields unknown
+        return f"if _t.TYPE_CHECKING:\n    def {site_class(record_class(fields), n)}(**_: object) -> _opn_: ...\n"
     params = ", ".join(f"T{i}" for i in range(len(fields)))
     typ = site_class(type_class(fields, is_open), n)
     out = f"class {typ}[{params}]({type_class(fields, is_open)}[{params}], _PR):\n"
@@ -434,7 +439,7 @@ def site_def(fields: tuple[str, ...], is_open: bool, n: int, literal: bool) -> s
     if not is_open:
         out += f"    def _replace(self, *{''.join(f', {f}: T{i} = ...' for i, f in enumerate(fields))}) -> _S: ...\n"
     if literal:
-        init = ", ".join(f"{f}: T{i}" for i, f in enumerate(fields))
+        init = ", ".join(f"{f}: T{i}" for i, f in enumerate(fields)) + (", **_: object" if is_open else "")
         head = f"{site_class(record_class(fields), n)}[{params}]"
         out += f"if _t.TYPE_CHECKING:\n    def {head}(*, {init}) -> {typ}[{params}]: ...\n"
     return out
@@ -508,6 +513,67 @@ class _Scope:
 
 COMPOUND = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.TryStar, ast.With, ast.AsyncWith, ast.Match)
 COMPS = (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
+
+
+def untyped_builds(body: str) -> set[tuple[int, int]]:
+    """Checker translation, first pass: the spread records built where no type is expected, as (line, k),
+    the k-th spread record built on that line: the whole value of a `return` in a function with no return
+    annotation (not a generator), or of `x = ...` where `x` has no annotation in its scope. There
+    `_byname_ctx` has nothing to solve its type from, so the record would be Unknown; open_build types it
+    instead."""
+    tree = parse_around_errors(body)
+    if tree is None:
+        return set()
+    ctx = ("_byname_ctx", "_byname_arg")
+    calls = sorted(
+        (n.lineno, n.col_offset, n)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ctx
+    )
+    index: dict[int, tuple[int, int]] = {}
+    per_line: dict[int, int] = {}
+    for line, _, n in calls:
+        index[id(n)] = (line, per_line.get(line, 0))
+        per_line[line] = per_line.get(line, 0) + 1
+    out: set[tuple[int, int]] = set()
+
+    def own_nodes(scope: ast.AST):
+        """The scope's own nodes, not those of the functions, classes, lambdas and comprehensions in it."""
+        stack = list(ast.iter_child_nodes(scope))
+        while stack:
+            n = stack.pop()
+            yield n
+            if not isinstance(
+                n,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda, ast.ListComp, ast.SetComp)
+                + (ast.DictComp, ast.GeneratorExp),
+            ):
+                stack.extend(ast.iter_child_nodes(n))
+
+    def visit(scope: ast.AST) -> None:
+        nodes = list(own_nodes(scope))
+        declared = {t.target.id for t in nodes if isinstance(t, ast.AnnAssign) and isinstance(t.target, ast.Name)}
+        declared |= {x for t in nodes if isinstance(t, (ast.Global, ast.Nonlocal)) for x in t.names}
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            a = scope.args
+            declared |= {x.arg for x in [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg] if x}
+            generator = any(isinstance(t, (ast.Yield, ast.YieldFrom)) for t in nodes)
+            if scope.returns is None and not generator:
+                out.update(index[id(t.value)] for t in nodes if isinstance(t, ast.Return) and id(t.value) in index)
+        for t in nodes:
+            if (
+                isinstance(t, ast.Assign)
+                and len(t.targets) == 1
+                and isinstance(t.targets[0], ast.Name)
+                and t.targets[0].id not in declared
+                and id(t.value) in index
+            ):
+                out.add(index[id(t.value)])
+            if isinstance(t, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                visit(t)
+
+    visit(tree)
+    return out
 
 
 def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False) -> dict[tuple[str, int], Known]:
@@ -774,11 +840,13 @@ def transform(
     checker: bool = False,
     known: dict[tuple[str, int], Known] | None = None,
     lookup: Lookup | None = None,
+    untyped: set[tuple[int, int]] | None = None,
 ) -> Result:
     """tolerant (editor only): a half-typed pattern item like `na` in `(name=, na) = r` becomes
     `_ds.na` instead of an error, so the checker can complete field names there.
     checker: the translation only type checkers see; works around their bugs (see KW_PRELUDE). Never run.
     known: fields of names read in the file, by (name, line) (known_fields); set by the checker translation's second pass.
+    untyped: spread records built where no type is expected (untyped_builds); set by that second pass too.
     lookup: fields of record types imported from other modules (imports.Modules), for known_fields."""
     toks = [
         t for t in tokenize.generate_tokens(io.StringIO(src).readline) if t.type not in (tokenize.COMMENT, tokenize.NL)
@@ -961,18 +1029,60 @@ def transform(
                 # the field name as generated text, like the generic path: the checker would colour a
                 # keyword argument over the record-field colour (field_spans)
                 f = toks[it[0]].string
-                edits.append(Edit(off(toks[it[0]].start), off(toks[it[1]].end), f"{f}=", span(it[0])))
+                edits.append(Edit(off(toks[it[0]].start), off(toks[it[0]].end), f, span(it[0])))
                 field_spans.append(span(it[0]))
         expand_shorthand(its)
         standins.append((g0, g0, PAT))
         return True
 
+    def open_build(i: int, close: int, its: list[list[int]]) -> None:
+        """Checker only: a spread record where no type is expected (untyped_builds) is an open record of the
+        fields written after its last spread, `(**rest, name=x)` -> `_rec_name___3(**_byname_loose(rest),
+        name=x)`, typed `(..., name: str)`: the spreads' fields aren't known, and they may hold any field
+        written before them. Its own site (site_class), so `out.name` renames `name=` here."""
+        names = []
+        for it in its:  # the generic path's checks (build)
+            first = toks[it[0]]
+            if is_kw(it):
+                if first.string.startswith("_") or first.string in RESERVED:
+                    raise err(field_error(first.string), first)
+                names.append(first.string)
+            elif not (len(it) >= 2 and first.string == "**"):
+                raise err("a record built from spreads takes `**record` and `name=value` items", first)
+        if len(set(names)) != len(names):
+            raise err(f"duplicate record field in {tuple(names)}", toks[i])
+        last = max(k for k, it in enumerate(its) if toks[it[0]].string == "**")
+        fields = tuple(toks[it[0]].string for it in its[last + 1 :])
+        types[(fields, True)] = None
+        sites.append((fields, True, True))
+        g0 = span(i)[0]
+        edits.append(Edit(g0, g0, site_class(record_class(fields), len(sites) - 1), (g0, g0 + 1)))
+        for it in its:
+            if toks[it[0]].string == "**":
+                a, b = off(toks[it[1]].start), off(toks[it[-1]].end)
+                edits.append(Edit(a, a, "_byname_loose(", span(it[1], it[-1])))
+                edits.append(Edit(b, b, ")", span(it[1], it[-1])))
+            else:  # the field name as generated text, as in known_build
+                f = toks[it[0]].string
+                edits.append(Edit(off(toks[it[0]].start), off(toks[it[0]].end), f, span(it[0])))
+                field_spans.append(span(it[0]))
+        expand_shorthand(its)
+        standins.append((g0, g0, PAT))
+
+    built_on: dict[int, int] = {}  # spread records built so far per line, for untyped_builds' (line, k)
+
     def build(i: int, close: int, its: list[list[int]]) -> None:
         """A record built from spreads and fields, `(**u, age=27)`, as `_byname_rec({**u, 'age': 27})`."""
         nonlocal builds, kw_used
+        line = toks[i].start[0]
+        at = (line, built_on.get(line, 0))
+        built_on[line] = at[1] + 1
         if checker and known and known_build(i, close, its):
             return
         builds = True
+        if checker and not portable and untyped and at in untyped:
+            open_build(i, close, its)
+            return
         names = []
         # checker, no type written: `**name` spreads are read through a lambda default (see below)
         hoist = [it for it in its if toks[it[0]].string == "**" and len(it) == 2 and is_name(toks[it[1]])]
@@ -1566,8 +1676,10 @@ def transform(
     for e in reversed(edits):
         body = body[: e.start] + e.text + body[e.end :]
     # checker: spread records of names whose fields the file shows get their exact type (known_build)
-    if checker and known is None and builds and (k := known_fields(body, lookup)):
-        return transform(src, path, tolerant, portable, checker, known=k, lookup=lookup)
+    if checker and known is None and builds:
+        k, u = known_fields(body, lookup), untyped_builds(body)
+        if k or u:
+            return transform(src, path, tolerant, portable, checker, known=k, lookup=lookup, untyped=u)
 
     def base_prelude() -> str:
         # the checker's translation never runs, so it doesn't read the project's config

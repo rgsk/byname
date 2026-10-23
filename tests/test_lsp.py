@@ -1700,3 +1700,12 @@ def test_records_of_one_shape_from_two_literals_show_as_one_type(lsp):
     c.wait_diags(uri)
     assert "xs: list[(a: int)]" in hover_text(c, uri, pos(text, "xs"))
     assert "x: (a: int)" in hover_text(c, uri, pos(text, "x ="))
+
+
+def test_an_open_spread_record_shows_its_fields_and_colours_them(lsp):
+    c, root, _ = lsp
+    text = "def greet(u: (..., name: str)):\n    (name=, **rest) = u\n    return (**rest, name=name.upper())\n\n\nout = greet((name='a'))\n"
+    uri = c.open(root / "open_spread.pyn", text)
+    c.wait_diags(uri)
+    assert "out: (..., name: str)" in hover_text(c, uri, pos(text, "out"))
+    assert "rest: (...)" in hover_text(c, uri, pos(text, "rest)"))
