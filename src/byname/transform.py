@@ -37,6 +37,7 @@ REPR = "_byname_repr"
 ORDER = "_byname_order"  # a record class's fields in the order written; `_fields` is the sorted storage order
 PRELUDE = (
     "from typing import NamedTuple as _NT\n"
+    "from collections import namedtuple as _ntf\n"
     "import sys as _byname_sys\n"
     f"def {REPR}(self) -> str: return '(' + ', '.join(f'{{k}}={{getattr(self, k)!r}}' for k in self.{ORDER}) + ')'\n"
     # records are mappings by field name at runtime, so `f(**rec)` and `{**rec}` work (see RESERVED)
@@ -93,6 +94,21 @@ PRELUDE = (
     # what error messages and type(r).__name__ say; __qualname__ stays the module global's name, which
     # pickle finds the class by
     "    c.__name__ = 'record(' + ', '.join(order) + ')'\n"
+    "    c.__reduce__ = _byname_reduce\n"
+    "    _byname_cls.setdefault(order, c)\n"
+    # one class per field tuple, in written order: the literals' classes (registered by _byname_setup), and
+    # those of records built from a dict (spreads, rest, unpickling) made here on first use
+    "_byname_cls = {}\n"
+    "def _byname_rec(d):\n"
+    "    k = tuple(d)\n"
+    "    c = _byname_cls.get(k)\n"
+    "    if c is None:\n"
+    "        c = _ntf('_rec_' + '__'.join(k), sorted(k))\n"
+    "        _byname_setup(c, k)\n"
+    "    return c(**d)\n"
+    # pickled by field, not by class: a spread's class isn't a module global for pickle to find. Unpickling
+    # rebuilds it with this module's _byname_rec, the same class as before
+    "def _byname_reduce(self): return _byname_rec, (_byname_asdict(self),)\n"
 )
 
 
@@ -133,7 +149,6 @@ KW_PRELUDE = (  # checker only
 )
 BUILD_PRELUDE = (
     "from collections.abc import Callable as _Cl, Mapping as _Mp\n"
-    "from collections import namedtuple as _ntf\n"
     "@_ov\ndef _byname_check[D](t: _Cl[[], _byname_HasDict[D]], /) -> _Cl[[D], D]: ...  # pyright: ignore\n"
     "@_ov\ndef _byname_check(t: _Cl[[], object], /) -> _Cl[[_A], _A]: ...  # pyright: ignore\n"
     "def _byname_check(t: _A, /) -> _A: return _byname_same  # pyright: ignore\n"
@@ -156,19 +171,8 @@ CTX_PRELUDE = (  # checker only: T is the type expected where the record is buil
     # a spread with no type expected (open_build): its fields aren't known, so it's any mapping
     "def _byname_loose(x: object, /) -> _Mp[str, object]: ...  # pyright: ignore\n"
 )
-BUILD_PORTABLE = (  # what runs in output files: no typing
-    "from collections import namedtuple as _ntf\n"
-)
-BUILD_REC = (  # build a record from a dict: one class per field tuple, made on first use
-    "_byname_cls = {}\n"
-    "{sig}\n"
-    "    k = tuple(d)\n"
-    "    c = _byname_cls.get(k)\n"
-    "    if c is None:\n"
-    "        c = _byname_cls[k] = _ntf('_rec_' + '__'.join(k), sorted(k))\n"
-    "        _byname_setup(c, k)\n"
-    "    return c(**d)\n"
-)
+# checker only: _byname_rec (PRELUDE), typed
+BUILD_REC_TYPED = "def _byname_rec(d: _Mp[str, _A], /) -> _A: ...  # pyright: ignore\n"
 OMIT_REC = (  # `(name=, **rest) = r`: a record of r's fields but those named, in r's written order
     "{sig}\n"
     f"    if not hasattr(type(r), {ORDER!r}):\n"
@@ -1744,10 +1748,8 @@ def transform(
         if not portable:
             prelude += HASDICT + (KW_PRELUDE if kw_used else "")
         rec = builds or (omit_used and not checker)  # the checker types a rest with omit_defs instead
-        if rec and portable:
-            prelude += BUILD_PORTABLE + BUILD_REC.replace("{sig}", "def _byname_rec(d):")
-        elif rec:
-            prelude += BUILD_PRELUDE + BUILD_REC.replace("{sig}", "def _byname_rec(d: _Mp[str, _A], /) -> _A:")
+        if rec and not portable:
+            prelude += BUILD_PRELUDE + (BUILD_REC_TYPED if checker else "")
             prelude += CTX_PRELUDE if checker and builds else ""
         if omit_used and not checker:
             sig = (

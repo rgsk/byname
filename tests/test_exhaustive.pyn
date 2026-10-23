@@ -233,8 +233,42 @@ def test_mappings_and_json_go_through_the_field_names():
 def test_pickle_and_copy_keep_a_record():
     r = (name="rahul", age=26)
     assert pickle.loads(pickle.dumps(r)) == copy.copy(r) == copy.deepcopy(r) == r
-    assert type(pickle.loads(pickle.dumps(r))) is type(r)  # found by __qualname__, the module's own name
     assert repr(copy.deepcopy(r)) == "(name='rahul', age=26)"
+    # pickled by field, rebuilt as the same class: a literal in either order, a spread, a rest, record()
+    (name=, **rest) = (name="rahul", age=26, city="Pune")
+    for x in [r, (age=26, name="rahul"), (**r, city="Pune"), rest, record(Person, {"name": "gil", "age": 3})]:
+        y = pickle.loads(pickle.dumps(x))
+        assert y == x and type(y) is type(x) and repr(y) == repr(x)
+
+
+def test_a_record_unpickles_in_another_process(tmp_path):
+    # what DataLoader workers, multiprocessing and torch.load do: the module is imported afresh there
+    (tmp_path / "a.pyn").write_text("def make(): return (name='rahul', age=26)\nr = make()\nu = (**r, city='Pune')\n")
+    (tmp_path / "b.pyn").write_text("r = (name='rahul', age=26)\n")
+    (tmp_path / "dump.pyn").write_text(
+        dedent("""\
+        import pickle, sys
+        import a, b
+        out = [a.r, a.u, b.r]
+        del type(a.r).__reduce__  # pickled by class name, as before records pickled by field
+        out.append(a.r)
+        sys.stdout.buffer.write(pickle.dumps(out))
+        """)
+    )
+    (tmp_path / "load.pyn").write_text(
+        dedent("""\
+        import pickle, sys
+        import a, b
+        ar, au, br, old = pickle.loads(sys.stdin.buffer.read())
+        assert type(ar) is type(a.r) and type(au) is type(a.u) and type(br) is type(b.r)
+        assert ar == br == old == a.r and au == a.u and type(old) is type(a.r)
+        print(au)
+        """)
+    )
+    run = [sys.executable, "-m", "byname", "run"]
+    dumped = subprocess.run([*run, "dump.pyn"], cwd=tmp_path, capture_output=True, check=True).stdout
+    loaded = subprocess.run([*run, "load.pyn"], cwd=tmp_path, input=dumped, capture_output=True, check=False)
+    assert loaded.stdout.decode() == "(name='rahul', age=26, city='Pune')\n", loaded.stderr.decode()
 
 
 def test_each_field_list_gets_one_class():

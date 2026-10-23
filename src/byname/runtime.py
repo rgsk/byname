@@ -44,6 +44,9 @@ def _build(fields: tuple[str, ...], values: dict[str, object], callers: tuple[st
             exec(prelude_for(callers), ns)  # noqa: S102 -- byname's own prelude, not user input
         c = _classes[callers, fields] = namedtuple("_rec_" + "__".join(fields), sorted(fields))
         ns["_byname_setup"](c, fields)
+        # by field, as in a .pyn (PRELUDE's _byname_reduce), but through _build: the prelude's functions
+        # were exec'd with no module, so pickle can't find them
+        c.__reduce__ = lambda self: (_build, (fields, self._asdict(), callers))
     return c(**values)
 
 
