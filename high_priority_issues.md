@@ -33,3 +33,21 @@ hint on the rest goes; a field read off it says where it came from.
 
 Stays: `untyped_builds` (where no type is expected is a question about the text), the `SPREAD` marker and its
 messages, the probe machinery.
+
+## A grid row isn't held to the line length
+
+A grid's first row sets its packing width (`ungrid`), whatever the line length: a single-row grid (kept on
+purpose: arguments on the line after a long name, all on one line, which Ruff can't write) or a grid's first
+row stays as written when it's too long. Measured 2026-10-24, line-length 88:
+
+```python
+fn_def_big_name(
+    argument_number_0, argument_number_1, argument_number_2, argument_number_3, argument_number_4, argument_number_5,
+)
+```
+
+is left at 118 characters. Fix: cap the packing width at the line length minus the indent, so a row that fits
+packs as today and a too-long one wraps into as many rows as it needs. The line length is Ruff's
+`formatter.line_width`: `ruff check --show-settings <file>` prints it (about 10 ms), but printed nothing for a
+path that doesn't exist, and the CLI and editor pass a mirror path, so check that first, or read it some other way.
+Also state in README's grid bullet and DEVELOPMENT.md that a single row is a grid on purpose.
