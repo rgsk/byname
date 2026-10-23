@@ -103,12 +103,32 @@ def test_renaming_a_record_field_from_the_literal_reaches_its_reads(client):
     assert got == "r = (who='rahul')\nprint(r.who)\n(who=n) = r\ns = r._replace(who='x')\n"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a written record type's field name maps to no symbol: `(name: str)` is `_typ_name[str]` to the "
-    "checker, so it stays; the call passing `(who=...)` is then an error, not silent",
-)
-def test_renaming_a_field_of_a_record_type_reaches_the_records_passed(client):
+def test_renaming_a_field_of_a_record_type_renames_the_type_written(client):
+    # the record passed was built on its own, `(name=...)`: it doesn't follow, the checker flags it instead
     src = "def show(q: (name: str)) -> str:\n    return q.name\n\n\nshow((name='rahul'))\n"
     got = rename(client, "typed.pyn", src, pos(src, "q.name", delta=2), "who")
-    assert got == "def show(q: (who: str)) -> str:\n    return q.who\n\n\nshow((who='rahul'))\n"
+    assert got == "def show(q: (who: str)) -> str:\n    return q.who\n\n\nshow((name='rahul'))\n"
+
+
+def test_a_record_of_the_same_shape_elsewhere_is_left_alone(client):
+    # make's record and show's type both have a `label`; renaming make's leaves show's
+    src = (
+        "def make():\n    return (label='x')\n\n\n"
+        "def show(q: (label: str)) -> str:\n    return q.label\n\n\n"
+        "r = make()\nprint(r.label)\n"
+    )
+    got = rename(client, "shape.pyn", src, pos(src, "r.label", delta=2), "who")
+    assert got == src.replace("(label='x')", "(who='x')").replace("r.label", "r.who")
+
+
+def test_a_record_typed_by_a_written_type_renames_the_type_not_the_literal(client):
+    # the annotation is the promise: it changes, and the literal that no longer keeps it is the checker's to flag
+    src = "def make() -> (label: str):\n    return (label='x')\n\n\nr = make()\nprint(r.label)\n"
+    got = rename(client, "annotated.pyn", src, pos(src, "r.label", delta=2), "who")
+    assert got == "def make() -> (who: str):\n    return (label='x')\n\n\nr = make()\nprint(r.who)\n"
+
+
+def test_renaming_a_literals_field_leaves_the_type_it_is_checked_against(client):
+    src = "user: (name: str, age: int) = (name='rahul', age=26)\nprint(user.name)\n"
+    got = rename(client, "declared.pyn", src, pos(src, "name='"), "named")
+    assert got == src.replace("(name='", "(named='")

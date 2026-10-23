@@ -70,8 +70,9 @@ def test_order_never_matters_because_every_argument_is_named():
 def test_renaming_one_half_of_a_shorthand_splits_it():
     # `name=` is two symbols, the parameter and the local. The editor's rename changes only the one asked
     # for: renaming the parameter to `who` writes `who=name`, the local to `who` writes `name=who`. A plain
-    # `who=` would pass whatever local is called `who`. A record field renames as one name: from `r.name`,
-    # `(name=)` or `(name=n) = r`, all of them change, and a shorthand literal keeps its local: `(who=name)`.
+    # `who=` would pass whatever local is called `who`. A record field renames with the record it came from:
+    # from `r.name`, the literal `r` was built from changes too (a shorthand keeps its local: `(who=name)`),
+    # or the type `r` was declared with, `(who: str)`; another record that only has a `name` doesn't.
     def hello(*, who: str) -> str:
         return f"hello {who}"
 

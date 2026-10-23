@@ -1689,3 +1689,14 @@ def test_organize_imports_on_save_agrees_with_byname_tool_ruff(tmp_path):
     ).stdout
     assert "All checks passed" in out, out
     c.close()
+
+
+def test_records_of_one_shape_from_two_literals_show_as_one_type(lsp):
+    # each literal has its own class for the checker (transform.site_class), so a list of two is a union of
+    # two classes of one shape: shown once, like the type it is
+    c, root, _ = lsp
+    text = "xs = [(a=1), (a=2)]\nx = (a=1) if xs else (a=3)\n"
+    uri = c.open(root / "shapes.pyn", text)
+    c.wait_diags(uri)
+    assert "xs: list[(a: int)]" in hover_text(c, uri, pos(text, "xs"))
+    assert "x: (a: int)" in hover_text(c, uri, pos(text, "x ="))

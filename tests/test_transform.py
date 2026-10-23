@@ -1,4 +1,5 @@
 import ast
+import re
 import subprocess
 import sys
 import sysconfig
@@ -642,7 +643,7 @@ def test_spread_records_of_known_names_are_plain_records():
     # for the checker, a spread of names bound once to a record (or annotated with a record type) is built
     # field by field, so it has its exact type with no annotation; a later field wins and keeps the first
     # one's position, as at runtime. What runs doesn't change
-    body = transform(SPREADS, checker=True).body
+    body = re.sub(r"___\d+", "", transform(SPREADS, checker=True).body)  # each literal's own class: site_class
     assert "both = _rec_age__name__sex__surname(age=u.age, name=r.name, sex=r.sex, surname=r.surname)" in body
     assert "override, first = _rec_age__name(name=u.name, age=27), _byname_ctx(" in body  # `(age=27, **u)`: generic
     assert "p: Person = _rec_age__name__sex__surname(age=u.age" in body
@@ -668,7 +669,7 @@ def test_spread_records_of_known_names_are_plain_records():
         "k = [(**t,) for t in [w]]\n"  # the comprehension's `t`: unknown
         "m = [(**t,) for _ in [w]]\n"  # the module's `t`, read there and then
     )
-    lines = transform(src, checker=True).body.splitlines()
+    lines = re.sub(r"___\d+", "", transform(src, checker=True).body).splitlines()
     assert lines[2] == "    x = _rec_a__b__z(a=c.a, b=c.b, z=1)"
     assert "_byname_ctx(" in lines[3]
     assert lines[6] == "again = _rec_a__b(a=n.a, b='y')"
@@ -684,7 +685,7 @@ def test_a_spread_of_a_call_whose_function_shows_its_fields_is_a_plain_record():
     # the call written once, its value kept for the other fields; checker only: what runs is _byname_rec
     src = "def make():\n    return (name='a', age=1)\nx = (**make(), zip=1)\ny = (**make(), **make())\n"
     body = transform(src, checker=True).body.splitlines()
-    assert body[2] == "x = _rec_name__age__zip(name=(_byname_v0 := make()).name, age=_byname_v0.age, zip=1)"
+    assert body[2] == "x = _rec_name__age__zip___1(name=(_byname_v0 := make()).name, age=_byname_v0.age, zip=1)"
     assert body[3].startswith("y = _byname_ctx(")  # the second overrides every field of the first: generic path
     assert transform(src).body.splitlines()[2] == "x = _byname_rec({**make(), 'zip': 1})"
 

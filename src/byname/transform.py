@@ -241,6 +241,9 @@ class Result:
     # source spans of every bare `x=` (calls, records, patterns, loops): `x` is also the local, so it's
     # coloured as that local (lsp.remap_tokens)
     shorthands: list[tuple[int, int]] = field(default_factory=list)
+    # checker: (class, field, start, end) for each field name written in a record type, `name` in
+    # `(name: str)`: its own class's field, so renaming that field reaches the text (see site_class)
+    type_fields: list[tuple[str, str, int, int]] = field(default_factory=list)
 
 
 def field_error(name: str) -> str:
@@ -268,6 +271,20 @@ def key_alias(fields: tuple[str, ...]) -> str:
     """The key type of `rec["name"]`: str, aliased per field set so that the checker's complaint about
     `rec[0]` names the record's fields (see POSITIONAL_RE in lsp.py)."""
     return "_key_" + "__".join(fields)
+
+
+def site_class(name: str, n: int) -> str:
+    """Checker only: the class of one record literal or written record type, the n-th in the file,
+    `_typ_name___3`. Records match by shape, so sites with the same fields are still the same type; but each
+    has its own fields, so a rename reaches only the records that came from that site: renaming `r.name`
+    renames the literal `r` was made from, not another record that happens to have a `name` field."""
+    return f"{name}___{n}"
+
+
+def class_fields(suffix: str) -> tuple[str, ...]:
+    """The fields in a generated class name after its prefix: `name__age___3` -> (name, age). A field
+    can't start with `_` (field_error), so the site number can't be one."""
+    return tuple(f for f in suffix.split("__") if f and not f.startswith("_"))
 
 
 def tuple_class(labels: tuple[str, ...]) -> str:
@@ -404,6 +421,23 @@ def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
         return "".join("    " + line + "\n" for line in text.splitlines())
 
     return "if _t.TYPE_CHECKING:\n" + indent(checker) + "else:\n" + indent(out)
+
+
+def site_def(fields: tuple[str, ...], is_open: bool, n: int, literal: bool) -> str:
+    """Checker only: one record literal's or written record type's own class (site_class): the shared type of
+    its fields, with the fields (and `_replace`'s keywords) declared again, so they're its own symbols. For
+    a literal, also its function, as record_def's checker side."""
+    params = ", ".join(f"T{i}" for i in range(len(fields)))
+    typ = site_class(type_class(fields, is_open), n)
+    out = f"class {typ}[{params}]({type_class(fields, is_open)}[{params}], _PR):\n"
+    out += "".join(f"    {f}: _Fi[T{i}]  # pyright: ignore\n" for i, f in enumerate(fields))
+    if not is_open:
+        out += f"    def _replace(self, *{''.join(f', {f}: T{i} = ...' for i, f in enumerate(fields))}) -> _S: ...\n"
+    if literal:
+        init = ", ".join(f"{f}: T{i}" for i, f in enumerate(fields))
+        head = f"{site_class(record_class(fields), n)}[{params}]"
+        out += f"if _t.TYPE_CHECKING:\n    def {head}(*, {init}) -> {typ}[{params}]: ...\n"
+    return out
 
 
 def parse_around_errors(body: str, tries: int = 10) -> ast.Module | None:
@@ -715,7 +749,7 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
 
     def of_type(t: ast.expr, scope: _Scope, at: int) -> Known | None:
         if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id.startswith("_typ_"):
-            return Known(tuple(t.value.id.removeprefix("_typ_").split("__")))  # exact types only, not `_opn_`
+            return Known(class_fields(t.value.id.removeprefix("_typ_")))  # exact types only, not `_opn_`
         if isinstance(t, ast.Name):
             got = resolve(t.id, scope, at)
             return got if got is None or not (got.is_dict or got.returns) else None  # a dict isn't a type
@@ -811,6 +845,15 @@ def transform(
     standins: list[tuple[int, int, str]] = []
     field_spans: list[tuple[int, int]] = []  # every record field name: in records, patterns and record types
     shorthand_spans: list[tuple[int, int]] = []  # every bare `x=`, see Result.shorthands
+    sites: list[tuple[tuple[str, ...], bool, bool]] = []  # checker: (fields, is_open, is_literal), see site_class
+    type_fields: list[tuple[str, str, int, int]] = []  # see Result.type_fields
+
+    def literal_class(fields: tuple[str, ...]) -> str:
+        if not checker or portable:
+            return record_class(fields)
+        sites.append((fields, False, True))
+        return site_class(record_class(fields), len(sites) - 1)
+
     label_spans: list[tuple[int, int]] = []  # `x` in `return (x := ..., ...)`: bound to name a position, never read
 
     def span(a: int, b: int | None = None) -> tuple[int, int]:
@@ -898,7 +941,7 @@ def transform(
         fields = tuple(order)
         records[fields] = None
         g0 = span(i)[0]
-        edits.append(Edit(g0, g0, record_class(fields), (g0, g0 + 1)))
+        edits.append(Edit(g0, g0, literal_class(fields), (g0, g0 + 1)))
         for it in its:
             if toks[it[0]].string == "**":
                 # `**u` -> `name=u.name, age=u.age`: the user's `u` stays real text (hover, colour, rename).
@@ -1308,7 +1351,12 @@ def transform(
             if not fields:  # `(...)`: a record with any fields, a class with no type parameters
                 edits.append(Edit(*group, type_class(fields, is_open), group))
                 continue
-            edits.append(Edit(group[0], group[0] + 1, type_class(fields, is_open) + "[", group))
+            name = type_class(fields, is_open)
+            if checker and not portable:
+                sites.append((fields, is_open, False))
+                name = site_class(name, len(sites) - 1)
+                type_fields.extend((name, toks[it[0]].string, *span(it[0])) for it in named)
+            edits.append(Edit(group[0], group[0] + 1, name + "[", group))
             edits.append(Edit(group[1] - 1, group[1], "]", group))
             for it in named:
                 edits.append(Edit(off(toks[it[0]].start), off(toks[it[2]].start), "", span(it[0])))
@@ -1436,7 +1484,7 @@ def transform(
         records[fields] = None
         field_spans.extend(span(it[0]) for it in its)
         at = off(t.start)
-        edits.append(Edit(at, at, record_class(fields), (at, at + 1)))
+        edits.append(Edit(at, at, literal_class(fields), (at, at + 1)))
         standins.append((at, at, PAT))
         expand_shorthand(its)
 
@@ -1549,6 +1597,8 @@ def transform(
             prelude += "".join(f"type {key_alias(f)} = str\n" for f in dict.fromkeys(f for f, _ in types))
         prelude += "".join(type_def(f, o, portable) for f, o in types)
         prelude += "".join(record_def(f, portable) for f in records)
+        for n, (f, is_open, literal) in enumerate(sites):
+            prelude += site_def(f, is_open, n, literal)
     if builds or kw_used or omit_used:
         if not prelude:
             prelude = base_prelude()
@@ -1585,6 +1635,7 @@ def transform(
         shapes,
         imports(),
         sorted(shorthand_spans),
+        type_fields,
     )
 
 

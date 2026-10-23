@@ -400,11 +400,23 @@ def parameter_type(help: dict | None) -> str | None:
     return pretty(written.split(" = ", 1)[0].strip()) if colon else None
 
 
+SITE_RE = re.compile(r"(_(?:rec|typ|opn)_\w*?)___\d+\b")
+# a record type repeated in a union, once site numbers are gone: `(a: int) | (a: int)`
+REPEAT_RE = re.compile(r"(_(?:rec|typ|opn)_\w+(?:\[(?:[^\[\]]|\[[^\[\]]*\])*\])?)(?: \| \1(?![\w\[]))+")
+
+
+def unsite(text: str) -> str:
+    """Checker text with each record literal's and record type's own class (transform.site_class) back to
+    its fields' class, `_typ_name___3` -> `_typ_name`, and a union of records of one shape back to one."""
+    return REPEAT_RE.sub(r"\1", SITE_RE.sub(r"\1", text))
+
+
 def pretty(text: str) -> str:
     """Display form of record types: _rec_name__age[str, int] -> (name: str, age: int), and of the
     TypedDict a record's `_asdict()` returns: _dct_name__age[str, int] -> {name: str, age: int}, and of
     explicit record types: _typ_... -> (name: str, age: int), _opn_... -> (..., name: str, age: int), _opn_ -> (...),
     and of a spread record whose fields aren't known: _byname_AnyRec -> (...)."""
+    text = unsite(text)
     out, i = [], 0
     while m := REC_RE.search(text, i):
         out.append(text[i : m.start()])
@@ -490,7 +502,7 @@ def function_type(src: str, k: int, close: int, path) -> tuple[str, bool] | None
 
 def positional_fields(msg: str) -> list[str] | None:
     """The fields, in the order written, of a record the checker refused to read by position."""
-    m = POSITIONAL_RE.search(msg)
+    m = POSITIONAL_RE.search(unsite(msg))
     return (m[1] or m[2]).split("__") if m else None
 
 
@@ -533,6 +545,7 @@ def explain_fields(msg: str) -> str:
     """An exact record type rejected a record whose field set differs. pyright's message is a page about
     FIELDSET, a generated property; keep the first line and say which fields are extra or missing.
     Likewise a record built from spreads, checked as a dict against the type's TypedDict (`_dct_`)."""
+    msg = unsite(msg)
     if "_dct_" in msg and (DICT_MISSING_RE.search(msg) or DICT_EXTRA_RE.search(msg)):
         lines = msg.split("\n")
         indent = lines[1][: len(lines[1]) - len(lines[1].lstrip())] if len(lines) > 1 else "  "
@@ -619,14 +632,15 @@ def is_generated_name(name) -> bool:
     )
 
 
-FIELDS_CLASS_RE = re.compile(r"class _(typ|dct)_(\w+?)\[")
+FIELDS_CLASS_RE = re.compile(r"class _(typ)_(\w+?)\[")
 STUB_RE = re.compile(r"    def _rec_(\w+?)\[")
 
 
 def field_declarations(hidden: str, pos: dict) -> list[dict]:
     """A record field is several symbols to the checker: the attribute of its `_typ_` Protocol (reads,
-    patterns, record types), the keyword of its `_rec_` stub (literals), `_replace`'s keyword and the
-    `_dct_` key (`_asdict()`). If `pos` (hidden) is on one of those declarations, where all of them are."""
+    patterns, record types), the keyword of its `_rec_` stub (literals) and `_replace`'s keyword. If `pos`
+    (hidden) is on one of those declarations, where all of them are. Not the `_dct_` key of `_asdict()`:
+    one TypedDict serves every record of that shape in the file (transform.site_class)."""
     decls: dict[tuple[str, str], list[dict]] = {}  # (field set, field) -> its declarations
     cls = None
     for i, text in enumerate(hidden.split("\n")):
@@ -654,6 +668,22 @@ def field_declarations(hidden: str, pos: dict) -> list[dict]:
         ),
         [],
     )
+
+
+TYPE_CLASS_RE = re.compile(r"class (_(?:typ|opn)_\w+?)\[")
+
+
+def type_field_at(hidden: str, pos: dict) -> tuple[str, str] | None:
+    """(class, field) if `pos` (hidden) is on a field declared in a record type's Protocol."""
+    lines = hidden.split("\n")
+    if pos["line"] >= len(lines) or not (m := re.match(r"    (\w+): _Fi\[", lines[pos["line"]])):
+        return None
+    for k in range(pos["line"] - 1, -1, -1):
+        if c := TYPE_CLASS_RE.match(lines[k]):
+            return c[1], m[1]
+        if not lines[k].startswith("    "):
+            return None
+    return None
 
 
 def workspace_edits(edit) -> list[tuple[str, dict]]:
@@ -1446,7 +1476,9 @@ class Proxy:
         """A rename that reaches a record field's declaration (field_declarations) renames its other
         declarations too, so a read and the literal it reads go together: `r.name` and `(name=)` are two
         symbols to the checker. Each other declaration is a rename request of its own, answered in
-        finish_rename. False: none to rename, the answer goes as it is."""
+        finish_rename. False: not a WorkspaceEdit, the answer goes as it is."""
+        if not isinstance(msg["result"], dict):
+            return False
         new = self.rename_to.pop(msg["id"], None)
         have = {
             (u, e["range"]["start"]["line"], e["range"]["start"]["character"])
@@ -1461,7 +1493,8 @@ class Proxy:
                     have.add((u, p["line"], p["character"]))
                     asks.append({"textDocument": {"uri": u}, "position": p, "newName": new})
         if not asks:
-            return False
+            self.finish_rename(msg, doc, [])
+            return True
         state = {"msg": msg, "doc": doc, "more": [], "left": len(asks)}
         for k, params in enumerate(asks):
             sid = f"byname-rename-{msg['id']}-{k}"
@@ -1478,7 +1511,23 @@ class Proxy:
                 if (u, json.dumps(e["range"], sort_keys=True)) not in seen:
                     seen.add((u, json.dumps(e["range"], sort_keys=True)))
                     add_workspace_edit(edit, u, e)
+        # a written record type's field is only its class's to the checker: the name written is edited here
+        written = []
+        for u, e in workspace_edits(edit):
+            if (target := self.doc_for(u)) is not None and (at := type_field_at(target.tr.hidden, e["range"]["start"])):
+                lines = target.tr.src_lines
+                written += [
+                    (
+                        target.uri,
+                        {"range": {"start": lines.position(a), "end": lines.position(b)}, "newText": e["newText"]},
+                    )
+                    for name, f, a, b in target.tr.type_fields
+                    if (name, f) == at
+                ]
         result = self.to_editor(edit, doc)
+        if result is not DROP:
+            for u, e in written:
+                add_workspace_edit(result, u, e)
         self.client.send({**msg, "result": None if result is DROP else result})
 
     def complete_plainly(self, msg: dict, doc: Doc) -> None:

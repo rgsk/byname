@@ -117,12 +117,14 @@ class Translation:
         self.problems: list[dict] = []  # byname diagnostics from tolerant translation
         self.fields: list[tuple[int, int]] = []  # source spans of record field names
         self.shorthands: list[tuple[int, int]] = []  # every bare `x=` (see Result.shorthands)
+        self.type_fields: list[tuple[str, str, int, int]] = []  # see Result.type_fields
         self.labels: set[int] = set()  # where a walrus labelling a returned tuple starts (see Result.labels)
         try:
             r = transform(source, tolerant=True, checker=True, lookup=lookup)
             body, prelude, edits = r.body, r.prelude, r.edits
             self.fields = r.fields
             self.shorthands = r.shorthands
+            self.type_fields = r.type_fields
             self.labels = {s for s, _ in r.labels}
         except Exception as e:  # mid-edit code: send it raw; the checker reports the syntax error
             self.error = e
