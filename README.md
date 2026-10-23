@@ -176,7 +176,9 @@ where nothing says what's expected (a `return` with no `->`, a name with no anno
 list, say, it's `Any`. A field read off it that came with the spread says so, rather than to declare it:
 `"name" isn't on (..., zip: int): it's built from a spread of u, whose fields byname can't see. To check it,
 give u a record type; or read it unchecked with ["name"]`, and passing it where a type is expected says the
-same under its missing fields. A spread of a dict is the same, and silent until then. **Cost:** in the editor,
+same under its missing fields. A spread of a dict is the same, and silent until then. Only what has `keys()` can be spread, a
+record or a mapping, as for Python's own `**`: `(**maybe, zip=1)` with `maybe: User | None` is `can't spread
+User | None: it may be None. Narrow it first`. **Cost:** in the editor,
 the edit that brings in such a spread takes about twice as long to show diagnostics (0.45 s to 0.95 s on a
 400-line torch file); the answers then carry over to the next edits, which cost the same as without (0.45 s).
 `byname tool basedpyright` runs the checker once more over those files (+0.5 to 1.3 s). Files without one cost nothing more. Any expression is asked, `(**users[0], zip=1)` too. In the

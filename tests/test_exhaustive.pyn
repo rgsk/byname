@@ -975,7 +975,7 @@ def test_a_spread_is_exact_wherever_the_checker_knows_its_source(tmp_path):
             for r in rows:
                 open_ = (**r, zip=1)
                 reveal_type(open_)
-            m = (**maybe, zip=1)
+            m = (**maybe, zip=1)  # a union, no one record: open; and it may be None, which can't be spread
             reveal_type(m)
             label = "😀"; top = (**users[0], zip=1)  # an expression, after a wide character
             reveal_type(top)
@@ -989,13 +989,45 @@ def test_a_spread_is_exact_wherever_the_checker_knows_its_source(tmp_path):
     assert all(verdicts[n].endswith(exact) for n in [7, 9, 11])
     assert verdicts[15] == 'Type of "again" is "(name: str, age: int, zip: int, city: str)"'
     assert verdicts[18] == 'Type of "open_" is "(..., zip: int)"'
+    assert verdicts[19] == (
+        "can't spread User | None: it may be None. Narrow it first; a record or a mapping is spread by name"
+        " (reportArgumentType)"
+    )
     assert verdicts[20] == 'Type of "m" is "(..., zip: int)"'
     assert verdicts[22].endswith(exact) and verdicts[23].endswith(exact) and verdicts[25].endswith(exact)
-    assert sorted(verdicts) == [7, 9, 11, 15, 18, 20, 22, 23, 25]
+    assert sorted(verdicts) == [7, 9, 11, 15, 18, 19, 20, 22, 23, 25]
 
     users = [(name="a", age=1)]
     assert (**users[0], zip=1) == (name="a", age=1, zip=1)
     assert [(**u, zip=1) for u in users] == [(name="a", age=1, zip=1)]
+
+
+def test_only_a_record_or_a_mapping_can_be_spread(tmp_path):
+    # `**` takes what has keys(), at runtime and for the checker: a record (open ones too) or a mapping. None
+    # can't be spread, nor an int: a dict display says "Expected mapping"; a record built from spreads says it
+    # in its own words, wherever it stands (no type expected too: transform's _byname_loose)
+    verdicts = checker(
+        """\
+        type User = (name: str, age: int)
+        def f(maybe: User | None, d: dict[str, int] | None, n: int, o: (..., name: str), ok: dict[str, int]):
+            a = (**maybe, zip=1)
+            b = (**d, zip=1)
+            c = (**n, zip=1)
+            fine = (**o, zip=1), (**ok, zip=1)
+            if maybe is not None:
+                narrowed = (**maybe, zip=1)
+                reveal_type(narrowed)
+        """,
+        tmp_path,
+    )
+    may_be_none = "it may be None. Narrow it first; a record or a mapping is spread by name (reportArgumentType)"
+    assert verdicts[3] == f"can't spread User | None: {may_be_none}"
+    assert verdicts[4] == f"can't spread dict[str, int] | None: {may_be_none}"
+    assert verdicts[5] == "can't spread int: a record or a mapping is spread by name (reportArgumentType)"
+    assert verdicts[9] == 'Type of "narrowed" is "(name: str, age: int, zip: int)"'
+    assert sorted(verdicts) == [3, 4, 5, 9]
+    with pytest.raises(TypeError, match="not a mapping"):  # what runs says so too
+        (**None, zip=1)  # pyright: ignore
 
 
 def test_a_field_a_spread_brought_says_where_it_went(tmp_path):

@@ -178,8 +178,11 @@ CTX_PRELUDE = (  # checker only: T is the type expected where the record is buil
     "    def __getattr__(self, name: str, /) -> _A: ...\n"
     "_byname_R = _TV('_byname_R', bound=_byname_HasDict[_A] | None, default=_byname_AnyRec)\n"
     "def _byname_arg(f: _Cl[[_byname_R], object], /) -> _byname_R: ...  # pyright: ignore\n"
-    # a spread with no type expected (open_build): its fields aren't known, so it's any mapping
-    "def _byname_loose(x: object, /) -> _Mp[str, object]: ...  # pyright: ignore\n"
+    # a spread with no type expected (open_build): its fields aren't known, so it's any mapping. What has keys()
+    # goes in, as for `**` at runtime: a record (open ones too) or a mapping; None doesn't (lsp.explain_fields)
+    "class _byname_Keyed(_PR):\n"
+    "    def keys(self) -> _A: ...\n"
+    "def _byname_loose(x: _byname_Keyed, /) -> _Mp[str, object]: ...  # pyright: ignore\n"
 )
 # checker only: _byname_rec (PRELUDE), typed
 BUILD_REC_TYPED = "def _byname_rec(d: _Mp[str, _A], /) -> _A: ...  # pyright: ignore\n"

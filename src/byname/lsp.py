@@ -407,6 +407,10 @@ def parameter_type(help: dict | None) -> str | None:
 
 SITE_RE = re.compile(r"(_(?:rec|typ|opn)_\w*?)___\d+(?:_spread\w*)?\b")  # and transform.SPREAD's marker
 # a record a spread built where no type was expected, from sources whose fields byname can't see (transform.SPREAD)
+# a spread of what's neither a record nor a mapping, with no type expected (transform's `_byname_loose`)
+LOOSE_RE = re.compile(
+    r'Argument of type "(.*?)" cannot be assigned to parameter "x" of type "[^"]*"\s+in function "_byname_loose"'
+)
 SPREAD_RE = re.compile(r"_opn_\w*?___\d+_spread((?:__\w+?)*)(?![\w])")
 # a record type repeated in a union, once site numbers are gone: `(a: int) | (a: int)`
 COVARIANT_RE = re.compile(r"\b_byname_T(\d+)\b")
@@ -601,7 +605,16 @@ def spread_source(msg: str) -> str | None:
 def explain_fields(msg: str) -> str:
     """An exact record type rejected a record whose field set differs. pyright's message is a page about
     FIELDSET, a generated property; keep the first line and say which fields are extra or missing.
-    Likewise a record built from spreads, checked as a dict against the type's TypedDict (`_dct_`)."""
+    Likewise a record built from spreads, checked as a dict against the type's TypedDict (`_dct_`).
+    And a spread of what's neither a record nor a mapping (transform's `_byname_loose`), `None` above all,
+    said as a dict display says it, not as an argument to byname's helper."""
+    if m := LOOSE_RE.search(msg):
+        typ = pretty(m[1])
+        rule = RULE_RE.search(msg.split("\n")[-1])
+        why = "a record or a mapping is spread by name"
+        if "None" in [t.strip() for t in split_top(typ, "|")]:
+            why = f"it may be None. Narrow it first; {why}"
+        return msg[: m.start()] + f"can't spread {typ}: {why}" + (f" ({rule[1]})" if rule else "")
     spread = spread_source(msg)
     msg = unsite(msg)
     if spread and (m := UNDECLARED_RE.search(msg)):
