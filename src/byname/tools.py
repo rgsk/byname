@@ -13,8 +13,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 from .lsp import LOAD_EXT_RE, explain_fields, pretty
@@ -44,6 +46,60 @@ def has_pyright_config(root: Path) -> bool:
         return True
     pp = root / "pyproject.toml"
     return pp.exists() and re.search(r"^\[tool\.(based)?pyright", pp.read_text(), re.MULTILINE) is not None
+
+
+_EXCLUDES: dict[Path, tuple[tuple, list[re.Pattern]]] = {}
+
+
+def excludes(root: Path) -> list[re.Pattern]:
+    """The checker's `exclude` globs (pyrightconfig.json, else pyproject's [tool.basedpyright] or
+    [tool.pyright]), each matching a path relative to root and everything under it. Cached per config stamp."""
+    configs = [root / "pyrightconfig.json", root / "pyproject.toml"]
+    stamp = tuple(c.stat().st_mtime_ns if c.is_file() else None for c in configs)
+    if (hit := _EXCLUDES.get(root)) is not None and hit[0] == stamp:
+        return hit[1]
+    globs: list = []
+    try:
+        if stamp[0] is not None:
+            globs = json.loads(configs[0].read_text()).get("exclude", [])
+        elif stamp[1] is not None:
+            tool = tomllib.loads(configs[1].read_text()).get("tool", {})
+            globs = (tool.get("basedpyright") or tool.get("pyright") or {}).get("exclude", [])
+    except (OSError, ValueError, AttributeError):
+        globs = []
+    found = []
+    for g in globs if isinstance(globs, list) else []:
+        if not isinstance(g, str) or not (g := g.strip().removeprefix("./").rstrip("/")):
+            continue
+        if Path(g).is_absolute():
+            if not Path(g).is_relative_to(root):
+                continue
+            g = Path(g).relative_to(root).as_posix()
+        parts = []
+        for tok in re.split(r"(\*\*/?|\*|\?)", g):
+            if tok.startswith("**"):
+                parts.append("(?:.*/)?" if tok.endswith("/") else ".*")
+            else:
+                parts.append({"*": "[^/]*", "?": "[^/]"}.get(tok) or re.escape(tok))
+        found.append(re.compile("".join(parts) + "(?:/|$)"))
+    _EXCLUDES[root] = (stamp, found)
+    return found
+
+
+def excluded(root: Path, rel: Path) -> bool:
+    """rel (relative to root) is one of the checker's `exclude` paths, or under one."""
+    return any(p.match(rel.as_posix()) for p in excludes(root))
+
+
+def walk(root: Path, out: Path | None = None):
+    """(folder, its file names) for every folder of the project the mirror holds: not SKIP_DIRS, the checker's
+    excluded folders or the mirror out."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        d = Path(dirpath)
+        dirnames[:] = [
+            n for n in dirnames if n not in SKIP_DIRS and d / n != out and not excluded(root, (d / n).relative_to(root))
+        ]
+        yield d, filenames
 
 
 def resolve(cmd: str) -> str:
@@ -95,8 +151,8 @@ def mirrored(root: Path, src: Path) -> Path | None:
         rel = src.relative_to(root)
     except ValueError:
         return None
-    if not rel.parts or any(p in SKIP_DIRS for p in rel.parts[:-1]):
-        return None
+    if not rel.parts or any(p in SKIP_DIRS for p in rel.parts[:-1]) or excluded(root, rel):
+        return None  # an excluded folder is one link in the mirror (see mirror)
     if src.suffix == ".pyn":
         return rel.with_suffix(".py")
     if src.suffix in (".py", ".pyi", ".ipynb") or (src.name in CONFIGS and len(rel.parts) == 1):
@@ -112,6 +168,10 @@ def place(root: Path, out: Path, src: Path) -> tuple[Path, int | None] | None:
     if rel is None:
         return None
     dst = out / rel
+    for up in reversed(dst.parents[: len(rel.parts) - 1]):  # an excluded folder's link, no longer excluded:
+        if up.is_symlink():  # written through, the copy would land in the project
+            up.unlink()
+            break
     existed = dst.is_symlink() or dst.exists()
     if src.suffix == ".py" and src.with_suffix(".pyn").is_file():
         return dst, None  # the .pyn's translation is there
@@ -136,17 +196,38 @@ def place(root: Path, out: Path, src: Path) -> tuple[Path, int | None] | None:
     return dst, (2 if existed else 1) if changed else None
 
 
-def mirror(root: Path, kind: str = "tools", default_config: bool = True, changes: list | None = None) -> Path:
+def mirror(
+    root: Path,
+    kind: str = "tools",
+    default_config: bool = True,
+    changes: list | None = None,
+    sources: set[Path] | None = None,
+) -> Path:
     """Sync root into its mirror; returns the mirror root. Unchanged files keep their mtime (tool caches).
+    A folder the checker excludes is one link to it, not walked: its files stay importable, as the checker
+    still resolves imports into an excluded folder, and it doesn't check them there either.
     default_config: a project that doesn't configure the checker gets the editor's default, "standard".
-    changes: collects (mirror path, FileChangeType) for what this sync changed."""
+    changes: collects (mirror path, FileChangeType) for what this sync changed. sources: collects the
+    project files mirrored."""
     out = mirror_dir(root, kind)
     wanted: set[Path] = set()
+    linked: set[Path] = set()
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and Path(dirpath, d) != out]
+        d = Path(dirpath)
+        keep = []
+        for n in dirnames:
+            if n in SKIP_DIRS or d / n == out:
+                continue
+            if excluded(root, rel := (d / n).relative_to(root)):
+                linked.add(link_folder(d / n, out / rel))
+            else:
+                keep.append(n)
+        dirnames[:] = keep
         for f in filenames:
-            if (placed := place(root, out, Path(dirpath) / f)) is not None:
+            if (placed := place(root, out, d / f)) is not None:
                 wanted.add(placed[0])
+                if sources is not None:
+                    sources.add(d / f)
                 if placed[1] is not None and changes is not None:
                     changes.append(placed)
     if default_config and not has_pyright_config(root):  # same default as the editor; "recommended" is noisy
@@ -157,6 +238,9 @@ def mirror(root: Path, kind: str = "tools", default_config: bool = True, changes
         wanted.add(cfg)
     if out.exists():  # drop files whose source is gone
         for dirpath, dirnames, filenames in os.walk(out, topdown=True):
+            for n in dirnames:  # a link to a folder no longer excluded (os.walk doesn't follow links)
+                if (link := Path(dirpath, n)).is_symlink() and link not in linked:
+                    link.unlink()
             dirnames[:] = [d for d in dirnames if d not in KEEP_IN_MIRROR]
             for f in filenames:
                 p = Path(dirpath) / f
@@ -168,24 +252,38 @@ def mirror(root: Path, kind: str = "tools", default_config: bool = True, changes
     return out
 
 
-def probe(root: Path, out: Path, checker: str) -> int:
+def link_folder(src: Path, dst: Path) -> Path:
+    """dst, a link to the excluded folder src (see mirror); a copy of it from before it was excluded goes."""
+    if dst.is_symlink():
+        if dst.readlink() == src:
+            return dst
+        dst.unlink()
+    elif dst.exists():
+        shutil.rmtree(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.symlink_to(src, target_is_directory=True)
+    return dst
+
+
+def probe(root: Path, out: Path, checker: str, pyns: set[Path] | None = None) -> int:
     """Ask the checker what byname can't see: the .pyn files whose spreads or rests read a source the file
     doesn't show the fields of (Translation.unseen) go to the checker as probe translations, each such
     source wrapped in `reveal_type(...)`; its answers (probed_from) are kept in PROBED, so every Translation
     of those files reads them, and their copies in the mirror are written again with them. Files asked
     together see each other's probes, so `(**first_moved())` of another file's asked spread is answered
     as an open spread (`waiting`): the files with such answers are asked again, over the others' final
-    copies, while that answers something (PROBE_ROUNDS at most). The number of checker runs."""
+    copies, while that answers something (PROBE_ROUNDS at most). The number of checker runs.
+    pyns: the project's .pyn files, if the caller keeps them (the editor, on a save); else the project is walked."""
+    if pyns is None:
+        pyns = {d / f for d, files in walk(root, out) for f in files if f.endswith(".pyn")}
     texts: dict[Path, tuple[Path, str]] = {}  # the files with a spread or rest: their copy in the mirror, text
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and Path(dirpath, d) != out]
-        for f in filenames:
-            pyn = Path(dirpath) / f
-            if pyn.suffix != ".pyn" or (rel := mirrored(root, pyn)) is None:
-                continue
-            text = pyn.read_text(encoding="utf-8")
-            if "**" in text:  # else no spread or rest: nothing to ask
-                texts[pyn] = (out / rel, text)
+    for pyn in sorted(pyns):
+        try:
+            if (rel := mirrored(root, pyn)) is None or "**" not in (text := pyn.read_text(encoding="utf-8")):
+                continue  # no spread or rest: nothing to ask
+        except OSError:  # gone since
+            continue
+        texts[pyn] = (out / rel, text)
     answers: dict[Path, dict] = {}
     runs = 0
     while runs < PROBE_ROUNDS:
@@ -438,9 +536,8 @@ def add_rest_hints(root: Path, args: list[str], lines: list[str], located: list[
     Whether any were added."""
     named = [Path(a).resolve() for a in args if a.endswith(".pyn")]
     if not named:
-        for d, dirs, files in os.walk(root):
-            dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
-            named += [Path(d) / f for f in files if f.endswith(".pyn")]
+        for d, files in walk(root):
+            named += [d / f for f in files if f.endswith(".pyn")]
     added = False
     for pyn in sorted(named):
         if pyn not in cache:

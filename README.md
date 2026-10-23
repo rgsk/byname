@@ -477,6 +477,10 @@ the cell as written (`nb.ipynb:cell 4:2:5` from Ruff, `nb.ipynb:3:2:5` from base
 code cells only). `.py` files and plain notebooks are checked as they are, with basedpyright in
 `standard` mode unless the project configures it.
 
+A folder in the checker's `exclude` (`[tool.basedpyright] exclude = ["envs", "data"]`) is mirrored
+as one link and never walked, so imports into it still resolve. In a project holding cloned repos
+or datasets, excluding them keeps the editor quick to start and `byname tool` quick to run.
+
 ```
 byname tool ruff check --output-format=concise file.pyn   # or .py, .ipynb
 byname tool basedpyright file.pyn

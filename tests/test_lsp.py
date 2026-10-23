@@ -1744,6 +1744,46 @@ def test_a_spread_of_what_only_the_checker_knows_is_exact_in_the_editor(lsp):
     assert "moved: (name: str, age: int, zip: int)" in hover_text(c, uri, pos(text, "moved ="))
 
 
+def test_a_save_updates_its_own_copy_without_walking_the_project(tmp_path, monkeypatch):
+    # a save is one file changed: placed alone in the editor's mirror and the probe's, whose next run asks the
+    # .pyn files it already knows. A sync walks the project, seconds in a big one, on every save it was slow
+    import byname.tools as tools
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "a.pyn").write_text("x = (a=1)\n")
+    (root / "b.pyn").write_text("def f(r):\n    return (**r, b=2)\n")
+    proxy = Proxy(["cat"])
+    proxy.root, proxy.mirror, proxy.cli = root, tools.mirror_dir(root, "lsp"), "unused"
+    proxy.sync()
+    walks, asked = [], []
+    real_mirror = tools.mirror
+    monkeypatch.setattr(tools, "mirror", lambda *a, **k: walks.append(a[1]) or real_mirror(*a, **k))
+    monkeypatch.setattr(tools, "probe", lambda root, out, cli, pyns: asked.append(sorted(p.name for p in pyns)))
+    proxy.run_probe()  # the first run syncs whole
+    assert walks == ["lsp-probe"] and asked == [["a.pyn", "b.pyn"]]
+
+    (root / "a.pyn").write_text("x = (a=1, b=2)\n")
+    saved = [{"uri": (root / "a.pyn").as_uri(), "type": 2}]
+    assert proxy.watched(saved) == [{"uri": (proxy.mirror / "a.py").as_uri(), "type": 2}]
+    assert "_rec_a__b___" in (proxy.mirror / "a.py").read_text()
+    (root / "c.pyn").write_text("y = 1\n")
+    proxy.probe_changed = {root / "a.pyn", root / "c.pyn"}
+    proxy.run_probe()
+    assert walks == ["lsp-probe"] and asked[-1] == ["a.pyn", "b.pyn", "c.pyn"]
+    assert "_rec_a__b___" in (tools.mirror_dir(root, "lsp-probe") / "a.py").read_text()
+
+    # made, removed, many at once (git, a script): synced whole, as anything may have changed
+    (root / "b.pyn").unlink()
+    proxy.watched([{"uri": (root / "b.pyn").as_uri(), "type": 3}])
+    assert not (proxy.mirror / "b.py").exists() and walks == ["lsp-probe", "lsp"]
+    proxy.probe_full = True
+    proxy.run_probe()
+    assert asked[-1] == ["a.pyn", "c.pyn"]
+    proxy.proc.kill()
+
+
 def test_a_probe_s_answer_is_a_publish_that_has_one(tmp_path):
     # Ctrl+hover opens the target for its preview and closes it, the click opens it again: the reopen's first
     # publish can be of the text before the probe (the mirror's). It isn't the answer; the probe's own publish

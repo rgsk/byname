@@ -904,6 +904,11 @@ class Proxy:
         self.probe_lock = threading.Lock()
         self.probe_running = False
         self.probe_again = False
+        # its mirror, lsp-probe, is synced whole on the first run (and after a bulk change), then file by file:
+        # a walk of a big project takes seconds
+        self.probe_full = True
+        self.probe_changed: set[Path] = set()
+        self.probe_pyns: set[Path] = set()  # the project's .pyn files, as of the last sync
         self.server = Writer(self.proc.stdin)
         self.root: Path | None = None
         self.mirror: Path | None = None  # what the checker runs on, see tools.mirror
@@ -1165,7 +1170,7 @@ class Proxy:
 
         if method == "initialized":  # the checker is up: ask about the files not open
             self.send_server(msg)
-            self.probe_project()
+            self.probe_project(None)
             return
 
         if method == "initialize":
@@ -1258,7 +1263,8 @@ class Proxy:
                     self.send_server({**msg, "params": {"changes": changes}})
                 # a module changed outside the editor (a script, git, an agent): what spreads of it are is asked again
                 if any(c.get("uri", "").endswith(".pyn") for c in params.get("changes", [])):
-                    self.probe_project()
+                    saved = self.one_saved(params.get("changes", []))
+                    self.probe_project(None if saved is None else [saved])
                 return
             elif mid is not None:  # e.g. workspace/symbol: results point into the mirror
                 self.pending[mid] = (method, self.last_completion if method == "completionItem/resolve" else None)
@@ -1327,7 +1333,7 @@ class Proxy:
             versions = self.docs.get(path)
             self.place(path)
             self.send_server({**msg, "params": {"textDocument": {"uri": uri}}})
-            self.probe_project()  # what other files' spreads of it are may have changed: asked again
+            self.probe_project([path])  # what other files' spreads of it are may have changed: asked again
             if self.output_on_save and versions:
                 self.write_output(path, versions[-1])
             if versions:
@@ -1484,15 +1490,20 @@ class Proxy:
         self.refresh_tokens()
         return True
 
-    def probe_project(self) -> None:
+    def probe_project(self, changed: list[Path] | None) -> None:
         """Ask the checker about the spreads of the files not open, as `byname tool` does (tools.probe), in the
         background: the editor's checker reads those from the mirror, which had no answers, so a spread of
         what they return stayed open while they were closed. It runs over a mirror of its own, `lsp-probe`, so
         the editor's checker never reads a probe; the answers (PROBED) go into the editor's mirror, the
-        checker is told which copies changed, and the open files are asked again. One run at a time."""
+        checker is told which copies changed, and the open files are asked again. One run at a time.
+        changed: the files changed since the last run, None if not known (the mirror is synced whole)."""
         if self.cli is None or self.root is None:
             return
         with self.probe_lock:
+            if changed is None:
+                self.probe_full = True
+            else:
+                self.probe_changed.update(changed)
             if self.probe_running:
                 self.probe_again = True
                 return
@@ -1500,16 +1511,31 @@ class Proxy:
         threading.Thread(target=self.run_probe, daemon=True).start()
 
     def run_probe(self) -> None:
-        from .tools import mirror, probe
+        from .tools import mirror, mirror_dir, mirrored, place, probe
 
         assert self.root is not None and self.cli is not None
         while True:
+            with self.probe_lock:
+                full, changed = self.probe_full, self.probe_changed
+                self.probe_full, self.probe_changed = False, set()
             try:
                 before = dict(PROBED)
-                probe(self.root, mirror(self.root, "lsp-probe"), self.cli)
+                out = mirror_dir(self.root, "lsp-probe")
+                if full:
+                    found: set[Path] = set()
+                    mirror(self.root, "lsp-probe", sources=found)
+                    self.probe_pyns = {p for p in found if p.suffix == ".pyn"}
+                for path in changed if not full else ():
+                    place(self.root, out, path)
+                    if path.suffix == ".pyn" and path.is_file() and mirrored(self.root, path) is not None:
+                        self.probe_pyns.add(path)
+                    else:
+                        self.probe_pyns.discard(path)
+                probe(self.root, out, self.cli, self.probe_pyns)
                 self.answers_in([p for p, got in PROBED.items() if before.get(p) != got])
-            except Exception:  # a broken run leaves the files as they were: open spreads
-                pass
+            except Exception:  # a broken run leaves the files as they were: open spreads; the next syncs whole
+                with self.probe_lock:
+                    self.probe_full = True
             with self.probe_lock:
                 if not self.probe_again:
                     self.probe_running = False
@@ -1982,12 +2008,16 @@ class Proxy:
     def watched(self, changes: list[dict]) -> list[dict]:
         """The editor's file events as the checker's: the mirror is synced, and each copy that sync changed is
         an event, as is a change to a file the mirror links to. A folder made or removed shows as the files in
-        it. Events outside the project (site-packages) pass through."""
-        from .tools import mirrored
+        it. Events outside the project (site-packages) pass through. One file changed (a save) is placed alone:
+        a sync walks the project, seconds in a big one, on the thread that answers the editor."""
+        from .tools import mirrored, place
 
         assert self.root is not None and self.mirror is not None
         made: list = []
-        self.sync(made)
+        if (saved := self.one_saved(changes)) is None:
+            self.sync(made)
+        elif saved.is_relative_to(self.root) and (placed := place(self.root, self.mirror, saved)) and placed[1]:
+            made.append(placed)
         out = {p.as_uri(): t for p, t in made}
         passed = []
         for c in changes:
@@ -1997,6 +2027,14 @@ class Proxy:
             elif c.get("type") != 3 and (rel := mirrored(self.root, path)) is not None and (self.mirror / rel).exists():
                 out.setdefault((self.mirror / rel).as_uri(), c.get("type", 2))
         return [{"uri": u, "type": t} for u, t in out.items()] + passed
+
+    @staticmethod
+    def one_saved(changes: list[dict]) -> Path | None:
+        """The file, when a file event is one file changed (a save, here or elsewhere); else None: something
+        made, removed or many at once (git, a script) may be anywhere, so the mirror is synced whole."""
+        if len(changes) == 1 and changes[0].get("type") == 2 and changes[0].get("uri", "").startswith("file:"):
+            return uri_to_path(changes[0]["uri"])
+        return None
 
     @staticmethod
     def inject_config(items: list[dict], result: list) -> list:

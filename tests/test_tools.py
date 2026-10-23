@@ -472,3 +472,34 @@ def test_py_errors_show_the_projects_path(project):
     out, rc = tool(project, "basedpyright", str(project / "plain.py"))
     assert '  plain.py:1:10 - error: Type "Literal[\'a\']" is not assignable to declared type "int"' in out
     assert ".cache" not in out
+
+
+def test_a_folder_the_checker_excludes_is_one_link_in_the_mirror(tmp_path, monkeypatch):
+    # a project's cloned third-party code (envs/, 63k files in one) isn't walked on every sync: the mirror
+    # links the folder whole, so imports into it still resolve and the checker, excluding it, checks nothing there
+    from byname.tools import mirror, mirrored, probe
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    root = tmp_path / "proj"
+    (root / "envs" / "sim").mkdir(parents=True)
+    (root / "envs" / "sim" / "__init__.py").write_text('x: int = "bad"\n')
+    (root / "envs" / "sim" / "rough.pyn").write_text("r = (**{}, a=1)\n")
+    (root / "main.pyn").write_text("from envs.sim import x\n\nreveal_type(x)\n")
+    (root / "pyproject.toml").write_text('[tool.basedpyright]\nexclude = ["envs"]\n')
+    out = mirror(root)
+    assert (out / "envs").is_symlink() and (out / "envs").readlink() == root / "envs"
+    assert mirrored(root, root / "envs" / "sim" / "rough.pyn") is None
+    assert probe(root, out, "unused") == 0  # its .pyn isn't asked about either: nothing to run
+    got, _ = tool(root, "basedpyright")
+    assert 'main.pyn:3:13 - information: Type of "x" is "int"' in got
+    assert "envs" not in got  # its error isn't reported
+
+    # no longer excluded: mirrored file by file, nothing written through the old link into the project
+    (root / "pyproject.toml").write_text("[tool.basedpyright]\n")
+    out = mirror(root)
+    assert not (out / "envs").is_symlink() and (out / "envs" / "sim" / "rough.py").is_file()
+    assert sorted(p.name for p in (root / "envs" / "sim").iterdir()) == ["__init__.py", "rough.pyn"]
+    out = mirror(root)  # and back
+    (root / "pyproject.toml").write_text('[tool.basedpyright]\nexclude = ["**/sim"]\n')
+    out = mirror(root)
+    assert (out / "envs" / "sim").is_symlink() and not (out / "envs" / "sim" / "rough.py").is_symlink()
