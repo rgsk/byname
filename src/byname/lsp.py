@@ -619,6 +619,66 @@ def is_generated_name(name) -> bool:
     )
 
 
+FIELDS_CLASS_RE = re.compile(r"class _(typ|dct)_(\w+?)\[")
+STUB_RE = re.compile(r"    def _rec_(\w+?)\[")
+
+
+def field_declarations(hidden: str, pos: dict) -> list[dict]:
+    """A record field is several symbols to the checker: the attribute of its `_typ_` Protocol (reads,
+    patterns, record types), the keyword of its `_rec_` stub (literals), `_replace`'s keyword and the
+    `_dct_` key (`_asdict()`). If `pos` (hidden) is on one of those declarations, where all of them are."""
+    decls: dict[tuple[str, str], list[dict]] = {}  # (field set, field) -> its declarations
+    cls = None
+    for i, text in enumerate(hidden.split("\n")):
+        if m := FIELDS_CLASS_RE.match(text):
+            cls = m
+            continue
+        if not text.startswith("    "):
+            cls = None
+        if m := STUB_RE.match(text):
+            kind, owner = "rec", m[1]
+        elif cls:
+            kind, owner = cls[1], cls[2]
+        else:
+            continue
+        for d in re.finditer(r"(\w+):", text):
+            if d[1] in owner.split("__") and (kind != "typ" or text.startswith((f"    {d[1]}:", "    def _replace("))):
+                decls.setdefault((owner, d[1]), []).append({"line": i, "character": d.start()})
+    return next(
+        (
+            ps
+            for (_, f), ps in decls.items()
+            if any(
+                p["line"] == pos["line"] and p["character"] <= pos["character"] <= p["character"] + len(f) for p in ps
+            )
+        ),
+        [],
+    )
+
+
+def workspace_edits(edit) -> list[tuple[str, dict]]:
+    """(uri, TextEdit) for every text edit of a WorkspaceEdit, `changes` or `documentChanges`."""
+    if not isinstance(edit, dict):
+        return []
+    out = [(u, e) for u, es in (edit.get("changes") or {}).items() for e in es]
+    for dc in edit.get("documentChanges") or []:
+        if "edits" in dc:
+            out += [(dc["textDocument"]["uri"], e) for e in dc["edits"]]
+    return out
+
+
+def add_workspace_edit(edit: dict, uri: str, e: dict) -> None:
+    """Add a TextEdit for `uri` to a WorkspaceEdit, in the shape it already has."""
+    if "documentChanges" in edit:
+        dcs = edit["documentChanges"]
+        if dc := next((d for d in dcs if "edits" in d and d["textDocument"]["uri"] == uri), None):
+            dc["edits"].append(e)
+        else:
+            dcs.append({"textDocument": {"uri": uri, "version": None}, "edits": [e]})
+    else:
+        edit.setdefault("changes", {}).setdefault(uri, []).append(e)
+
+
 def is_range(v) -> bool:
     return (
         isinstance(v, dict)
@@ -694,6 +754,7 @@ class Proxy:
         # but we format them and run Ruff's fixes, as for .pyn
         self.pending: dict = {}  # editor request id -> (method, Doc)
         self.own_actions: dict = {}  # codeAction request id -> byname's quick fixes, added to the checker's
+        self.rename_to: dict = {}  # rename request id -> its newName, for rename_fields
         self.server_requests: dict = {}  # checker request id -> configuration items
         self.last_completion: Doc | None = None
         self.counter = 0  # checker-side document versions
@@ -1053,6 +1114,8 @@ class Proxy:
             return
         if method == "textDocument/codeAction" and mid is not None and (actions := self.by_name_actions(params, doc)):
             self.own_actions[mid] = actions
+        if method == "textDocument/rename" and mid is not None:
+            self.rename_to[mid] = params.get("newName")
         mapped = self.to_checker(params, doc)
         # on shorthand `x=`: definition -> the local x (value half); declaration -> the parameter/field
         if method == "textDocument/definition" and (vp := doc.tr.value_position(params["position"])):
@@ -1379,6 +1442,45 @@ class Proxy:
         self.send_text(key, latest.tr.hidden, latest)  # restore the real text
         self.complete_plainly(msg, doc)
 
+    def rename_fields(self, msg: dict, doc: Doc | None) -> bool:
+        """A rename that reaches a record field's declaration (field_declarations) renames its other
+        declarations too, so a read and the literal it reads go together: `r.name` and `(name=)` are two
+        symbols to the checker. Each other declaration is a rename request of its own, answered in
+        finish_rename. False: none to rename, the answer goes as it is."""
+        new = self.rename_to.pop(msg["id"], None)
+        have = {
+            (u, e["range"]["start"]["line"], e["range"]["start"]["character"])
+            for u, e in workspace_edits(msg["result"])
+        }
+        asks = []
+        for u, e in workspace_edits(msg["result"]):
+            if new is None or (target := self.doc_for(u)) is None:
+                continue
+            for p in field_declarations(target.tr.hidden, e["range"]["start"]):
+                if (u, p["line"], p["character"]) not in have:
+                    have.add((u, p["line"], p["character"]))
+                    asks.append({"textDocument": {"uri": u}, "position": p, "newName": new})
+        if not asks:
+            return False
+        state = {"msg": msg, "doc": doc, "more": [], "left": len(asks)}
+        for k, params in enumerate(asks):
+            sid = f"byname-rename-{msg['id']}-{k}"
+            self.pending[sid] = ("rename_field", state)
+            self.server.send({"jsonrpc": "2.0", "id": sid, "method": "textDocument/rename", "params": params})
+        return True
+
+    def finish_rename(self, msg: dict, doc: Doc | None, more: list) -> None:
+        """The first rename's edits and the other declarations' ones, each edit once, mapped to the source."""
+        edit = msg["result"]
+        seen = {(u, json.dumps(e["range"], sort_keys=True)) for u, e in workspace_edits(edit)}
+        for other in more:
+            for u, e in workspace_edits(other):
+                if (u, json.dumps(e["range"], sort_keys=True)) not in seen:
+                    seen.add((u, json.dumps(e["range"], sort_keys=True)))
+                    add_workspace_edit(edit, u, e)
+        result = self.to_editor(edit, doc)
+        self.client.send({**msg, "result": None if result is DROP else result})
+
     def complete_plainly(self, msg: dict, doc: Doc) -> None:
         """The checker's own completion at the editor's position, on the real text."""
         self.pending[msg["id"]] = (msg["method"], doc)
@@ -1643,6 +1745,13 @@ class Proxy:
             if method_doc and method_doc[0] == "record_argument":
                 self.answer_record_argument(msg.get("result"), *method_doc[1])
                 return
+            if method_doc and method_doc[0] == "rename_field":
+                state = method_doc[1]
+                state["more"].append(msg.get("result"))
+                state["left"] -= 1
+                if not state["left"]:
+                    self.finish_rename(state["msg"], state["doc"], state["more"])
+                return
             if method_doc and method_doc[0] == "after_comma":
                 doc, cursor = method_doc[1]
                 self.client.send({**msg, "result": self.finish_after_comma(msg.get("result"), doc, cursor)})
@@ -1696,6 +1805,8 @@ class Proxy:
                             )
                         },
                     }
+                elif req == "textDocument/rename" and self.rename_fields(msg, doc):
+                    return
                 else:
                     result = self.to_editor(msg["result"], doc)
                     msg = {**msg, "result": None if result is DROP else result}

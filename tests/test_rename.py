@@ -89,13 +89,26 @@ def test_renaming_an_attribute_keeps_the_local_a_pattern_binds(client):
     assert got.splitlines()[-2:] == ["(years=age) = P()", "print(age)"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="renaming a record field from a read (r.name) doesn't reach the literal that built it: the checker "
-    "sees the field on the record's Protocol, not on the generated class the literal calls",
-)
 def test_renaming_a_record_field_from_a_read_reaches_the_literal(client):
-    # once the rename reaches `(name=)`, split_shorthands keeps the local: `(who=name)`
+    # `r.name` and `(name=)` are two symbols to the checker; the proxy renames both, and the literal's
+    # shorthand keeps its local: `(who=name)`
     src = "name = 'rahul'\nr = (name=)\nprint(r.name)\n"
     got = rename(client, "record.pyn", src, pos(src, "r.name", delta=2), "who")
-    assert got.splitlines()[:2] == ["name = 'rahul'", "r = (who=name)"]
+    assert got == "name = 'rahul'\nr = (who=name)\nprint(r.who)\n"
+
+
+def test_renaming_a_record_field_from_the_literal_reaches_its_reads(client):
+    src = "r = (name='rahul')\nprint(r.name)\n(name=n) = r\ns = r._replace(name='x')\n"
+    got = rename(client, "literal.pyn", src, pos(src, "name="), "who")
+    assert got == "r = (who='rahul')\nprint(r.who)\n(who=n) = r\ns = r._replace(who='x')\n"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="a written record type's field name maps to no symbol: `(name: str)` is `_typ_name[str]` to the "
+    "checker, so it stays; the call passing `(who=...)` is then an error, not silent",
+)
+def test_renaming_a_field_of_a_record_type_reaches_the_records_passed(client):
+    src = "def show(q: (name: str)) -> str:\n    return q.name\n\n\nshow((name='rahul'))\n"
+    got = rename(client, "typed.pyn", src, pos(src, "q.name", delta=2), "who")
+    assert got == "def show(q: (who: str)) -> str:\n    return q.who\n\n\nshow((who='rahul'))\n"
