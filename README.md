@@ -162,17 +162,25 @@ of a function that shows them, or annotated with a record type (a parameter's to
 `(name: str, age: int, sex: str, surname: str)` and a typo like `x.surnme` is an error. A function shows
 the fields of what it returns by its return annotation, or by its `return`s when they all show the same
 ones (`return (name=, age=)`, or another such function's call, in other modules too), so
-`(**make(), zip=1)` is typed. Not an `async def` or a decorated function: annotate it. Names are scoped as in Python, and a name rebound in straight-line
+`(**make(), zip=1)` is typed. Not an `async def` or a decorated function: annotate it. Anything else the
+checker knows the type of is typed too: a loop's item (`for u in users` with `users: list[User]`),
+`users.pop()`, an attribute, a call to a method. byname asks the checker: a file with such spreads goes to it
+once more first, each source in `reveal_type(...)`, and its answers type the spreads (see "Cost" below).
+Names are scoped as in Python, and a name rebound in straight-line
 code is read at its nearest binding before the spread, so `u = (**u, city="pune")` stays typed. When more than
 one binding may have run (an `if`, a loop, a function reading a module name) they must all have the same
-fields. Otherwise (bindings with different fields, a call to a method or to a function that shows no one
-record, an open record's `**rest`) it's open: the fields written after the last spread are known and the
+fields. Otherwise (a source the checker can't type either: no annotation, `Any`, a union of records,
+`Optional`; an open record's `**rest`) it's open: the fields written after the last spread are known and the
 spread's aren't, so `return (**rest, name=name.upper())` with no `->` is `(..., name: str)`. That's only
 where nothing says what's expected (a `return` with no `->`, a name with no annotation); inside a call or a
 list, say, it's `Any`. A field read off it that came with the spread says so, rather than to declare it:
 `"name" isn't on (..., zip: int): it's built from a spread of u, whose fields byname can't see. To check it,
 give u a record type; or read it unchecked with ["name"]`, and passing it where a type is expected says the
-same under its missing fields. A spread of a dict is the same, and silent until then. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
+same under its missing fields. A spread of a dict is the same, and silent until then. **Cost:** asking the
+checker means a second analysis of each such file: in the editor its diagnostics take about twice as long
+after an edit (0.4 s to 0.9 s on a 400-line torch file), and `byname tool basedpyright` runs the checker once
+more over those files (+0.5 to 1.3 s). Files without one cost nothing more. A spread of an index written in
+place, `(**users[0])`, isn't asked: name it first, `first = users[0]`. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
 `f((**u, **r))`.
 A field can't be called `keys`: records have a `keys()` method, which is what lets `**` work.
 
@@ -264,10 +272,11 @@ def greet(u: (..., name: str, age: int)):     # like def greet(name: str, age: i
 - **Empty or whole:** naming every field gives an empty record, `()`; `(**rest) = r` is a copy, equal to `r`.
 - **Typed from where the record came from:** a record literal, a name with a record type (a parameter, an
   annotated name, an imported type), or a call to a function that shows what it returns, in this file or a
-  .pyn module it imports: an exact type gives exactly the other fields, an open one `(..., age: int)` stays
-  open. Anything else (a loop's item, `users[0]`, a value typed `Any`) gives `(...)`: any record, read with
-  brackets (`rest["age"]`) only, and the editor and `byname tool` say how to give the record a type:
-  `row: User = users[0]`, or `u: User` before `for u in users`.
+  .pyn module it imports, or anything else the checker knows the type of (a loop's item, `users[0]`, a
+  method's result), asked of it as for spreads: an exact type gives exactly the other fields, an open one
+  `(..., age: int)` stays open. A record the checker can't type either (no annotation, `Any`, a union) gives
+  `(...)`: any record, read with brackets (`rest["age"]`) only, and the editor and `byname tool` say how to
+  give the record a type: `row: User = rows[0]`, or `rows: list[User]`.
 
 **Final:** `: Final` after a pattern makes every local it binds `Final`, nested, renamed and rest ones
 included, so a checker rejects changing one later in the scope:

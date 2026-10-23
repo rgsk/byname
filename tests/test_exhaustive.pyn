@@ -949,16 +949,56 @@ def test_a_spread_with_no_type_expected_is_open(tmp_path):
     assert greet((name="rahul", age=26, sex="male")) == (sex="male", name="RAHUL")
 
 
+def test_a_spread_is_exact_wherever_the_checker_knows_its_source(tmp_path):
+    # a spread source the file doesn't show the fields of (a loop's item, an index, a method's or call's result,
+    # an attribute) is asked of the checker: the file goes to it once with each such source in reveal_type, and
+    # its answers type the spreads. What the checker doesn't know either (no type, Any, a union) stays open
+    verdicts = checker(
+        """\
+        type User = (name: str, age: int)
+        class Db:
+            users: list[User] = []
+        def load() -> list[User]: ...
+        def f(users: list[User], db: Db, rows, maybe: User | None):
+            for u in users:
+                reveal_type((**u, zip=1))
+            first = users.pop()
+            reveal_type((**first, zip=1))
+            for u in load():
+                reveal_type((**u, zip=1))
+            for u in db.users:
+                moved = (**u, zip=1)
+                again = (**moved, city="x")  # a spread of a probed spread
+                reveal_type(again)
+            for r in rows:
+                open_ = (**r, zip=1)
+                reveal_type(open_)
+            m = (**maybe, zip=1)
+            reveal_type(m)
+        """,
+        tmp_path,
+    )
+    exact = 'is "(name: str, age: int, zip: int)"'
+    assert all(verdicts[n].endswith(exact) for n in [7, 9, 11])
+    assert verdicts[15] == 'Type of "again" is "(name: str, age: int, zip: int, city: str)"'
+    assert verdicts[18] == 'Type of "open_" is "(..., zip: int)"'
+    assert verdicts[20] == 'Type of "m" is "(..., zip: int)"'
+    assert sorted(verdicts) == [7, 9, 11, 15, 18, 20]
+
+    users = [(name="a", age=1)]
+    assert [(**u, zip=1) for u in users] == [(name="a", age=1, zip=1)]
+
+
 def test_a_field_a_spread_brought_says_where_it_went(tmp_path):
-    # a spread of a record whose fields byname can't see (a loop's item, a dict, a call it can't follow) builds
-    # an open record of the fields written after it: a field read off it, or a type it's passed as, says that
-    # it came from the spread and how to check it, not to declare it on a type nobody wrote
+    # a spread of a record whose fields nobody can see (an item of a list with no type, a dict) builds an open
+    # record of the fields written after it: a field read off it, or a type it's passed as, says that it came
+    # from the spread and how to check it, not to declare it on a type nobody wrote
     verdicts = checker(
         """\
         type User = (name: str, age: int)
         def take(p: User) -> None: ...
-        def f(users: list[User], d: dict[str, int], o: (..., name: str)):
-            for u in users:
+        def f(users: list[User], rows, d: dict[str, int], o: (..., name: str)):
+            for u in rows:
                 moved = (**u, zip=1)
                 moved.name
                 take(moved)
@@ -1327,26 +1367,27 @@ def test_rest_of_a_record_whose_fields_the_file_does_not_show_is_any_record(tmp_
     assert '"D" is not a record: **rest takes the rest of a record' in verdicts[9]
 
 
-def test_a_rest_s_record_gets_a_type_with_one_annotation(tmp_path):
-    # a loop's item or `users[0]`: byname doesn't follow them, and the rest is (...), with a hint. A type
+def test_a_rest_is_typed_wherever_the_checker_knows_its_record(tmp_path):
+    # byname asks the checker what a record it can't read off the file is (a loop's item, `users[0]`, a method's
+    # result), and the rest has the other fields. A record nobody gave a type is (...), with a hint; a type
     # written on the name, or declared before the loop or the branches binding it, gives the rest its fields
     verdicts = checker(
         """\
         type User = (name: str, age: int, city: str)
-        def f(users: list[User]) -> None:
+        def f(users: list[User], rows) -> None:
             for u in users:
                 (name=, **r1) = u
                 reveal_type(r1)
-            (name=, **r2) = users[0]
-            row: User = users[0]
-            (name=, **r3) = row
-            reveal_type(r3)
+            (name=, **r2) = users.pop()
+            reveal_type(r2)
+            for (name=, **r3) in users:
+                reveal_type(r3)
             w: User
-            for w in users:
+            for w in rows:
                 (name=, **r4) = w
                 reveal_type(r4)
-            for (name=, **r5) in users:
-                reveal_type(r5)
+            (name=, **r5) = rows[0]
+            reveal_type(r5)
             r: (..., name: str, age: int)  # bound to two shapes below: the declared type fits both
             if users:
                 r = users[0]
@@ -1357,14 +1398,13 @@ def test_a_rest_s_record_gets_a_type_with_one_annotation(tmp_path):
         """,
         tmp_path,
     )
-    hint = "is (...), any record, unchecked: byname can't tell the fields of the record it takes apart"
-    assert verdicts[4].startswith(f"r1 {hint}") and verdicts[6].startswith(f"r2 {hint}")
-    assert verdicts[14].startswith(f"r5 {hint}")
-    assert verdicts[5] == 'Type of "r1" is "(...)"'
-    assert verdicts[9] == 'Type of "r3" is "(age: int, city: str)"'
-    assert verdicts[13] == 'Type of "r4" is "(age: int, city: str)"'
+    exact = 'is "(age: int, city: str)"'
+    assert all(verdicts[n].endswith(exact) for n in [5, 7, 9])
+    assert verdicts[13] == 'Type of "r4" is "(age: Unknown | int, city: Unknown | str)"'  # rows' items may be any
+    assert verdicts[14].startswith("r5 is (...), any record, unchecked: byname can't tell the fields")
+    assert verdicts[15] == 'Type of "r5" is "(...)"'
     assert verdicts[22] == 'Type of "r6" is "(..., age: int)"'
-    assert sorted(verdicts) == [4, 5, 6, 9, 13, 14, 15, 22]
+    assert sorted(verdicts) == [5, 7, 9, 13, 14, 15, 22]
 
 
 # ============================================================================

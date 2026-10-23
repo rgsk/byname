@@ -1315,12 +1315,13 @@ def edit_cell(c, nb, uri, version, start, end, text):
     )
 
 
-def wait_errors(c, uri, want, timeout=30) -> list[tuple[int, str]]:
-    """The cell's errors once they match `want`: after an edit the checker may republish the old ones first."""
+def wait_errors(c, uri, want, timeout=30, key=None) -> list[tuple[int, str]]:
+    """The cell's errors once they match `want`: after an edit the checker may republish the old ones first.
+    key: what of each message to compare."""
     end = time.time() + timeout
     while True:
         got = errors(c.diags.get(uri, []))
-        if got == want or time.time() > end:
+        if ([(n, key(m)) for n, m in got] if key else got) == want or time.time() > end:
             return got
         try:
             c.handle(c.q.get(timeout=0.5))
@@ -1719,10 +1720,28 @@ def test_a_dot_read_of_an_undeclared_field_on_an_open_type_says_how_to_declare_i
     assert wait_errors(c, uri, [(1, want)]) == [(1, want)]
 
 
+def test_a_spread_of_what_only_the_checker_knows_is_exact_in_the_editor(lsp):
+    # u's type isn't on u: the file goes to the checker first as a probe, whose answer types the spread
+    # (Proxy.probed); the probe's own diagnostics, its reveal_type notes, are never shown
+    c, root, _ = lsp
+    text = (
+        "type User = (name: str, age: int)\n"
+        "def f(users: list[User]):\n"
+        "    for u in users:\n"
+        "        moved = (**u, zip=1)\n"
+        "        print(moved.name, moved.nmae)\n"
+    )
+    uri = c.open(root / "probed.pyn", text)
+    want = [(4, 'Cannot access attribute "nmae" for class "(name: str, age: int, zip: int)"')]
+    assert [(n, m.split("\n")[0]) for n, m in wait_errors(c, uri, want, key=lambda m: m.split("\n")[0])] == want
+    assert not [d for d in c.diags[uri] if "Type of" in d["message"]]
+    assert "moved: (name: str, age: int, zip: int)" in hover_text(c, uri, pos(text, "moved ="))
+
+
 def test_a_field_a_spread_brought_says_where_it_went_as_byname_tool_does(lsp):
     # the field came with `u`, whose fields byname can't see: the editor says so, word for word as the tool
     c, root, _ = lsp
-    text = "def f(users: list[(name: str)]):\n    for u in users:\n        moved = (**u, zip=1)\n        print(moved.name)\n"
+    text = "def f(users):\n    for u in users:\n        moved = (**u, zip=1)\n        print(moved.name)\n"
     uri = c.open(root / "spread_unseen.pyn", text)
     want = (
         "\"name\" isn't on (..., zip: int): it's built from a spread of u, whose fields byname can't see. To check"

@@ -264,6 +264,9 @@ class Result:
     declared_reads: list[tuple[int, int, str]] = field(default_factory=list)
     # checker: source spans of each `**rest` whose source's fields the file doesn't show, typed `(...)` (rest_of)
     unknown_rests: list[tuple[int, int]] = field(default_factory=list)
+    # checker: (name, line) of each bare-name spread source and each rest's `_ds` whose fields the file doesn't
+    # show; a probe translation wraps each in `reveal_type(...)`, to ask the checker (srcmap.probed_from)
+    unseen: list[tuple[str, int]] = field(default_factory=list)
 
 
 def field_error(name: str) -> str:
@@ -523,6 +526,7 @@ class _Bind:
     source: "Source | None"
     where: tuple["_Scope", int]  # the scope and statement the source is read in
     anywhere: bool = False
+    line: int = 0  # an assignment target's line: a pattern's `_ds` is read on the line binding it
 
 
 @dataclass(eq=False)
@@ -606,7 +610,12 @@ def untyped_builds(body: str) -> set[tuple[int, int]]:
     return out
 
 
-def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False) -> dict[tuple[str, int], Known]:
+def known_fields(
+    body: str,
+    lookup: Lookup | None = None,
+    exports: bool = False,
+    probed: dict[tuple[str, int], Known] | None = None,
+) -> dict[tuple[str, int], Known]:
     """The record fields of names read in the translation, by (name, line), where a binding shows them: a
     record literal, a spread record of such names, the rest of such a name (`**rest`), an annotation with a record type (inline, a `type`
     alias, one imported with `from module import name` that lookup finds, or a parameter's), or
@@ -614,7 +623,9 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
     scoped as in Python (function, lambda, comprehension, class). A read is known when every binding that
     may reach it shows the same fields (reaching): any of them may be the one that ran, and a wrong field
     set would be worse than the generic spread path. exports: instead, the module's own names as another
-    module importing it sees them, by (name, 0). Checker translation only (see known_build)."""
+    module importing it sees them, by (name, 0). probed: what the checker said a read the file doesn't show
+    is, by (name, line) (srcmap.probed_from): the fields of a read byname can't tell. Checker translation only
+    (see known_build)."""
     tree = parse_around_errors(body)
     if tree is None:
         return {}
@@ -632,13 +643,14 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
         straight: bool,
         source: Source | None = None,
         where: tuple[_Scope, int] | None = None,
+        line: int = 0,
     ) -> None:
         if name in scope.globals:  # the module's name, rebound whenever the function runs
             while scope.parent is not None:
                 scope = scope.parent
             scope.binds.setdefault(name, []).append(_Bind(at, False, source, where or (scope, at), anywhere=True))
             return
-        scope.binds.setdefault(name, []).append(_Bind(at, straight, source, where or (scope, at)))
+        scope.binds.setdefault(name, []).append(_Bind(at, straight, source, where or (scope, at), line=line))
 
     def body_of(stmts: list[ast.stmt], scope: _Scope) -> None:
         for at, s in enumerate(stmts):
@@ -710,7 +722,7 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
             if isinstance(node.ctx, ast.Load):
                 reads.append((node.id, node.lineno, scope, at))
             else:
-                bind(scope, node.id, at, straight, sources.get(id(node)))
+                bind(scope, node.id, at, straight, sources.get(id(node)), line=node.lineno)
         elif isinstance(node, ast.NamedExpr):
             bind(scope, node.target.id, at, False)  # rebinds mid-statement: never the nearest one alone
             visit(node.value, scope, at, straight)
@@ -808,7 +820,7 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
 
     def of_value(e: ast.expr, scope: _Scope, at: int) -> Known | None:
         if isinstance(e, ast.Name):
-            got = resolve(e.id, scope, at)
+            got = resolve(e.id, scope, at) or (probed or {}).get((e.id, e.lineno))
             return got if got is None or not got.returns else None  # a function isn't a record
         if (  # `rec._asdict()`: a dict with the record's fields
             isinstance(e, ast.Call)
@@ -864,8 +876,12 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
         return {(name, 0): k for name, k in zip(module.binds, names) if k is not None}
     out: dict[tuple[str, int], Known | None] = {}
     for name, line, scope, at in reads:
-        got = resolve(name, scope, at)
         key = (name, line)
+        if name == DS:  # byname's own, read on the line of the pattern statement binding it: that binding
+            own = [b for b in scope.binds.get(DS, []) if b.line == line]
+            got = (of_bind(own[0], DS) if len(own) == 1 else None) or (probed or {}).get(key)
+        else:
+            got = resolve(name, scope, at) or (probed or {}).get(key)
         out[key] = got if out.get(key, got) == got else None  # two reads on a line that disagree: unknown
     return {key: k for key, k in out.items() if k is not None}
 
@@ -879,13 +895,17 @@ def transform(
     known: dict[tuple[str, int], Known] | None = None,
     lookup: Lookup | None = None,
     untyped: set[tuple[int, int]] | None = None,
+    probed: dict[tuple[str, int], Known] | None = None,
+    probe: bool = False,
 ) -> Result:
     """tolerant (editor only): a half-typed pattern item like `na` in `(name=, na) = r` becomes
     `_ds.na` instead of an error, so the checker can complete field names there.
     checker: the translation only type checkers see; works around their bugs (see KW_PRELUDE). Never run.
     known: fields of names read in the file, by (name, line) (known_fields); set by the checker translation's second pass.
     untyped: spread records built where no type is expected (untyped_builds); set by that second pass too.
-    lookup: fields of record types imported from other modules (imports.Modules), for known_fields."""
+    lookup: fields of record types imported from other modules (imports.Modules), for known_fields.
+    probed: the checker's types of what the file doesn't show (Result.unseen), for known_fields.
+    probe: wrap each unseen source in `reveal_type(...)`, so the checker prints its type (srcmap.probed_from)."""
     toks = [
         t for t in tokenize.generate_tokens(io.StringIO(src).readline) if t.type not in (tokenize.COMMENT, tokenize.NL)
     ]
@@ -953,6 +973,7 @@ def transform(
     shorthand_spans: list[tuple[int, int]] = []  # every bare `x=`, see Result.shorthands
     sites: list[tuple[tuple[str, ...], bool, bool]] = []  # checker: (fields, is_open, is_literal), see site_class
     spread_marks: dict[int, str] = {}  # checker: site -> SPREAD's marker (open_build)
+    unseen: list[tuple[str, int]] = []  # checker: Result.unseen
     type_fields: list[tuple[str, str, int, int]] = []  # see Result.type_fields
 
     def literal_class(fields: tuple[str, ...]) -> str:
@@ -1103,9 +1124,9 @@ def transform(
         types[(fields, True)] = None
         sites.append((fields, True, True))
         # the sources whose fields byname can't see: not an open record it knows, which is open by design
-        unseen = [it for it in its if toks[it[0]].string == "**" and not is_open_known(it)]
-        if unseen:
-            bare = [toks[it[1]].string for it in unseen if len(it) == 2 and is_name(toks[it[1]])]
+        unseen_its = [it for it in its if toks[it[0]].string == "**" and not is_open_known(it)]
+        if unseen_its:
+            bare = [toks[it[1]].string for it in unseen_its if len(it) == 2 and is_name(toks[it[1]])]
             spread_marks[len(sites) - 1] = SPREAD + "".join(f"__{x}" for x in bare)
         g0 = span(i)[0]
         site = f"{len(sites) - 1}{spread_marks.get(len(sites) - 1, '')}"
@@ -1113,8 +1134,12 @@ def transform(
         for it in its:
             if toks[it[0]].string == "**":
                 a, b = off(toks[it[1]].start), off(toks[it[-1]].end)
-                edits.append(Edit(a, a, "_byname_loose(", span(it[1], it[-1])))
-                edits.append(Edit(b, b, ")", span(it[1], it[-1])))
+                ask = it in unseen_its and len(it) == 2 and is_name(toks[it[1]])
+                if ask:
+                    unseen.append((toks[it[1]].string, toks[it[1]].start[0]))
+                ask = ask and probe
+                edits.append(Edit(a, a, "_byname_loose(" + "reveal_type(" * ask, span(it[1], it[-1])))
+                edits.append(Edit(b, b, ")" + ")" * ask, span(it[1], it[-1])))
             else:  # the field name as generated text, as in known_build
                 f = toks[it[0]].string
                 edits.append(Edit(off(toks[it[0]].start), off(toks[it[0]].end), f, span(it[0])))
@@ -1171,8 +1196,13 @@ def transform(
             for k, it in enumerate(hoist):
                 defaults += f", _byname_s{k}=_byname_kw({toks[it[1]].string})"
                 a, b = span(it[1])
-                edits.append(Edit(a, a, "_byname_pick(", (a, b)))
-                edits.append(Edit(b, b, f", _byname_s{k})", (a, b)))
+                name = toks[it[1]]
+                ask = (name.string, name.start[0]) not in (known or {})
+                if ask:
+                    unseen.append((name.string, name.start[0]))
+                ask = ask and probe
+                edits.append(Edit(a, a, "_byname_pick(" + "reveal_type(" * ask, (a, b)))
+                edits.append(Edit(b, b, ")" * ask + f", _byname_s{k})", (a, b)))
                 kw_used = True
             pre, post = f"{ctx}(lambda _byname_t{defaults}: _byname_check(lambda: _byname_t)({{", "}))"
         else:
@@ -1286,6 +1316,10 @@ def transform(
         unknown_rests.append(span(rest[0], rest[-1]))
         omits[taken] = None
         types[(), True] = None
+        if line is not None and not chain:
+            unseen.append((DS, line))
+            if probe:
+                return text + omit_name(taken) + f"(reveal_type({DS}))"
         return access(chain, text + omit_name(taken) + "(", marks) + ")"
 
     def bindings(node: list, chain: list[int], text: str, marks: list[Mark], ann: tuple[int, int] | None) -> str:
@@ -1622,8 +1656,8 @@ def transform(
                     text += ", " if k else ""
                     if kind == "nested":
                         text = element(it[2], val, [*chain, it[0]], text, marks)
-                    elif kind == "rest":
-                        text = omit(node, chain, text, marks)
+                    elif kind == "rest":  # read on the line of `in`, where the element goes (rest_of)
+                        text = omit(node, chain, text, marks, toks[close + 1].start[0])
                     else:
                         text = access([*chain, it[0]], text, marks)
                 return text + ("" if single else ",)" if len(node) == 1 else ")")
@@ -1726,9 +1760,9 @@ def transform(
     # checker: spread records and rests of names whose fields the file shows get their exact type (known_build,
     # rest_of)
     if checker and known is None and (builds or omit_used):
-        k, u = known_fields(body, lookup), untyped_builds(body)
-        if k or u:
-            return transform(src, path, tolerant, portable, checker, known=k, lookup=lookup, untyped=u)
+        k, u = known_fields(body, lookup, probed=probed), untyped_builds(body)
+        if k or u or probe:
+            return transform(src, path, tolerant, portable, checker, k, lookup, u, probed, probe)
 
     def base_prelude() -> str:
         # the checker's translation never runs, so it doesn't read the project's config
@@ -1887,6 +1921,7 @@ def transform(
         type_fields,
         declared_reads() if checker and tolerant else [],
         unknown_rests,
+        unseen,
     )
 
 

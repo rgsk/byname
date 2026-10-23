@@ -13,7 +13,7 @@ from bisect import bisect_right
 from functools import cached_property
 from pathlib import Path
 
-from .transform import Edit, Mark, prelude_offset, transform
+from .transform import SPREAD, Edit, Known, Mark, class_fields, prelude_offset, transform
 
 Hit = tuple[Edit, Mark | None] | None  # what generated text a body offset landed on
 
@@ -108,19 +108,65 @@ class LineIndex:
 def unknown_rest(name: str) -> str:
     """The hint on a `**rest` typed `(...)` (transform.rest_of), in the editor and `byname tool`."""
     return (
-        f"{name} is (...), any record, unchecked: byname can't tell the fields of the record it takes apart."
-        " Give that record a type: `row: User = users[0]`, or `u: User` before `for u in users`"
+        f"{name} is (...), any record, unchecked: byname can't tell the fields of the record it takes apart,"
+        " nor can the checker. Give that record a type: `row: User = rows[0]`, or `rows: list[User]`"
     )
+
+
+Probed = dict[tuple[str, int], Known]
+# the checker's answers for a file, by path: (the source they're for, what it said), set by `byname tool`
+# before it translates (tools.probe), so every Translation of that text reads the same types
+PROBED: dict[Path, tuple[str, Probed]] = {}
+# a probe's answer: `Type of "u" is "_typ_name__age___0[str, int]"`; an open record `_opn_...`
+REVEAL = re.compile(r'Type of "(\w+)" is "(_typ_|_opn_)(\w+)(.*)"$')
+
+
+def one_type(args: str) -> bool:
+    """`[str, list[int]]` after a class name is its own type arguments, nothing after: not `[str] | B[int]`."""
+    if not args:
+        return True
+    depth = 0
+    for k, c in enumerate(args):
+        depth += {"[": 1, "]": -1}.get(c, 0)
+        if depth == 0:
+            return args[0] == "[" and k == len(args) - 1
+    return False
+
+
+def probed_from(found: list[tuple[int, str]], tr: "Translation") -> Probed:
+    """What the checker said each unseen source of tr's probe translation is: its revealed record type's
+    fields, by (name, source line), from (hidden line, message) pairs, 0-based. A type that isn't one record
+    (a union, a dict, Any) or is itself built from unseen spreads says nothing, and is left out."""
+    shift = tr.hidden.count("\n", tr.at, tr.at + tr.plen)
+    first = tr.hidden.count("\n", 0, tr.at + tr.plen)  # the body's line after the prelude
+    asked = set(tr.unseen)
+    out: Probed = {}
+    for line, message in found:
+        m = REVEAL.match(message)
+        if m is None or SPREAD in m[3] or not one_type(m[4]):
+            continue
+        key = (m[1], line + 1 - (shift if line >= first else 0))
+        if key in asked:
+            got = Known(class_fields(m[3]), is_open=m[2] == "_opn_")
+            out[key] = got if out.get(key, got) == got else None  # two answers on a line that disagree
+    return {k: v for k, v in out.items() if v is not None}
 
 
 class Translation:
     """A .pyn source and its hidden Python, with LSP position mapping both ways."""
 
-    def __init__(self, source: str, path: Path | None = None):
-        """path: the file, to find record types it imports from other modules (imports.Modules)."""
+    def __init__(self, source: str, path: Path | None = None, probe: bool = False, probed: Probed | None = None):
+        """path: the file, to find record types it imports from other modules (imports.Modules).
+        probe: wrap each unseen spread source and rest in `reveal_type(...)` (transform's probe); probed: the
+        checker's answers (probed_from), which make them known. Without, those `byname tool` has for this
+        text (PROBED)."""
         from .imports import Modules
 
+        if probed is None and path is not None and (got := PROBED.get(path)) is not None and got[0] == source:
+            probed = got[1]
         self.source = source
+        self.probe = probe
+        self.unseen: list[tuple[str, int]] = []  # see Result.unseen
         lookup = Modules(path) if path is not None else None
         self.imports: set[Path] = set()  # module files whose record types the translation used
         self.error: Exception | None = None
@@ -132,13 +178,14 @@ class Translation:
         self.unknown_rests: list[tuple[int, int]] = []  # see Result.unknown_rests
         self.labels: set[int] = set()  # where a walrus labelling a returned tuple starts (see Result.labels)
         try:
-            r = transform(source, tolerant=True, checker=True, lookup=lookup)
+            r = transform(source, tolerant=True, checker=True, lookup=lookup, probed=probed, probe=probe)
             body, prelude, edits = r.body, r.prelude, r.edits
             self.fields = r.fields
             self.shorthands = r.shorthands
             self.type_fields = r.type_fields
             self.reads = r.declared_reads
             self.unknown_rests = r.unknown_rests
+            self.unseen = r.unseen
             self.labels = {s for s, _ in r.labels}
         except Exception as e:  # mid-edit code: send it raw; the checker reports the syntax error
             self.error = e

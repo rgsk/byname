@@ -28,7 +28,7 @@ from urllib.parse import quote, urlparse
 from urllib.request import url2pathname
 
 from .output import output_path, render
-from .srcmap import LineIndex, Translation
+from .srcmap import LineIndex, Probed, Translation, probed_from
 from .transform import DS, FIELDSET, ORDER, REPR, BynameError, pattern_slot
 
 DEFAULT_CHECKER = ["basedpyright-langserver", "--stdio"]
@@ -811,13 +811,19 @@ def resolve_checker(cmd: list[str]) -> list[str]:
 
 
 class Doc:
-    def __init__(self, uri: str, text: str, version: int | None):
+    def __init__(self, uri: str, text: str, version: int | None, probe: bool = False, probed: Probed | None = None):
+        """probe: the text goes to the checker as the document; if its spreads or rests read sources byname
+        can't see, it goes first as a probe translation, and its diagnostics bring the final one (Proxy.probed).
+        probed: the checker's answers, for that final one."""
         self.uri = uri
         self.version = version  # the editor's version
         self.sent: int | None = None  # version we sent to the checker (we number them ourselves)
         # the file (a cell's notebook), where the record types it imports are looked up from
         self.path = uri_to_path(uri) if urlparse(uri).scheme in ("file", "vscode-notebook-cell") else None
-        self.tr = Translation(text, self.path)
+        self.tr = Translation(text, self.path, probed=probed)
+        self.probing = probe and probed is None and bool(self.tr.unseen)
+        if self.probing:
+            self.tr = Translation(text, self.path, probe=True)
 
 
 class Notebook:
@@ -881,6 +887,8 @@ class Proxy:
         self.held: dict[Path, dict] = {}  # newest diagnostics not shown yet, per open .pyn
         self.shown: dict[Path, list] = {}  # diagnostics the editor shows now, per open .pyn
         self.held_lock = threading.Lock()  # diagnostics arrive on the checker thread, saves on ours
+        # a probe's answer sends the final text from the checker thread: never after a newer edit (probed)
+        self.text_lock = threading.RLock()
 
     # paths --------------------------------------------------------------
 
@@ -1238,7 +1246,7 @@ class Proxy:
         uri = td.get("uri")
 
         if method == "textDocument/didOpen":
-            doc = Doc(uri, td["text"], td.get("version"))
+            doc = Doc(uri, td["text"], td.get("version"), probe=True)
             doc.sent = self.next_version()
             self.docs[path] = [doc]
             self.saved[path] = doc.version  # opened from disk, so this text is the saved one
@@ -1248,10 +1256,11 @@ class Proxy:
             return True
         if method == "textDocument/didChange":
             text = params["contentChanges"][-1]["text"]  # we advertise full sync
-            doc = Doc(uri, text, td.get("version"))
-            self.docs.setdefault(path, []).append(doc)
-            del self.docs[path][:-5]
-            self.send_text(path, doc.tr.hidden, doc)
+            doc = Doc(uri, text, td.get("version"), probe=True)
+            with self.text_lock:
+                self.docs.setdefault(path, []).append(doc)
+                del self.docs[path][:-5]
+                self.send_text(path, doc.tr.hidden, doc)
             return True
         if method == "textDocument/didSave":
             versions = self.docs.get(path)
@@ -1286,10 +1295,11 @@ class Proxy:
         for key, versions in self.docs.items():
             doc = versions[-1]
             if key != saved and saved in doc.tr.imports:
-                again = Doc(doc.uri, doc.tr.source, doc.version)
-                versions.append(again)
-                del versions[:-5]
-                self.send_text(key, again.tr.hidden, again)
+                again = Doc(doc.uri, doc.tr.source, doc.version, probe=True)
+                with self.text_lock:
+                    versions.append(again)
+                    del versions[:-5]
+                    self.send_text(key, again.tr.hidden, again)
 
     # notebooks ----------------------------------------------------------
 
@@ -1303,7 +1313,7 @@ class Proxy:
         if not nb.byname:
             self.docs.pop(uri, None)
             return {"uri": uri, "version": v, "text": text}
-        doc = Doc(uri, text, self.cell_version.get(uri))
+        doc = Doc(uri, text, self.cell_version.get(uri), probe=True)
         doc.sent = v
         self.docs.setdefault(uri, []).append(doc)
         del self.docs[uri][:-5]
@@ -1384,8 +1394,25 @@ class Proxy:
         self.send_server({**msg, "params": {**params, "change": {**change, "cells": cells}}})
 
     def next_version(self) -> int:
-        self.counter += 1
-        return self.counter
+        with self.text_lock:
+            self.counter += 1
+            return self.counter
+
+    def probed(self, doc: Doc, key: Path | str, diagnostics: list[dict]) -> None:
+        """The checker's diagnostics on a probe translation: its `reveal_type` answers (probed_from) make the
+        final translation, sent in its place, unless a newer text went since. Their own diagnostics aren't
+        shown: the final's follow."""
+        if not diagnostics:  # the checker clears a file before it analyses it; a translation always gets some
+            return
+        found = [(d["range"]["start"]["line"], d.get("message", "")) for d in diagnostics]
+        final = Doc(doc.uri, doc.tr.source, doc.version, probed=probed_from(found, doc.tr))
+        with self.text_lock:
+            versions = self.docs.get(key)
+            if not versions or versions[-1] is not doc:
+                return
+            versions.append(final)
+            del versions[:-5]
+            self.send_text(key, final.tr.hidden, final)
 
     def send_text(self, key: Path | str, hidden: str, doc: Doc | None) -> None:
         """didChange to the checker; doc=None marks a temporary completion-only text. A cell changes
@@ -1979,6 +2006,10 @@ class Proxy:
         key = self.key(doc.uri)
         if key not in self.docs:
             return None  # closed .pyn: its translation's diagnostics have nowhere to go
+        if doc.probing:
+            if key is not None:
+                self.probed(doc, key, params.get("diagnostics", []))
+            return None
         out = [*doc.tr.problems, *doc.tr.hints]
         flagged = {(p["range"]["start"]["line"], p["range"]["start"]["character"]) for p in out}
         # a broken byname rule: the checker got the raw .pyn, so all it says is noise (`"(" was not closed`)
