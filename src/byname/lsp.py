@@ -402,7 +402,9 @@ def parameter_type(help: dict | None) -> str | None:
     return pretty(written.split(" = ", 1)[0].strip()) if colon else None
 
 
-SITE_RE = re.compile(r"(_(?:rec|typ|opn)_\w*?)___\d+\b")
+SITE_RE = re.compile(r"(_(?:rec|typ|opn)_\w*?)___\d+(?:_spread\w*)?\b")  # and transform.SPREAD's marker
+# a record a spread built where no type was expected, from sources whose fields byname can't see (transform.SPREAD)
+SPREAD_RE = re.compile(r"_opn_\w*?___\d+_spread((?:__\w+?)*)(?![\w])")
 # a record type repeated in a union, once site numbers are gone: `(a: int) | (a: int)`
 COVARIANT_RE = re.compile(r"\b_byname_T(\d+)\b")
 REPEAT_RE = re.compile(r"(_(?:rec|typ|opn)_\w+(?:\[(?:[^\[\]]|\[[^\[\]]*\])*\])?)(?: \| \1(?![\w\[]))+")
@@ -579,11 +581,35 @@ def by_name_edit(src: str, start: int, end: int, fields: list[str]) -> tuple[int
     return a, b, "(" + ", ".join(f"{i}=" if "=" not in i else i for i in items) + ")"
 
 
+def spread_source(msg: str) -> str | None:
+    """If msg is about a record a spread built where no type was expected, from sources whose fields byname
+    can't see (transform.SPREAD): where its fields went, and how to get them back."""
+    if (m := SPREAD_RE.search(msg)) is None:
+        return None
+    names = [x for x in m[1].split("__") if x]
+    if not names:
+        return "it's built from a spread whose fields byname can't see. To check it, give what you spread a record type"
+    return (
+        f"it's built from a spread of {', '.join(names)}, whose fields byname can't see. "
+        f"To check it, give {' and '.join(names)} a record type"
+    )
+
+
 def explain_fields(msg: str) -> str:
     """An exact record type rejected a record whose field set differs. pyright's message is a page about
     FIELDSET, a generated property; keep the first line and say which fields are extra or missing.
     Likewise a record built from spreads, checked as a dict against the type's TypedDict (`_dct_`)."""
+    spread = spread_source(msg)
     msg = unsite(msg)
+    if spread and (m := UNDECLARED_RE.search(msg)):
+        # not a type anyone wrote, so not one to declare the field on: the fields are the spread source's
+        f, typ = m[1], pretty(m[2])
+        rule = RULE_RE.search(msg.split("\n")[-1])
+        return (
+            msg[: m.start()]
+            + f'"{f}" isn\'t on {typ}: {spread}; or read it unchecked with ["{f}"]'
+            + (f" ({rule[1]})" if rule else "")
+        )
     if m := UNDECLARED_RE.search(msg):
         # the gradual path for open records: `p: (...)` read with brackets, unchecked, until its fields are
         # declared; a dot read is the checked one, so say how to get there
@@ -649,6 +675,8 @@ def explain_fields(msg: str) -> str:
         out.append(f"{indent}extra field{'s' if len(extra) > 1 else ''}: {', '.join(extra)}")
     if missing := sorted(want - got):
         out.append(f"{indent}missing field{'s' if len(missing) > 1 else ''}: {', '.join(missing)}")
+        if spread:  # they may well be there: the checker can't see them
+            out.append(f"{indent}{spread}")
     if rule := RULE_RE.search(lines[-1]):  # the CLI puts the rule name at the end; keep it there
         out[-1] += f" ({rule[1]})"
     return "\n".join(out)

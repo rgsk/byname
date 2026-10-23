@@ -671,12 +671,15 @@ def test_spread_records_of_known_names_are_plain_records():
     )
     lines = re.sub(r"___\d+", "", transform(src, checker=True).body).splitlines()
     assert lines[2] == "    x = _rec_a__b__z(a=c.a, b=c.b, z=1)"
-    assert lines[3] == "    y = _rec_z(**_byname_loose(d), z=1)"  # no type expected: open_build
+    assert lines[3] == "    y = _rec_z_spread__d(**_byname_loose(d), z=1)"  # no type expected: open_build
     assert lines[6] == "again = _rec_a__b(a=n.a, b='y')"
     assert lines[8] == "w1 = _rec_a(a=w.a,)"
     assert lines[10] == "w2 = _rec_a__b(a=w.a, b=w.b,)"
     assert lines[11] == "w = _rec_a__b__c(a=w.a, b=w.b, c=3)"
-    assert lines[13] == "    return _rec_(**_byname_loose(w),)" and lines[16] == "w3 = _rec_(**_byname_loose(w),)"
+    assert (
+        lines[13] == "    return _rec__spread__w(**_byname_loose(w),)"
+        and lines[16] == "w3 = _rec__spread__w(**_byname_loose(w),)"
+    )
     assert "_byname_ctx(" in lines[17]  # a list's element: the generic path
     assert lines[18] == "m = [_rec_a__b(a=t.a, b=t.b,) for _ in [w]]"
     assert "_rec_" not in transform(SPREADS).body.split("both = ")[1].split("\n")[0]  # runtime: _byname_rec
@@ -688,7 +691,7 @@ def test_a_spread_of_a_call_whose_function_shows_its_fields_is_a_plain_record():
     body = transform(src, checker=True).body.splitlines()
     assert body[2] == "x = _rec_name__age__zip___1(name=(_byname_v0 := make()).name, age=_byname_v0.age, zip=1)"
     # the second overrides every field of the first: not a plain record; no type expected, so open (open_build)
-    assert body[3] == "y = _rec____2(**_byname_loose(make()), **_byname_loose(make()))"
+    assert body[3] == "y = _rec____2_spread(**_byname_loose(make()), **_byname_loose(make()))"  # no names to give
     assert transform(src).body.splitlines()[2] == "x = _byname_rec({**make(), 'zip': 1})"
 
 
@@ -699,7 +702,7 @@ def test_spread_records_as_call_arguments_fall_back_to_a_record():
     lines = transform(src, checker=True).body.splitlines()
     assert [ln.count("_byname_arg(") for ln in lines] == [1, 1, 1, 0, 0, 0, 0]
     assert [ln.count("_byname_ctx(") for ln in lines] == [0, 0, 0, 0, 1, 1, 1]
-    assert lines[3] == "x = _rec____0(**_byname_loose(u))"
+    assert lines[3] == "x = _rec____0_spread__u(**_byname_loose(u))"
 
 
 def test_spread_record_errors():

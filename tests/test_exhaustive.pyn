@@ -949,6 +949,43 @@ def test_a_spread_with_no_type_expected_is_open(tmp_path):
     assert greet((name="rahul", age=26, sex="male")) == (sex="male", name="RAHUL")
 
 
+def test_a_field_a_spread_brought_says_where_it_went(tmp_path):
+    # a spread of a record whose fields byname can't see (a loop's item, a dict, a call it can't follow) builds
+    # an open record of the fields written after it: a field read off it, or a type it's passed as, says that
+    # it came from the spread and how to check it, not to declare it on a type nobody wrote
+    verdicts = checker(
+        """\
+        type User = (name: str, age: int)
+        def take(p: User) -> None: ...
+        def f(users: list[User], d: dict[str, int], o: (..., name: str)):
+            for u in users:
+                moved = (**u, zip=1)
+                moved.name
+                take(moved)
+            m = (**d, zip=1)
+            m.name
+            v: User
+            for v in users:
+                exact = (**v, zip=1)
+                exact.name
+            (name=, **rest) = o
+            back = (**rest, zip=1)
+            back.agee
+        """,
+        tmp_path,
+    )
+    seen = "whose fields byname can't see"
+    assert verdicts[6] == (
+        f'"name" isn\'t on (..., zip: int): it\'s built from a spread of u, {seen}. To check it, give u a record'
+        ' type; or read it unchecked with ["name"] (reportAttributeAccessIssue)'
+    )
+    assert f"missing fields: age, name\nit's built from a spread of u, {seen}. To check it, give u a record type" in verdicts[7]
+    assert verdicts[9].startswith(f'"name" isn\'t on (..., zip: int): it\'s built from a spread of d, {seen}')
+    # a known record spreads exactly (line 13: no error); an open one carries fields nobody declared, by design
+    assert verdicts[16].startswith('"agee" isn\'t declared on (..., zip: int): declare it')
+    assert sorted(verdicts) == [6, 7, 9, 16]
+
+
 def test_a_spread_of_known_records_is_typed_without_an_annotation(tmp_path):
     verdicts = checker(
         """\

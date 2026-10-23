@@ -1719,6 +1719,23 @@ def test_a_dot_read_of_an_undeclared_field_on_an_open_type_says_how_to_declare_i
     assert wait_errors(c, uri, [(1, want)]) == [(1, want)]
 
 
+def test_a_field_a_spread_brought_says_where_it_went_as_byname_tool_does(lsp):
+    # the field came with `u`, whose fields byname can't see: the editor says so, word for word as the tool
+    c, root, _ = lsp
+    text = "def f(users: list[(name: str)]):\n    for u in users:\n        moved = (**u, zip=1)\n        print(moved.name)\n"
+    uri = c.open(root / "spread_unseen.pyn", text)
+    want = (
+        "\"name\" isn't on (..., zip: int): it's built from a spread of u, whose fields byname can't see. To check"
+        ' it, give u a record type; or read it unchecked with ["name"]'
+    )
+    assert wait_errors(c, uri, [(3, want)]) == [(3, want)]
+    d = next(d for d in c.diags[uri] if d.get("severity", 1) == 1)
+    actions = c.request(
+        "textDocument/codeAction", {"textDocument": {"uri": uri}, "range": d["range"], "context": {"diagnostics": [d]}}
+    )
+    assert actions[0]["title"] == 'Read it unchecked: moved["name"]'
+
+
 def test_an_undeclared_field_on_an_open_type_offers_reading_it_unchecked(lsp):
     # brackets say "unchecked" in the text; pyright's own fix, an ignore comment, leaves `p.msg` looking checked
     c, root, _ = lsp

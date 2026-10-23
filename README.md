@@ -169,7 +169,10 @@ fields. Otherwise (bindings with different fields, a call to a method or to a fu
 record, an open record's `**rest`) it's open: the fields written after the last spread are known and the
 spread's aren't, so `return (**rest, name=name.upper())` with no `->` is `(..., name: str)`. That's only
 where nothing says what's expected (a `return` with no `->`, a name with no annotation); inside a call or a
-list, say, it's `Any`. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
+list, say, it's `Any`. A field read off it that came with the spread says so, rather than to declare it:
+`"name" isn't on (..., zip: int): it's built from a spread of u, whose fields byname can't see. To check it,
+give u a record type; or read it unchecked with ["name"]`, and passing it where a type is expected says the
+same under its missing fields. A spread of a dict is the same, and silent until then. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
 `f((**u, **r))`.
 A field can't be called `keys`: records have a `keys()` method, which is what lets `**` work.
 

@@ -305,12 +305,19 @@ def covariant_defs(n: int) -> str:
     return "".join(f"_byname_T{i} = _t.TypeVar('_byname_T{i}', covariant=True)\n" for i in range(n))
 
 
-def site_class(name: str, n: int) -> str:
+def site_class(name: str, n: int | str) -> str:
     """Checker only: the class of one record literal or written record type, the n-th in the file,
     `_typ_name___3`. Records match by shape, so sites with the same fields are still the same type; but each
     has its own fields, so a rename reaches only the records that came from that site: renaming `r.name`
-    renames the literal `r` was made from, not another record that happens to have a `name` field."""
+    renames the literal `r` was made from, not another record that happens to have a `name` field.
+    n may carry SPREAD's marker, `3_spread__u`: the error on a field it lacks says where it came from."""
     return f"{name}___{n}"
+
+
+# a record built from a spread whose source's fields byname can't see, where no type is expected (open_build):
+# its site's marker, with the sources that are bare names, `_opn_zip___3_spread__u`. A field read off it that
+# isn't there is then explained as a spread's (lsp.explain_fields), in the editor and `byname tool` alike
+SPREAD = "_spread"
 
 
 def class_fields(suffix: str) -> tuple[str, ...]:
@@ -442,7 +449,7 @@ def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
     return "if _t.TYPE_CHECKING:\n" + indent(checker) + "else:\n" + indent(out)
 
 
-def site_def(fields: tuple[str, ...], is_open: bool, n: int, literal: bool) -> str:
+def site_def(fields: tuple[str, ...], is_open: bool, n: int | str, literal: bool) -> str:
     """Checker only: one record literal's or written record type's own class (site_class): the shared type of
     its fields, with the fields (and `_replace`'s keywords) declared again, so they're its own symbols. For
     a literal, also its function, as record_def's checker side; an open one (open_build) takes any other
@@ -945,6 +952,7 @@ def transform(
     field_spans: list[tuple[int, int]] = []  # every record field name: in records, patterns and record types
     shorthand_spans: list[tuple[int, int]] = []  # every bare `x=`, see Result.shorthands
     sites: list[tuple[tuple[str, ...], bool, bool]] = []  # checker: (fields, is_open, is_literal), see site_class
+    spread_marks: dict[int, str] = {}  # checker: site -> SPREAD's marker (open_build)
     type_fields: list[tuple[str, str, int, int]] = []  # see Result.type_fields
 
     def literal_class(fields: tuple[str, ...]) -> str:
@@ -1087,10 +1095,21 @@ def transform(
             raise err(f"duplicate record field in {tuple(names)}", toks[i])
         last = max(k for k, it in enumerate(its) if toks[it[0]].string == "**")
         fields = tuple(toks[it[0]].string for it in its[last + 1 :])
+
+        def is_open_known(it: list[int]) -> bool:
+            got = (known or {}).get((toks[it[1]].string, toks[it[1]].start[0])) if len(it) == 2 else None
+            return got is not None and got.is_open
+
         types[(fields, True)] = None
         sites.append((fields, True, True))
+        # the sources whose fields byname can't see: not an open record it knows, which is open by design
+        unseen = [it for it in its if toks[it[0]].string == "**" and not is_open_known(it)]
+        if unseen:
+            bare = [toks[it[1]].string for it in unseen if len(it) == 2 and is_name(toks[it[1]])]
+            spread_marks[len(sites) - 1] = SPREAD + "".join(f"__{x}" for x in bare)
         g0 = span(i)[0]
-        edits.append(Edit(g0, g0, site_class(record_class(fields), len(sites) - 1), (g0, g0 + 1)))
+        site = f"{len(sites) - 1}{spread_marks.get(len(sites) - 1, '')}"
+        edits.append(Edit(g0, g0, site_class(record_class(fields), site), (g0, g0 + 1)))
         for it in its:
             if toks[it[0]].string == "**":
                 a, b = off(toks[it[1]].start), off(toks[it[-1]].end)
@@ -1735,7 +1754,7 @@ def transform(
         prelude += "".join(type_def(f, o, portable) for f, o in types)
         prelude += "".join(record_def(f, portable) for f in records)
         for n, (f, is_open, literal) in enumerate(sites):
-            prelude += site_def(f, is_open, n, literal)
+            prelude += site_def(f, is_open, f"{n}{spread_marks.get(n, '')}", literal)
     if builds or kw_used or omit_used:
         if not prelude:
             prelude = base_prelude()
