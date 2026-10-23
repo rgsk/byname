@@ -158,7 +158,12 @@ q: (name: str, age: int, sex: str, surname: str) = (**u, **r)   # or write the t
 A spread record is checked against the type expected where it stands, so you never have to name one.
 With no type expected, like `x = (**u, **r)`, it still gets its exact type when every spread is a name
 the file shows the fields of: bound to a record or a spread of such names, to `rec._asdict()`, to a call
-of a function that shows them, or annotated with a record type (a parameter's too). Then `x` is
+of a function that shows them, or annotated with a record type (a parameter's too), or an item of a loop
+over a name whose type says its items: `for u in users` with `users: list[User]` (or `Sequence[User]`,
+`tuple[User, ...]`, a set), `enumerate(users)`'s, `zip(users, ...)`'s, and a dict's values, from
+`d.values()` or `d.items()` with `d: dict[str, User]`; or an index into such a name, `users[0]`,
+`d["k"]`, `pair[1]` of a `tuple[int, User]`. A slice keeps its type, and `sorted`, `reversed`, `list`,
+`tuple` and `iter` keep the items, so `for u in sorted(users[1:])` is typed too. Then `x` is
 `(name: str, age: int, sex: str, surname: str)` and a typo like `x.surnme` is an error. A function shows
 the fields of what it returns by its return annotation, or by its `return`s when they all show the same
 ones (`return (name=, age=)`, or another such function's call, in other modules too), so
@@ -265,9 +270,10 @@ def greet(u: (..., name: str, age: int)):     # like def greet(name: str, age: i
 - **Typed from where the record came from:** a record literal, a name with a record type (a parameter, an
   annotated name, an imported type), or a call to a function that shows what it returns, in this file or a
   .pyn module it imports: an exact type gives exactly the other fields, an open one `(..., age: int)` stays
-  open. Anything else (a loop's item, `users[0]`, a value typed `Any`) gives `(...)`: any record, read with
+  open, and so do a loop's item and an index, as for spreads. Anything else (a method's result like
+  `users.pop()`, a name with no type, a value typed `Any`) gives `(...)`: any record, read with
   brackets (`rest["age"]`) only, and the editor and `byname tool` say how to give the record a type:
-  `row: User = users[0]`, or `u: User` before `for u in users`.
+  `row: User = load()`, or `u: User` before `for u in rows`.
 
 **Final:** `: Final` after a pattern makes every local it binds `Final`, nested, renamed and rest ones
 included, so a checker rejects changing one later in the scope:

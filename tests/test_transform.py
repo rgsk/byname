@@ -924,3 +924,41 @@ def test_a_record_not_imported_from_byname_is_left_alone():
 def test_record_call_is_an_error_in_output_files():
     with pytest.raises(SyntaxError, match="record\\(\\) needs byname at runtime"):
         to_python(RECORD_CALL, portable=True)
+
+
+def test_a_loop_s_target_has_its_iterable_s_element_type():
+    src = (
+        "type T = (a: int, b: str)\n"
+        "def f(rows: list[list[T]], d: dict[str, T], s: Sequence[T], x, ys: list[int]):\n"
+        "    for row in rows:\n"
+        "        for t in row:\n"  # a loop over a loop's item
+        "            p = (**t,)\n"
+        "    for k, v in d.items():\n"
+        "        q = (**v,)\n"
+        "    for k in d:\n"  # a dict's keys
+        "        q2 = (**k,)\n"
+        "    for i, (y, t) in enumerate(zip(ys, s)):\n"
+        "        r = (**t,)\n"
+        "    for i, t in enumerate(s, 1):\n"
+        "        r2 = (**t,)\n"
+        "    for x in x:\n"  # its own iterable: unknown
+        "        w = (**x,)\n"
+        "    for a, b in zip(s):\n"  # the target doesn't match: unknown
+        "        w2 = (**a,)\n"
+        "    for t in sorted(s[1:]):\n"  # a slice has its value's type; sorted keeps the elements
+        "        r3 = (**t,)\n"
+        "    u = rows[0][1]\n"  # an index: an element
+        "    r4 = (**u,)\n"
+        "    u = d[k]\n"  # a mapping's value
+        "    r5 = (**u,)\n"
+        "    for t in x[1:]:\n"  # no type to slice: unknown
+        "        w3 = (**t,)\n"
+    )
+    lines = re.sub(r"___\d+", "", transform(src, checker=True).body).splitlines()
+    plain = "_rec_a__b(a={0}.a, b={0}.b,)"
+    assert lines[4].endswith("p = " + plain.format("t"))
+    assert lines[6].endswith("q = " + plain.format("v"))
+    assert lines[10].endswith("r = " + plain.format("t")) and lines[12].endswith("r2 = " + plain.format("t"))
+    assert lines[18].endswith("r3 = " + plain.format("t"))
+    assert lines[20].endswith("r4 = " + plain.format("u")) and lines[22].endswith("r5 = " + plain.format("u"))
+    assert all("_byname_loose" in lines[n] for n in [8, 14, 16, 24])

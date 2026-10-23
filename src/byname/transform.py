@@ -506,6 +506,7 @@ class Known:
 Lookup = Callable[[str, int, str], "Known | None"]  # imports.Modules
 # where a binding's fields show (_Bind.source): ("value" | "type", expr), ("import", (module, level, name)),
 # ("def", the function), whose fields are those of what it returns
+Where = tuple[ast.expr, "_Scope", int]  # a node, and the scope and statement it's read in
 Source = tuple[str, ast.expr] | tuple[str, tuple[str, int, str]] | tuple[str, ast.FunctionDef]
 
 
@@ -539,6 +540,76 @@ class _Scope:
     # names annotated in it, `u: User`, with the statement: every binding of the name there, an assignment or a
     # loop's `for u in users`, has that type, as for the checker (of_bind)
     declared: dict[str, tuple[ast.expr, int]] = field(default_factory=dict)
+
+
+# generic types whose iteration gives their first type argument, and mappings (key, value): element_type
+ITERABLES = {"list", "List", "Sequence", "MutableSequence", "Iterable", "Iterator", "Collection", "Reversible"}
+ITERABLES |= {"set", "Set", "frozenset", "FrozenSet", "AbstractSet", "MutableSet", "deque", "Deque", "Generator"}
+MAPPINGS = {"dict", "Dict", "Mapping", "MutableMapping", "defaultdict", "DefaultDict", "OrderedDict"}
+INDEXED = {"list", "List", "Sequence", "MutableSequence", "deque", "Deque"}  # x[0] is an element
+KEEPS = {"sorted", "reversed", "list", "tuple", "iter"}  # a loop over f(xs) gives xs's elements (elements)
+
+
+def element_sources(target: ast.expr, it: ast.expr) -> dict[int, Source]:
+    """The names a loop's target binds that byname can follow to their iterable's type, by id(Name):
+    `for u in xs` is ("element", xs), as are the item of `enumerate(xs)` and the k-th of `zip(xs, ys)`; a
+    mapping's value, of `d.values()` or the second of `d.items()`, is ("mapped", d). Read off the syntax:
+    no tuple type is carried through the unpacking, so other targets stay unknown."""
+    if isinstance(it, ast.Call) and isinstance(it.func, ast.Attribute) and not it.args and not it.keywords:
+        if it.func.attr == "values" and isinstance(target, ast.Name):
+            return {id(target): ("mapped", it.func.value)}
+        if it.func.attr == "items" and isinstance(target, ast.Tuple) and len(target.elts) == 2:
+            value = target.elts[1]
+            return {id(value): ("mapped", it.func.value)} if isinstance(value, ast.Name) else {}
+    if isinstance(target, ast.Name):
+        return {id(target): ("element", it)}
+    if not (
+        isinstance(target, ast.Tuple)
+        and isinstance(it, ast.Call)
+        and isinstance(it.func, ast.Name)
+        and it.args
+        and not any(isinstance(a, ast.Starred) for a in it.args)
+    ):
+        return {}
+    if it.func.id == "enumerate" and len(target.elts) == 2:
+        return element_sources(target.elts[1], it.args[0])
+    if it.func.id == "zip" and len(it.args) == len(target.elts):
+        return {k: v for t, a in zip(target.elts, it.args) for k, v in element_sources(t, a).items()}
+    return {}
+
+
+def generic(t: ast.expr) -> tuple[str, list[ast.expr]]:
+    """A generic type's name and arguments, `list[User]` -> ("list", [User]); ("", []) for anything else."""
+    if not isinstance(t, ast.Subscript):
+        return "", []
+    head = t.value.id if isinstance(t.value, ast.Name) else t.value.attr if isinstance(t.value, ast.Attribute) else ""
+    return head, t.slice.elts if isinstance(t.slice, ast.Tuple) else [t.slice]
+
+
+def element_type(t: ast.expr, kind: str) -> ast.expr | None:
+    """The type a loop over a value of type t gives: list[T], Sequence[T], tuple[T, ...], ... T; a mapping's
+    key, or its value for kind "mapped" (element_sources)."""
+    head, args = generic(t)
+    if kind == "mapped":
+        return args[1] if head in MAPPINGS and len(args) == 2 else None
+    if head in ("tuple", "Tuple"):
+        variadic = len(args) == 2 and isinstance(args[1], ast.Constant) and args[1].value is Ellipsis
+        return args[0] if variadic else None
+    return args[0] if head in ITERABLES | MAPPINGS else None
+
+
+def index_type(t: ast.expr, index: ast.expr) -> ast.expr | None:
+    """The type of `x[index]` for x of type t: a sequence's element, a mapping's value, the k-th of a
+    tuple[A, B] at a constant k."""
+    head, args = generic(t)
+    if head in MAPPINGS:
+        return args[1] if len(args) == 2 else None
+    if head in ("tuple", "Tuple"):
+        if len(args) == 2 and isinstance(args[1], ast.Constant) and args[1].value is Ellipsis:
+            return args[0]
+        k = index.value if isinstance(index, ast.Constant) and type(index.value) is int else None
+        return args[k] if k is not None and -len(args) <= k < len(args) else None
+    return args[0] if head in INDEXED else None
 
 
 COMPOUND = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.TryStar, ast.With, ast.AsyncWith, ast.Match)
@@ -691,9 +762,10 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
             for i, g in enumerate(node.generators):
                 if i:
                     visit(g.iter, inner, 0, True)
+                got = element_sources(g.target, g.iter)  # read in the comprehension: its own declarations are none
                 for n in ast.walk(g.target):
                     if isinstance(n, ast.Name):
-                        bind(inner, n.id, -1, True)
+                        bind(inner, n.id, -1, True, got.get(id(n)), (inner, 0))
                 for e in g.ifs:
                     visit(e, inner, 0, True)
             for e in [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]:
@@ -736,6 +808,8 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
             scope.declared.setdefault(node.target.id, (node.annotation, at))
         elif isinstance(node, ast.TypeAlias):
             sources[id(node.name)] = ("type", node.value)
+        elif isinstance(node, ast.For):  # `for u in users`: an element of users (element_sources)
+            sources.update(element_sources(node.target, node.iter))
         inside = straight and not isinstance(node, COMPOUND)
         for child in ast.iter_child_nodes(node):
             visit(child, scope, at, inside)
@@ -769,14 +843,77 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
         got = [of_bind(b, name) for b in reaching(name, scope, at)]
         return got[0] if got and all(k is not None and k == got[0] for k in got) else None
 
-    def of_bind(b: _Bind, name: str) -> Known | None:
-        if id(b) in memo:
-            return memo[id(b)]
+    def source_of(b: _Bind, name: str) -> tuple[Source | None, tuple[_Scope, int]]:
         source, where = b.source, b.where
         # a name declared in its scope, `r: T`, has that type at every binding, an assignment's or a loop's,
         # as for the checker: each must fit it (_Scope.declared)
-        if (source is None or source[0] == "value") and (decl := where[0].declared.get(name)) is not None:
+        if (source is None or source[0] in ("value", "element", "mapped")) and (
+            decl := where[0].declared.get(name)
+        ) is not None:
             source, where = ("type", decl[0]), (where[0], decl[1])
+        return source, where
+
+    def types_of(e: ast.expr, scope: _Scope, at: int, seen: frozenset[int]) -> list[Where] | None:
+        """The types e may have, with where each is read: a name whose every reaching binding has one (an
+        annotation, a parameter's or one declared in its scope, a name it's bound to, an item of a loop over
+        such a value), a slice of such a value (its own type), or an index into one (index_type). None when
+        one doesn't."""
+        if isinstance(e, ast.Subscript):
+            got = types_of(e.value, scope, at, seen)
+            index = e.slice
+            return got if isinstance(index, ast.Slice) else each(got, lambda t: index_type(t, index))
+        if not isinstance(e, ast.Name):
+            return None
+        out: list[Where] = []
+        for b in reaching(e.id, scope, at):
+            source, where = source_of(b, e.id)
+            if source is None or id(b) in seen or not isinstance(source[1], ast.expr):  # `for x in x`: unknown
+                return None
+            kind, node = source
+            if kind == "type":
+                got: list[Where] | None = [(node, *where)]
+            elif kind == "value":
+                got = types_of(node, *where, seen | {id(b)})
+            elif kind in ("element", "mapped"):
+                got = elements(node, kind, *where, seen | {id(b)})
+            else:
+                return None
+            if got is None:
+                return None
+            out += got
+        return out or None
+
+    def elements(it: ast.expr, kind: str, scope: _Scope, at: int, seen: frozenset[int]) -> list[Where] | None:
+        """The types a loop over `it` may give its target: of its type (types_of, element_type), or, for
+        `sorted(xs)`, `reversed(xs)`, `list(xs)`, ..., of xs."""
+        if (
+            isinstance(it, ast.Call)
+            and isinstance(it.func, ast.Name)
+            and it.func.id in KEEPS
+            and len(it.args) == 1
+            and not isinstance(it.args[0], ast.Starred)
+        ):
+            return elements(it.args[0], kind, scope, at, seen)
+        return each(types_of(it, scope, at, seen), lambda t: element_type(t, kind))
+
+    def each(types: list[Where] | None, f: Callable[[ast.expr], ast.expr | None]) -> list[Where] | None:
+        """f of every type, where it's read; None if f gives None for one."""
+        out: list[Where] = []
+        for t, s, a in types or []:
+            if (got := f(t)) is None:
+                return None
+            out.append((got, s, a))
+        return out or None
+
+    def all_of(types: list[Where] | None) -> Known | None:
+        """The fields every one of the types shows, when they agree."""
+        got = [of_type(*t) for t in types or []]
+        return got[0] if got and all(k is not None and k == got[0] for k in got) else None
+
+    def of_bind(b: _Bind, name: str) -> Known | None:
+        if id(b) in memo:
+            return memo[id(b)]
+        source, where = source_of(b, name)
         if source is None:
             return None
         memo[id(b)] = None  # a cycle stays unknown
@@ -786,6 +923,8 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
         elif isinstance(node, ast.FunctionDef):
             got = of_def(node, *where)
             memo[id(b)] = Known(got.fields, returns=True) if got is not None else None
+        elif kind in ("element", "mapped"):  # a loop's target: every type its iterable may give agrees
+            memo[id(b)] = all_of(elements(node, kind, *where, frozenset({id(b)})))
         else:
             memo[id(b)] = of_value(node, *where) if kind == "value" else of_type(node, *where)
         return memo[id(b)]
@@ -820,6 +959,8 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
         ):
             got = of_value(e.func.value, scope, at)
             return Known(got.fields, is_dict=True) if got is not None and not (got.is_dict or got.is_open) else None
+        if isinstance(e, ast.Subscript):  # `users[0]`, `by_id[k]`: by the type of what's indexed (types_of)
+            return all_of(types_of(e, scope, at, frozenset()))
         if not isinstance(e, ast.Call) or not isinstance(e.func, ast.Name):
             return None
         if e.func.id.startswith("_rec_") and all(k.arg for k in e.keywords) and not e.args:

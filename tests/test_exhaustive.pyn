@@ -950,7 +950,7 @@ def test_a_spread_with_no_type_expected_is_open(tmp_path):
 
 
 def test_a_field_a_spread_brought_says_where_it_went(tmp_path):
-    # a spread of a record whose fields byname can't see (a loop's item, a dict, a call it can't follow) builds
+    # a spread of a record whose fields byname can't see (a dict, a method's result, a call it can't follow) builds
     # an open record of the fields written after it: a field read off it, or a type it's passed as, says that
     # it came from the spread and how to check it, not to declare it on a type nobody wrote
     verdicts = checker(
@@ -958,14 +958,13 @@ def test_a_field_a_spread_brought_says_where_it_went(tmp_path):
         type User = (name: str, age: int)
         def take(p: User) -> None: ...
         def f(users: list[User], d: dict[str, int], o: (..., name: str)):
-            for u in users:
+            for u in users.copy():
                 moved = (**u, zip=1)
                 moved.name
                 take(moved)
             m = (**d, zip=1)
             m.name
-            v: User
-            for v in users:
+            for v in users:  # a loop over a list[User]: v is a User
                 exact = (**v, zip=1)
                 exact.name
             (name=, **rest) = o
@@ -981,9 +980,9 @@ def test_a_field_a_spread_brought_says_where_it_went(tmp_path):
     )
     assert f"missing fields: age, name\nit's built from a spread of u, {seen}. To check it, give u a record type" in verdicts[7]
     assert verdicts[9].startswith(f'"name" isn\'t on (..., zip: int): it\'s built from a spread of d, {seen}')
-    # a known record spreads exactly (line 13: no error); an open one carries fields nobody declared, by design
-    assert verdicts[16].startswith('"agee" isn\'t declared on (..., zip: int): declare it')
-    assert sorted(verdicts) == [6, 7, 9, 16]
+    # a known record spreads exactly (line 12: no error); an open one carries fields nobody declared, by design
+    assert verdicts[15].startswith('"agee" isn\'t declared on (..., zip: int): declare it')
+    assert sorted(verdicts) == [6, 7, 9, 15]
 
 
 def test_a_spread_of_known_records_is_typed_without_an_annotation(tmp_path):
@@ -1327,25 +1326,90 @@ def test_rest_of_a_record_whose_fields_the_file_does_not_show_is_any_record(tmp_
     assert '"D" is not a record: **rest takes the rest of a record' in verdicts[9]
 
 
+def test_a_loop_s_item_has_its_iterable_s_element_type(tmp_path):
+    # a name a loop binds is typed from its iterable's declared type, for spreads and rests: list[T],
+    # Sequence[T], tuple[T, ...], a dict's values, and the matching item of enumerate and zip
+    verdicts = checker(
+        """\
+        type User = (name: str, age: int)
+        def f(users: list[User], by_id: dict[int, User], pairs: tuple[User, ...], ids: list[int]):
+            for u in users:
+                reveal_type((**u, zip=1))
+            for i, u in enumerate(users):
+                (name=, **rest) = u
+                reveal_type(rest)
+            for n, (a, p) in enumerate(zip(ids, pairs)):
+                reveal_type((**p, zip=1))
+            for k, v in by_id.items():
+                reveal_type((**v, zip=1))
+            moved = [(**u, zip=1) for u in by_id.values()]
+            reveal_type(moved)
+            for u in users.copy():  # a method's result, not followed: open, and a field read says so
+                out = (**u, zip=1)
+                reveal_type(out)
+        """,
+        tmp_path,
+    )
+    exact = 'is "(name: str, age: int, zip: int)"'
+    assert all(verdicts[n].endswith(exact) for n in [4, 9, 11])
+    assert verdicts[7] == 'Type of "rest" is "(age: int)"'
+    assert verdicts[13] == 'Type of "moved" is "list[(name: str, age: int, zip: int)]"'
+    assert verdicts[16] == 'Type of "out" is "(..., zip: int)"'
+    assert sorted(verdicts) == [4, 7, 9, 11, 13, 16]
+
+    for i, u in enumerate([(name="a", age=1)]):
+        assert (**u, zip=1) == (name="a", age=1, zip=1)
+
+
+def test_an_index_or_slice_has_its_value_s_element_type(tmp_path):
+    # users[0], by_id[k], pair[1] of a tuple[int, User] are an element; users[1:] keeps the list's type, and
+    # sorted, reversed, list, tuple and iter keep the elements, for loops, spreads and rests
+    verdicts = checker(
+        """\
+        type User = (name: str, age: int)
+        def f(users: list[User], by_id: dict[int, User], pair: tuple[int, User]):
+            first = users[0]
+            reveal_type((**first, zip=1))
+            (name=, **rest) = by_id[1]
+            reveal_type(rest)
+            u = pair[1]
+            reveal_type((**u, zip=1))
+            for u in sorted(users[1:], key=lambda u: u.age):
+                reveal_type((**u, zip=1))
+        """,
+        tmp_path,
+    )
+    exact = 'is "(name: str, age: int, zip: int)"'
+    assert all(verdicts[n].endswith(exact) for n in [4, 8, 10])
+    assert verdicts[6] == 'Type of "rest" is "(age: int)"'
+    assert sorted(verdicts) == [4, 6, 8, 10]
+
+    users = [(name="b", age=2), (name="a", age=1)]
+    (name=, **rest) = users[0]
+    assert [(**u, zip=1) for u in sorted(users[1:], key=lambda u: u.age)] == [(name="a", age=1, zip=1)]
+    assert rest == (age=2)
+
+
 def test_a_rest_s_record_gets_a_type_with_one_annotation(tmp_path):
-    # a loop's item or `users[0]`: byname doesn't follow them, and the rest is (...), with a hint. A type
-    # written on the name, or declared before the loop or the branches binding it, gives the rest its fields
+    # a method's result, `users.pop()`, or an item of `users.copy()`: byname doesn't follow them, and the rest is
+    # (...), with a hint. A type written on the name, or declared before the loop or the branches binding it,
+    # gives the rest its fields
     verdicts = checker(
         """\
         type User = (name: str, age: int, city: str)
         def f(users: list[User]) -> None:
-            for u in users:
+            for u in users.copy():
                 (name=, **r1) = u
                 reveal_type(r1)
-            (name=, **r2) = users[0]
-            row: User = users[0]
+            (name=, **r2) = users.pop()
+            row: User = users.pop()
             (name=, **r3) = row
             reveal_type(r3)
             w: User
             for w in users:
                 (name=, **r4) = w
                 reveal_type(r4)
-            for (name=, **r5) in users:
+            for (name=, **r5) in users.copy():
                 reveal_type(r5)
             r: (..., name: str, age: int)  # bound to two shapes below: the declared type fits both
             if users:

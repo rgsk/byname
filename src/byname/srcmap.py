@@ -109,7 +109,7 @@ def unknown_rest(name: str) -> str:
     """The hint on a `**rest` typed `(...)` (transform.rest_of), in the editor and `byname tool`."""
     return (
         f"{name} is (...), any record, unchecked: byname can't tell the fields of the record it takes apart."
-        " Give that record a type: `row: User = users[0]`, or `u: User` before `for u in users`"
+        " Give that record a type: `row: User = load()`, or `u: User` before `for u in rows`"
     )
 
 

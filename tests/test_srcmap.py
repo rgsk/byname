@@ -265,7 +265,7 @@ def test_a_rest_whose_record_byname_cannot_tell_is_hinted():
         "type User = (name: str, age: int)\n"
         "def f(u: User, users: list[User]):\n"
         "    (name=, **known) = u\n"
-        "    (name=, **unknown) = users[0]\n"
+        "    (name=, **unknown) = users.pop()\n"
     )
     (hint,) = Translation(src).hints
     assert hint["range"]["start"] == {"line": 3, "character": 12}

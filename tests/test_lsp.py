@@ -1722,7 +1722,7 @@ def test_a_dot_read_of_an_undeclared_field_on_an_open_type_says_how_to_declare_i
 def test_a_field_a_spread_brought_says_where_it_went_as_byname_tool_does(lsp):
     # the field came with `u`, whose fields byname can't see: the editor says so, word for word as the tool
     c, root, _ = lsp
-    text = "def f(users: list[(name: str)]):\n    for u in users:\n        moved = (**u, zip=1)\n        print(moved.name)\n"
+    text = "def f(users: list[(name: str)]):\n    for u in users.copy():\n        moved = (**u, zip=1)\n        print(moved.name)\n"
     uri = c.open(root / "spread_unseen.pyn", text)
     want = (
         "\"name\" isn't on (..., zip: int): it's built from a spread of u, whose fields byname can't see. To check"
