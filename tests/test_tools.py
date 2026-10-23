@@ -232,6 +232,22 @@ def test_spread_of_a_record_type_from_another_module_is_typed(project):
     assert "0 errors" in out
 
 
+def test_a_spread_of_another_file_s_asked_spread_is_asked_again(project):
+    # dep.first_moved() returns a spread byname asks the checker about; use.pyn spreads what it returns. Both
+    # are asked in one run, where dep's copy is its probe: open. So use.pyn is asked again over dep's final
+    (project / "dep.pyn").write_text(
+        "type User = (name: str, age: int)\n"
+        "def all_users() -> list[User]: ...\n"
+        "def first_moved():\n"
+        "    for u in all_users():\n"
+        "        return (**u, zip=1)\n"
+        "    raise LookupError\n"
+    )
+    (project / "use.pyn").write_text("from dep import first_moved\nreveal_type((**first_moved(), k=1))\n")
+    out, _ = tool(project, "basedpyright", "use.pyn")
+    assert 'Type of "(name, age, zip, k)' in out and 'is "(name: str, age: int, zip: int, k: int)"' in out, out
+
+
 def test_spread_of_a_rebound_name_keeps_its_narrowing(project):
     # `r` is bound twice, so its fields aren't known and the generic path checks the spread inside a
     # lambda, where pyright drops narrowing for a name reassigned later. Read through a lambda default,

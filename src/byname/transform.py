@@ -1101,10 +1101,15 @@ def transform(
                 name, (first, *rest) = toks[it[1]].string, given[it[0]]
                 is_dict = it[0] not in once and (got := of(toks[it[1]])) is not None and got.is_dict
                 read = (lambda f: f'["{f}"]') if is_dict else (lambda f: f".{f}")
-                head, at, close_call = f"{first}=", off(toks[it[1]].end), ""
+                # an answer of the checker's (probed): a probe asks again, the answer may be stale
+                key = expr_key(it) if it[0] in once else (name, toks[it[1]].start[0])
+                again = probe and key in (probed or {})
+                if again:
+                    unseen.append(key)
+                head, at, close_call = f"{first}=" + "reveal_type(" * again, off(toks[it[1]].end), ")" * again
                 if it[0] in once:  # `**make()`: the call once, as written, its value kept for the other fields
-                    name, at, close_call = f"_byname_v{calls}", off(toks[it[-1]].end), ")"
-                    head = f"{first}=({name} := "
+                    name, at, close_call = f"_byname_v{calls}", off(toks[it[-1]].end), ")" + ")" * again
+                    head = f"{first}=({name} := " + "reveal_type(" * again
                     calls += 1
                 edits.append(Edit(off(toks[it[0]].start), off(toks[it[0]].end), head, span(it[1])))
                 tail = close_call + read(first) + "".join(f", {f}={name}{read(f)}" for f in rest)
@@ -1176,7 +1181,7 @@ def transform(
         line = toks[i].start[0]
         at = (line, built_on.get(line, 0))
         built_on[line] = at[1] + 1
-        if checker and known and known_build(i, close, its):
+        if checker and (known or probed) and known_build(i, close, its):
             return
         builds = True
         if checker and not portable and untyped and at in untyped:
@@ -1326,13 +1331,18 @@ def transform(
         got = (known or {}).get((DS, line)) if line is not None and not chain else None
         if got is not None and not got.is_dict and not got.returns:
             keep = tuple(f for f in got.fields if f not in taken)
+            again = probe and (DS, line) in (probed or {})  # the checker's answer: asked again (known_build)
+            if again:
+                unseen.append((DS, line))
+            ds = f"reveal_type({DS})" if again else DS
             if keep and not got.is_open:
                 records[keep] = None
-                return text + literal_class(keep) + "(" + ", ".join(f"{f}={DS}.{f}" for f in keep) + ")"
+                reads = [f"{f}={ds if k == 0 else DS}.{f}" for k, f in enumerate(keep)]
+                return text + literal_class(keep) + "(" + ", ".join(reads) + ")"
             name = f"_byname_rest{len(rest_defs)}"
             rest_defs[name] = (got.fields, got.is_open, taken)
             types.update(dict.fromkeys([(got.fields, got.is_open), (keep, got.is_open)]))
-            return text + name + f"({DS})"
+            return text + name + f"({ds})"
         rest = next(it for it, kind, _ in node if kind == "rest")
         unknown_rests.append(span(rest[0], rest[-1]))
         omits[taken] = None

@@ -28,7 +28,7 @@ from urllib.parse import quote, urlparse
 from urllib.request import url2pathname
 
 from .output import output_path, render
-from .srcmap import LineIndex, Probed, Translation, probed_from
+from .srcmap import PROBE_MARK, PROBED, LineIndex, Probed, Translation, probed_from
 from .transform import DS, FIELDSET, ORDER, REPR, BynameError, pattern_slot
 
 DEFAULT_CHECKER = ["basedpyright-langserver", "--stdio"]
@@ -802,6 +802,16 @@ def is_position(v) -> bool:
     return isinstance(v, dict) and "line" in v and "character" in v and len(v) == 2
 
 
+def checker_cli(cmd: list[str]) -> str | None:
+    """The checker's command-line tool beside its language server, `basedpyright` for `basedpyright-langserver`:
+    what asks it about the files not open (Proxy.probe_project). None if there's none."""
+    server = Path(cmd[0])
+    if not server.name.endswith("-langserver"):
+        return None
+    cli = server.with_name(server.name.removesuffix("-langserver"))
+    return str(cli) if cli.is_file() else shutil.which(cli.name)
+
+
 def resolve_checker(cmd: list[str]) -> list[str]:
     """Find the checker next to this interpreter first, so a venv's basedpyright works without PATH."""
     local = Path(sys.executable).parent / cmd[0]
@@ -814,19 +824,37 @@ def resolve_checker(cmd: list[str]) -> list[str]:
 
 
 class Doc:
-    def __init__(self, uri: str, text: str, version: int | None, probe: bool = False, probed: Probed | None = None):
+    def __init__(
+        self,
+        uri: str,
+        text: str,
+        version: int | None,
+        probe: bool = False,
+        probed: Probed | None = None,
+        carry: Probed | None = None,
+    ):
         """probe: the text goes to the checker as the document; if its spreads or rests read sources byname
-        can't see, it goes first as a probe translation, and its diagnostics bring the final one (Proxy.probed).
-        probed: the checker's answers, for that final one."""
+        can't see, it goes as a probe translation, and its diagnostics bring the final one (Proxy.probed).
+        carry: the answers the file had (its previous version's): the probe is built with them, so it's
+        typed while it's in the checker (completion, hover), and asks each again, as it may be stale.
+        probed: the checker's answers, for the final one."""
         self.uri = uri
         self.version = version  # the editor's version
         self.sent: int | None = None  # version we sent to the checker (we number them ourselves)
         # the file (a cell's notebook), where the record types it imports are looked up from
         self.path = uri_to_path(uri) if urlparse(uri).scheme in ("file", "vscode-notebook-cell") else None
+        self.unanswered = 0  # the probe's publishes without an answer (Proxy.probed)
+        self.probing = False
+        if probe and probed is None:
+            # the background run's answers for this very text (PROBED) are newer than the last version's
+            got = PROBED.get(self.path) if self.path is not None else None
+            start = {**(carry or {}), **(got[1] if got is not None and got[0] == text else {})}
+            self.tr = Translation(text, self.path, probe=True, probed=start)
+            self.probing = bool(self.tr.unseen)
+            if self.probing:
+                return
+            probed = start
         self.tr = Translation(text, self.path, probed=probed)
-        self.probing = probe and probed is None and bool(self.tr.unseen)
-        if self.probing:
-            self.tr = Translation(text, self.path, probe=True)
 
 
 class Notebook:
@@ -856,6 +884,12 @@ class Proxy:
     def __init__(self, checker: list[str]):
         self.client = Writer(sys.stdout.buffer)
         self.proc = subprocess.Popen(checker, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.cli = checker_cli(checker)
+        # the files not open are asked in the background (probe_project): one run at a time, and one more if
+        # something changed meanwhile
+        self.probe_lock = threading.Lock()
+        self.probe_running = False
+        self.probe_again = False
         self.server = Writer(self.proc.stdin)
         self.root: Path | None = None
         self.mirror: Path | None = None  # what the checker runs on, see tools.mirror
@@ -1115,6 +1149,11 @@ class Proxy:
             self.server.send(msg)
             return
 
+        if method == "initialized":  # the checker is up: ask about the files not open
+            self.send_server(msg)
+            self.probe_project()
+            return
+
         if method == "initialize":
             root = params.get("rootUri") or next((f["uri"] for f in params.get("workspaceFolders") or []), None)
             self.root = uri_to_path(root) if root else Path.cwd()
@@ -1207,6 +1246,8 @@ class Proxy:
                 for c in params.get("changes", []):
                     if c.get("uri", "").endswith(".pyn"):
                         self.retranslate_importers(uri_to_path(c["uri"]))
+                if any(c.get("uri", "").endswith(".pyn") for c in params.get("changes", [])):
+                    self.probe_project()
                 return
             elif mid is not None:  # e.g. workspace/symbol: results point into the mirror
                 self.pending[mid] = (method, self.last_completion if method == "completionItem/resolve" else None)
@@ -1264,7 +1305,8 @@ class Proxy:
             return True
         if method == "textDocument/didChange":
             text = params["contentChanges"][-1]["text"]  # we advertise full sync
-            doc = Doc(uri, text, td.get("version"), probe=True)
+            last = self.docs.get(path)
+            doc = Doc(uri, text, td.get("version"), probe=True, carry=last[-1].tr.probed if last else None)
             with self.text_lock:
                 self.docs.setdefault(path, []).append(doc)
                 del self.docs[path][:-5]
@@ -1275,6 +1317,7 @@ class Proxy:
             self.place(path)
             self.retranslate_importers(path)
             self.send_server({**msg, "params": {"textDocument": {"uri": uri}}})
+            self.probe_project()  # what other files' spreads of it are may have changed
             if self.output_on_save and versions:
                 self.write_output(path, versions[-1])
             if versions:
@@ -1303,7 +1346,7 @@ class Proxy:
         for key, versions in self.docs.items():
             doc = versions[-1]
             if key != saved and saved in doc.tr.imports:
-                again = Doc(doc.uri, doc.tr.source, doc.version, probe=True)
+                again = Doc(doc.uri, doc.tr.source, doc.version, probe=True, carry=doc.tr.probed)
                 with self.text_lock:
                     versions.append(again)
                     del versions[:-5]
@@ -1406,24 +1449,96 @@ class Proxy:
             self.counter += 1
             return self.counter
 
-    def probed(self, doc: Doc, key: Path | str, diagnostics: list[dict]) -> None:
-        """The checker's diagnostics on a probe translation: its `reveal_type` answers (probed_from) make the
-        final translation, sent in its place, unless a newer text went since. Their own diagnostics aren't
-        shown: the final's follow."""
+    def probed(self, doc: Doc, key: Path | str, diagnostics: list[dict]) -> bool:
+        """The checker's diagnostics on a probe translation: its `reveal_type` answers (probed_from). The
+        answers it was built with (Doc's carry), all asked again: if they hold, the probe is the file's text,
+        and False says its diagnostics are to be shown (but its reveals'). Else the answers make the final
+        translation, sent in its place unless a newer text went since, whose diagnostics follow: True."""
         if not diagnostics:  # the checker clears a file before it analyses it; a translation always gets some
-            return
+            return True
+        # a reopened file's first publish can be of the text before the probe (the mirror's). The probe's own
+        # has the answer to its last line (srcmap.PROBE_MARK), which module-level code always gets; twice
+        # without, the module's end is unreachable, so go on
+        if not any(PROBE_MARK in d.get("message", "") for d in diagnostics) and doc.unanswered < 2:
+            doc.unanswered += 1
+            return True
         found = [
             (d["range"]["start"]["line"], d["range"]["start"]["character"], d.get("message", "")) for d in diagnostics
         ]
-        final = Doc(doc.uri, doc.tr.source, doc.version, probed=probed_from(found, doc.tr))
+        got, asked = probed_from(found, doc.tr), set(doc.tr.unseen)
+        if got == {k: v for k, v in doc.tr.probed.items() if k in asked}:
+            doc.probing = False  # as it was built: the probe is the file's translation
+            return False
+        final = Doc(doc.uri, doc.tr.source, doc.version, probed=got)
         with self.text_lock:
             versions = self.docs.get(key)
             if not versions or versions[-1] is not doc:
-                return
+                return True
             versions.append(final)
             del versions[:-5]
             self.send_text(key, final.tr.hidden, final)
         self.refresh_tokens()
+        return True
+
+    def probe_project(self) -> None:
+        """Ask the checker about the spreads of the files not open, as `byname tool` does (tools.probe), in the
+        background: the editor's checker reads those from the mirror, which had no answers, so a spread of
+        what they return stayed open while they were closed. It runs over a mirror of its own, `lsp-probe`, so
+        the editor's checker never reads a probe; the answers (PROBED) go into the editor's mirror, the
+        checker is told which copies changed, and the open files are asked again. One run at a time."""
+        if self.cli is None or self.root is None:
+            return
+        with self.probe_lock:
+            if self.probe_running:
+                self.probe_again = True
+                return
+            self.probe_running = True
+        threading.Thread(target=self.run_probe, daemon=True).start()
+
+    def run_probe(self) -> None:
+        from .tools import mirror, probe
+
+        assert self.root is not None and self.cli is not None
+        while True:
+            try:
+                before = dict(PROBED)
+                probe(self.root, mirror(self.root, "lsp-probe"), self.cli)
+                self.answers_in([p for p, got in PROBED.items() if before.get(p) != got])
+            except Exception:  # a broken run leaves the files as they were: open spreads
+                pass
+            with self.probe_lock:
+                if not self.probe_again:
+                    self.probe_running = False
+                    return
+                self.probe_again = False
+
+    def answers_in(self, files: list[Path]) -> None:
+        """New answers for these files (probe_project): their copies in the editor's mirror again, the checker
+        told, and every open file with a source still unanswered asked again, as it may ask about them."""
+        from .tools import write_if_changed
+
+        changed = []
+        for path in files:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            existed = (dst := self.to_mirror(path)).exists()
+            if write_if_changed(dst, Translation(text, path).hidden):  # a copy it hadn't: created, not changed
+                changed.append({"uri": dst.as_uri(), "type": 2 if existed else 1})
+        if not changed:
+            return
+        self.send_server(
+            {"jsonrpc": "2.0", "method": "workspace/didChangeWatchedFiles", "params": {"changes": changed}}
+        )
+        with self.text_lock:
+            for key, versions in self.docs.items():
+                doc = versions[-1]
+                if (doc.tr.unseen or doc.tr.probed) and not doc.probing:
+                    again = Doc(doc.uri, doc.tr.source, doc.version, probe=True, carry=doc.tr.probed)
+                    versions.append(again)
+                    del versions[:-5]
+                    self.send_text(key, again.tr.hidden, again)
 
     def refresh_tokens(self) -> None:
         """Tell the editor to ask for semantic tokens again. It asked right after the edit, so it got the
@@ -2030,10 +2145,15 @@ class Proxy:
         key = self.key(doc.uri)
         if key not in self.docs:
             return None  # closed .pyn: its translation's diagnostics have nowhere to go
-        if doc.probing:
-            if key is not None:
-                self.probed(doc, key, params.get("diagnostics", []))
+        if doc.probing and (key is None or self.probed(doc, key, params.get("diagnostics", []))):
             return None
+        if doc.tr.reveals:  # the probe's own reveal_type notes
+            kept = [
+                d
+                for d in params.get("diagnostics", [])
+                if (d["range"]["start"]["line"], d["range"]["start"]["character"]) not in doc.tr.reveals
+            ]
+            params = {**params, "diagnostics": kept}
         out = [*doc.tr.problems, *doc.tr.hints]
         flagged = {(p["range"]["start"]["line"], p["range"]["start"]["character"]) for p in out}
         # a broken byname rule: the checker got the raw .pyn, so all it says is noise (`"(" was not closed`)

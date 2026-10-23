@@ -162,8 +162,8 @@ of a function that shows them, or annotated with a record type (a parameter's to
 `(name: str, age: int, sex: str, surname: str)` and a typo like `x.surnme` is an error. A function shows
 the fields of what it returns by its return annotation, or by its `return`s when they all show the same
 ones (`return (name=, age=)`, or another such function's call, in other modules too), so
-`(**make(), zip=1)` is typed. Not an `async def` or a decorated function: annotate it. Anything else the
-checker knows the type of is typed too: a loop's item (`for u in users` with `users: list[User]`),
+`(**make(), zip=1)` is typed. Anything else the
+checker knows the type of is typed too (a decorated function's call, `functools.cache` and the like): a loop's item (`for u in users` with `users: list[User]`),
 `users.pop()`, an attribute, a call to a method. byname asks the checker: a file with such spreads goes to it
 once more first, each source in `reveal_type(...)`, and its answers type the spreads (see "Cost" below).
 Names are scoped as in Python, and a name rebound in straight-line
@@ -176,10 +176,12 @@ where nothing says what's expected (a `return` with no `->`, a name with no anno
 list, say, it's `Any`. A field read off it that came with the spread says so, rather than to declare it:
 `"name" isn't on (..., zip: int): it's built from a spread of u, whose fields byname can't see. To check it,
 give u a record type; or read it unchecked with ["name"]`, and passing it where a type is expected says the
-same under its missing fields. A spread of a dict is the same, and silent until then. **Cost:** asking the
-checker means a second analysis of each such file: in the editor its diagnostics take about twice as long
-after an edit (0.4 s to 0.9 s on a 400-line torch file), and `byname tool basedpyright` runs the checker once
-more over those files (+0.5 to 1.3 s). Files without one cost nothing more. Any expression is asked, `(**users[0], zip=1)` too. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
+same under its missing fields. A spread of a dict is the same, and silent until then. **Cost:** in the editor,
+the edit that brings in such a spread takes about twice as long to show diagnostics (0.45 s to 0.95 s on a
+400-line torch file); the answers then carry over to the next edits, which cost the same as without (0.45 s).
+`byname tool basedpyright` runs the checker once more over those files (+0.5 to 1.3 s). Files without one cost nothing more. Any expression is asked, `(**users[0], zip=1)` too. In the
+editor, the files that aren't open are asked in the background, when the editor starts and after each save,
+so a spread of what a closed file's spread returns becomes exact a moment later. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
 `f((**u, **r))`.
 A field can't be called `keys`: records have a `keys()` method, which is what lets `**` work.
 

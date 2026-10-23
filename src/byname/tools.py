@@ -168,13 +168,18 @@ def mirror(root: Path, kind: str = "tools", default_config: bool = True, changes
     return out
 
 
+PROBE_ROUNDS = 3  # a spread of what another asked file's spread returns is answered a round later
+
+
 def probe(root: Path, out: Path, checker: str) -> int:
     """Ask the checker what byname can't see: the .pyn files whose spreads or rests read a source the file
-    doesn't show the fields of (Translation.unseen) go to the checker once as probe translations, each such
+    doesn't show the fields of (Translation.unseen) go to the checker as probe translations, each such
     source wrapped in `reveal_type(...)`; its answers (probed_from) are kept in PROBED, so every Translation
-    of those files reads them, and their copies in the mirror are written again with them. The number of
-    files probed: each costs the checker one more run over them."""
-    asked: dict[Path, tuple[Path, Translation]] = {}
+    of those files reads them, and their copies in the mirror are written again with them. Files asked
+    together see each other's probes, so `(**first_moved())` of another file's asked spread is answered
+    as an open spread (`waiting`): the files with such answers are asked again, over the others' final
+    copies, while that answers something (PROBE_ROUNDS at most). The number of checker runs."""
+    texts: dict[Path, tuple[Path, str]] = {}  # the files with a spread or rest: their copy in the mirror, text
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and Path(dirpath, d) != out]
         for f in filenames:
@@ -182,29 +187,45 @@ def probe(root: Path, out: Path, checker: str) -> int:
             if pyn.suffix != ".pyn" or (rel := mirrored(root, pyn)) is None:
                 continue
             text = pyn.read_text(encoding="utf-8")
-            if "**" not in text:  # no spread or rest: nothing to ask
-                continue
-            tr = Translation(text, pyn, probe=True)
+            if "**" in text:  # else no spread or rest: nothing to ask
+                texts[pyn] = (out / rel, text)
+    answers: dict[Path, dict] = {}
+    runs = 0
+    while runs < PROBE_ROUNDS:
+        asked = {}
+        for pyn, (dst, text) in texts.items():
+            tr = Translation(text, pyn, probe=True, probed=answers.get(pyn, {}))
             if tr.unseen:
-                asked[pyn] = (out / rel, tr)
-                write_if_changed(out / rel, tr.hidden)
-    if not asked:
-        return 0
-    files = [str(dst.relative_to(out)) for dst, _ in asked.values()]
-    cmd = [checker, "--outputjson", "--pythonpath", sys.executable, *files]
-    proc = subprocess.run(cmd, cwd=out, capture_output=True, text=True, check=False)
-    try:
-        report = json.loads(proc.stdout)
-    except ValueError:
-        report = {}
-    found: dict[Path, list[tuple[int, int, str]]] = {}
-    for d in report.get("generalDiagnostics", []):
-        start = d["range"]["start"]
-        found.setdefault(Path(d["file"]).resolve(), []).append((start["line"], start["character"], d["message"]))
-    for pyn, (dst, tr) in asked.items():
-        PROBED[pyn] = (tr.source, probed_from(found.get(dst.resolve(), []), tr))
-        write_if_changed(dst, Translation(tr.source, pyn).hidden)
-    return len(asked)
+                asked[pyn] = (dst, tr)
+                write_if_changed(dst, tr.hidden)
+        if not asked:
+            break
+        files = [str(dst.relative_to(out)) for dst, _ in asked.values()]
+        cmd = [checker, "--outputjson", "--pythonpath", sys.executable, *files]
+        proc = subprocess.run(cmd, cwd=out, capture_output=True, text=True, check=False)
+        runs += 1
+        try:
+            report = json.loads(proc.stdout)
+        except ValueError:
+            report = {}
+        found: dict[Path, list[tuple[int, int, str]]] = {}
+        for d in report.get("generalDiagnostics", []):
+            start = d["range"]["start"]
+            found.setdefault(Path(d["file"]).resolve(), []).append((start["line"], start["character"], d["message"]))
+        new, again = False, []
+        for pyn, (dst, tr) in asked.items():
+            waiting: set = set()
+            got = probed_from(found.get(dst.resolve(), []), tr, waiting)
+            new = new or bool(got)
+            if waiting:
+                again.append(pyn)
+            answers[pyn] = {**answers.get(pyn, {}), **got}
+            PROBED[pyn] = (tr.source, answers[pyn])
+            write_if_changed(dst, Translation(tr.source, pyn).hidden)
+        if not new or not again:
+            break
+        texts = {pyn: texts[pyn] for pyn in again}
+    return runs
 
 
 def remap(line: str, root: Path, out: Path, cache: dict) -> tuple[str | None, bool]:

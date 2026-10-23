@@ -118,6 +118,9 @@ Probed = dict[tuple[str, int], Known]
 # before it translates (tools.probe), so every Translation of that text reads the same types
 PROBED: dict[Path, tuple[str, Probed]] = {}
 # a probe's answer: `Type of "u" is "_typ_name__age___0[str, int]"`; an open record `_opn_...`
+# a probe translation's last line, `reveal_type('_byname_probe')`: the checker answers it whatever else it
+# can't (an unanalysed function's body), so a publish with its answer is of the probe (lsp.Proxy.probed)
+PROBE_MARK = "_byname_probe"
 REVEAL = re.compile(r'Type of "(.+?)" is "(_typ_|_opn_)(\w+)(.*)"$')
 
 
@@ -133,18 +136,19 @@ def one_type(args: str) -> bool:
     return False
 
 
-def probed_from(found: list[tuple[int, int, str]], tr: "Translation") -> Probed:
+def probed_from(found: list[tuple[int, int, str]], tr: "Translation", waiting: set | None = None) -> Probed:
     """What the checker said each unseen source of tr's probe translation is: its revealed record type's
     fields, by (name, source line), from (hidden line, character, message), 0-based. A spread of an
     expression is keyed by where it starts (transform's expr_key), found from where the answer stands. A type
-    that isn't one record (a union, a dict, Any) or is itself built from unseen spreads says nothing."""
+    that isn't one record (a union, a dict, Any) or is itself built from unseen spreads says nothing; the
+    latter may say more once the file it comes from is answered, so its key goes in `waiting`."""
     shift = tr.hidden.count("\n", tr.at, tr.at + tr.plen)
     first = tr.hidden.count("\n", 0, tr.at + tr.plen)  # the body's line after the prelude
     asked = set(tr.unseen)
     out: Probed = {}
     for line, character, message in found:
         m = REVEAL.match(message)
-        if m is None or SPREAD in m[3] or not one_type(m[4]):
+        if m is None or not one_type(m[4]):
             continue
         if m[1].isidentifier():  # a name, maybe byname's `_ds`: the translation keeps the source's lines
             key = (m[1], line + 1 - (shift if line >= first else 0))
@@ -153,7 +157,10 @@ def probed_from(found: list[tuple[int, int, str]], tr: "Translation") -> Probed:
             key = (f"**{at - tr.source.rfind(chr(10), 0, at) - 1}", tr.source.count("\n", 0, at) + 1)
         else:
             continue
-        if key in asked:
+        if key in asked and SPREAD in m[3]:
+            if waiting is not None:
+                waiting.add(key)
+        elif key in asked:
             got = Known(class_fields(m[3]), is_open=m[2] == "_opn_")
             out[key] = got if out.get(key, got) == got else None  # two answers on a line that disagree
     return {k: v for k, v in out.items() if v is not None}
@@ -173,6 +180,7 @@ class Translation:
             probed = got[1]
         self.source = source
         self.probe = probe
+        self.probed: Probed = probed or {}  # the answers it was translated with
         self.unseen: list[tuple[str, int]] = []  # see Result.unseen
         lookup = Modules(path) if path is not None else None
         self.imports: set[Path] = set()  # module files whose record types the translation used
@@ -203,8 +211,19 @@ class Translation:
         self.at = prelude_offset(body) if prelude else 0
         self.plen = len(prelude)
         self.hidden = body[: self.at] + prelude + body[self.at :]
+        if probe and self.unseen:
+            self.hidden += ("" if self.hidden.endswith("\n") else "\n") + f"reveal_type({PROBE_MARK!r})\n"
         self.src_lines = LineIndex(source)
         self.hid_lines = LineIndex(self.hidden)
+        # a probe's own `reveal_type(...)`s, by where the checker puts its answer (the argument): not the
+        # user's, which are source text, and whose notes are shown
+        self.reveals: set[tuple[int, int]] = set()
+        for m in re.finditer(r"\breveal_type\(", self.hidden if probe else ""):
+            hit = self._from_hidden(m.start(), False)
+            if hit is not None and self.source.startswith("reveal_type(", hit[0]):
+                continue
+            pos = self.hid_lines.position(m.end())
+            self.reveals.add((pos["line"], pos["character"]))
         if self.error is None:
             for s, e, msg in r.problems:
                 rng = {"start": self.src_lines.position(s), "end": self.src_lines.position(e)}

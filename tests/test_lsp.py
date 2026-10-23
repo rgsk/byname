@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from byname.lsp import pretty, read_message
+from byname.lsp import Doc, Proxy, pretty, read_message
 
 pytestmark = pytest.mark.skipif(
     not (Path(sys.executable).parent / "basedpyright-langserver").exists()
@@ -1738,6 +1738,114 @@ def test_a_spread_of_what_only_the_checker_knows_is_exact_in_the_editor(lsp):
     assert [(n, m.split("\n")[0]) for n, m in wait_errors(c, uri, want, key=lambda m: m.split("\n")[0])] == want
     assert not [d for d in c.diags[uri] if "Type of" in d["message"]]
     assert "moved: (name: str, age: int, zip: int)" in hover_text(c, uri, pos(text, "moved ="))
+
+
+def test_a_probe_s_answer_is_a_publish_that_has_one(tmp_path):
+    # Ctrl+hover opens the target for its preview and closes it, the click opens it again: the reopen's first
+    # publish can be of the text before the probe (the mirror's). It isn't the answer; the probe's own publish
+    # is, which answers its last line, reveal_type('_byname_probe'), even when the sources go unanswered (an
+    # unanalysed function). Twice without (the module's end unreachable), the probe goes on
+    path = tmp_path / "probe.pyn"
+    text = "def f(users):\n    for u in users:\n        moved = (**u, zip=1)\n"
+    proxy = Proxy(["cat"])  # stands in for the checker: what's sent to it goes nowhere
+    doc = Doc(path.as_uri(), text, 1, probe=True)
+    doc.sent = 1
+    proxy.docs[path] = [doc]
+    hidden = doc.tr.hidden.splitlines()
+    line = next(k for k, h in enumerate(hidden) if "reveal_type(u)" in h)
+    at = {"line": line, "character": hidden[line].index("reveal_type(u)") + len("reveal_type(")}
+    stale = {"range": {"start": {"line": 0, "character": 0}}, "message": '"zip" is not accessed'}
+    answer = {"range": {"start": at}, "message": 'Type of "u" is "_typ_name___0[str]"'}
+    assert doc.tr.hidden.endswith("reveal_type('_byname_probe')\n")
+    mark = {"range": {"start": {"line": len(hidden) - 1, "character": 12}}, "message": "Type of \"'_byname_probe'\" is"}
+    proxy.probed(doc, path, [stale])
+    assert proxy.docs[path] == [doc]  # still waiting
+    proxy.probed(doc, path, [stale, answer, mark])
+    final = proxy.docs[path][-1]
+    assert final is not doc and not final.probing
+    assert "moved = _rec_name__zip___" in final.tr.hidden and "reveal_type" not in final.tr.hidden
+    unreachable = Doc(path.as_uri(), text, 1, probe=True)
+    proxy.docs[path] = [unreachable]
+    assert proxy.probed(unreachable, path, [stale]) and proxy.probed(unreachable, path, [stale])
+    # the third publish without an answer: nothing changed from what the probe was built with (no answer),
+    # so the probe is the file's text, and this publish its diagnostics
+    assert not proxy.probed(unreachable, path, [stale]) and not unreachable.probing
+    assert proxy.docs[path] == [unreachable]
+
+    # the next edit's probe is built with the answers the file had: typed while it's in the checker
+    # (completion lists name), and each asked again. Answered the same: no final, its diagnostics shown
+    typing = Doc(path.as_uri(), text + "# typing\n", 2, probe=True, carry=final.tr.probed)
+    assert typing.probing and "name=reveal_type(u).name" in typing.tr.hidden
+    proxy.docs[path] = [typing]
+    hidden = typing.tr.hidden.splitlines()
+    line = next(k for k, h in enumerate(hidden) if "reveal_type(u)" in h)
+    at = {"line": line, "character": hidden[line].index("reveal_type(u)") + len("reveal_type(")}
+    same = {"range": {"start": at}, "message": 'Type of "u" is "_typ_name___0[str]"'}
+    assert (at["line"], at["character"]) in typing.tr.reveals  # its note isn't shown
+    assert not proxy.probed(typing, path, [same, mark]) and proxy.docs[path] == [typing]
+    # answered otherwise (users' type changed): the final is built with the new answer
+    retyped = Doc(path.as_uri(), text, 3, probe=True, carry=final.tr.probed)
+    proxy.docs[path] = [retyped]
+    other = {**same, "message": 'Type of "u" is "_typ_name__age___0[str, int]"'}
+    assert proxy.probed(retyped, path, [other, mark])
+    assert "_rec_name__age__zip___" in proxy.docs[path][-1].tr.hidden
+    proxy.proc.kill()
+
+
+def test_a_spread_of_what_a_closed_file_s_spread_returns_is_exact(lsp):
+    # first_moved() returns a spread the checker is asked about, in a file never opened: the editor's checker
+    # reads its mirror copy, which a run in the background asks about (probe_project, on a save here), and
+    # the open file that spreads what it returns is asked again
+    c, root, _ = lsp
+    (root / "closed_dep.pyn").write_text(
+        "type User = (name: str, age: int)\n"
+        "def all_users() -> list[User]: ...\n"
+        "def first_moved():\n"
+        "    for u in all_users():\n"
+        "        return (**u, zip=1)\n"
+        "    raise LookupError\n"
+    )
+    # rows has no type: never answered, so the file is asked again on top of the background run's answers,
+    # which the final keeps
+    text = "from closed_dep import first_moved\nx = (**first_moved(), k=1)\ndef g(rows):\n    y = (**rows, k=1)\n"
+    (root / "uses_closed.pyn").write_text(text)
+    made = [{"uri": (root / f).as_uri(), "type": 1} for f in ("closed_dep.pyn", "uses_closed.pyn")]
+    c.send({"method": "workspace/didChangeWatchedFiles", "params": {"changes": made}})  # as the editor tells
+    end = time.time() + 5  # the file events start a background run: both files answered while closed
+    while time.time() < end:
+        try:
+            c.handle(c.q.get(timeout=0.1))
+        except queue.Empty:
+            pass
+    uri = c.open(root / "uses_closed.pyn")
+    want = "x: (name: str, age: int, zip: int, k: int)"
+    for _ in range(100):
+        if want in (got := hover_text(c, uri, pos(text, "x ="))):
+            break
+        time.sleep(0.1)
+    assert want in got
+
+
+def test_completion_on_a_probed_spread_lists_its_fields_while_typing(lsp):
+    # each edit's probe is built with the answers the file had (Doc's carry), so `moved.` completes `name`
+    # at once, not only after the final text is in
+    c, root, _ = lsp
+    head = "type User = (name: str, age: int)\ndef f(users: list[User]):\n    for u in users:\n        moved = (**u, zip=1)\n"
+    uri = c.open(root / "completes.pyn", head)
+    for _ in range(100):  # the final text is in: answered once
+        if "moved: (name: str, age: int, zip: int)" in hover_text(c, uri, pos(head, "moved =")):
+            break
+        time.sleep(0.1)
+    text = head + "        moved.\n"
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": text}]},
+        }
+    )
+    got = c.request("textDocument/completion", {"textDocument": {"uri": uri}, "position": {"line": 4, "character": 14}})
+    labels = [i["label"] for i in (got["items"] if isinstance(got, dict) else got)]
+    assert {"name", "age", "zip"} <= set(labels), labels[:10]
 
 
 def test_a_probed_spread_s_fields_are_coloured_once_its_final_text_is_in(lsp):

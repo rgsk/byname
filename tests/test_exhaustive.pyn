@@ -895,7 +895,7 @@ def test_a_spread_of_a_call_is_typed_when_the_function_shows_its_fields(tmp_path
     assert sorted(verdicts) == [10, 11, 12, 13, 14]
 
 
-def test_a_spread_of_a_call_whose_function_shows_no_one_record_is_open(tmp_path):
+def test_a_spread_of_a_call_the_checker_types_as_no_one_record_is_open(tmp_path):
     verdicts = checker(
         """\
         import functools
@@ -913,9 +913,10 @@ def test_a_spread_of_a_call_whose_function_shows_no_one_record_is_open(tmp_path)
         """,
         tmp_path,
     )
-    # returns of different fields, or a decorator, which may return anything: an open record of the fields
-    # written after the spread (see test_a_spread_with_no_type_expected_is_open); annotate the function instead
-    assert verdicts == {11: 'Type of "e" is "(..., zip: int)"', 12: 'Type of "c" is "(..., zip: int)"'}
+    # returns of different fields: the checker's answer is a union, so an open record of the fields written
+    # after the spread (see test_a_spread_with_no_type_expected_is_open); annotate the function instead. A
+    # decorator byname can't follow, the checker can: functools.cache keeps what `cached` returns
+    assert verdicts == {11: 'Type of "e" is "(..., zip: int)"', 12: 'Type of "c" is "(name: str, zip: int)"'}
 
 
 def test_a_spread_with_no_type_expected_is_open(tmp_path):
