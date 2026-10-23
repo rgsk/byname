@@ -135,6 +135,8 @@ VARIANCE_RE = re.compile(
     r'Type parameter "T(\d+)@_(?:typ|opn)_(\w+?)" is \w+, but "(.*)" is not (?:the same as|a subtype of|assignable to) "(.*)"'
 )
 KEY_RE = re.compile(r'"_key_\w*"')
+# a field read with a dot on an open record type that doesn't declare it (after unsite)
+UNDECLARED_RE = re.compile(r'Cannot access attribute "(\w+)" for class "(_opn_\w*(?:\[[^"]*\])?)"')
 RULE_RE = re.compile(r"\s*\((report\w+)\)\s*$")
 CODE_KEYS = {"newText", "insertText", "filterText", "sortText", "uri", "targetUri", "data"}
 # keys whose string values are document URIs (a notebook cell's `document` is one, in a structure change)
@@ -506,6 +508,15 @@ def positional_fields(msg: str) -> list[str] | None:
     return (m[1] or m[2]).split("__") if m else None
 
 
+def unchecked_edit(src: str, start: int, end: int, field: str) -> tuple[int, int, str] | None:
+    """`p.msg` -> `p["msg"]`, src[start:end] being the field name read: (start, end, text) of the edit from
+    the dot. None if it isn't a dot read."""
+    m = re.search(r"\.\s*$", src[:start])
+    if src[start:end] != field or m is None:
+        return None
+    return m.start(), end, f'["{field}"]'
+
+
 def add_line(msg: str, text: str) -> str:
     """Put `text` on a line of its own after the message's first, keeping the CLI's rule name at the end."""
     lines = msg.split("\n")
@@ -546,6 +557,17 @@ def explain_fields(msg: str) -> str:
     FIELDSET, a generated property; keep the first line and say which fields are extra or missing.
     Likewise a record built from spreads, checked as a dict against the type's TypedDict (`_dct_`)."""
     msg = unsite(msg)
+    if m := UNDECLARED_RE.search(msg):
+        # the gradual path for open records: `p: (...)` read with brackets, unchecked, until its fields are
+        # declared; a dot read is the checked one, so say how to get there
+        f, typ = m[1], pretty(m[2])
+        declared = f"{typ[:-1]}, {f}: <type>)"  # `(...)` -> `(..., msg: <type>)`
+        rule = RULE_RE.search(msg.split("\n")[-1])
+        return (
+            msg[: m.start()]
+            + f'"{f}" isn\'t declared on {typ}: declare it, {declared}, or read it unchecked with ["{f}"]'
+            + (f" ({rule[1]})" if rule else "")
+        )
     if "_dct_" in msg and (DICT_MISSING_RE.search(msg) or DICT_EXTRA_RE.search(msg)):
         lines = msg.split("\n")
         indent = lines[1][: len(lines[1]) - len(lines[1].lstrip())] if len(lines) > 1 else "  "
@@ -1681,23 +1703,33 @@ class Proxy:
         return [{"title": f"byname: {title} (ruff)", "kind": kind + ".byname", "edit": {"changes": changes}}]
 
     def by_name_actions(self, params: dict, doc: Doc) -> list[dict]:
-        """Quick fixes for records read by position (diagnostics carrying `bynameFields`): read them by name."""
+        """Quick fixes for records read by position (diagnostics carrying `bynameFields`): read them by name;
+        and for a field an open type doesn't declare (`bynameUnchecked`): read it unchecked, `p["msg"]`,
+        which says so in the text, where pyright's own fix, an ignore comment, leaves `p.msg` looking checked."""
         out = []
         lines = doc.tr.src_lines
         for d in params.get("context", {}).get("diagnostics", []):
-            fields = (d.get("data") or {}).get("bynameFields") if isinstance(d.get("data"), dict) else None
-            if not fields:
+            data = d.get("data") if isinstance(d.get("data"), dict) else {}
+            fields, unchecked = data.get("bynameFields"), data.get("bynameUnchecked")
+            if not fields and not unchecked:
                 continue
             r = d["range"]
             start = lines.offset(r["start"]["line"], r["start"]["character"])
             end = lines.offset(r["end"]["line"], r["end"]["character"])
-            if (fix := by_name_edit(doc.tr.source, start, end, fields)) is None:
+            if fields:
+                fix = by_name_edit(doc.tr.source, start, end, fields)
+                title = fix and f"Read by name: {fix[2]}"
+            else:
+                fix = unchecked_edit(doc.tr.source, start, end, unchecked)
+                receiver = re.search(r"\w*$", doc.tr.source[: fix[0]])[0] if fix else ""  # `p` in `p.msg`
+                title = fix and f"Read it unchecked: {receiver}{fix[2]}"
+            if fix is None:
                 continue
             a, b, text = fix
             edit = {"range": {"start": lines.position(a), "end": lines.position(b)}, "newText": text}
             out.append(
                 {
-                    "title": f"Read by name: {text}",
+                    "title": title,
                     "kind": "quickfix",
                     "diagnostics": [d],
                     "isPreferred": True,
@@ -1807,7 +1839,8 @@ class Proxy:
                 return
             if (own := self.own_actions.pop(mid, None)) and "result" in msg:
                 result = self.to_editor(msg["result"], method_doc[1]) if msg["result"] else []
-                self.client.send({**msg, "result": [*(result if isinstance(result, list) else []), *own]})
+                # ours first: they keep the code readable, where the checker offers an ignore comment
+                self.client.send({**msg, "result": [*own, *(result if isinstance(result, list) else [])]})
                 return
             if method_doc and "result" in msg and msg["result"] is not None:
                 req, doc = method_doc
@@ -1910,9 +1943,12 @@ class Proxy:
             if doc.tr.quiet(doc.tr.src_lines.offset(r["start"]["line"], r["start"]["character"]), d.get("message", "")):
                 continue
             fields = positional_fields(d.get("message", ""))
+            undeclared = UNDECLARED_RE.search(unsite(d.get("message", "")))
             d = {**d, "range": r, "message": pretty(explain_fields(d.get("message", "")))}
             if fields and "data" not in d:
                 d["data"] = {"bynameFields": fields}  # for the quick fix (by_name_actions)
+            elif undeclared and "data" not in d:
+                d["data"] = {"bynameUnchecked": undeclared[1]}  # likewise
             if "relatedInformation" in d:
                 d["relatedInformation"] = self.to_editor(d["relatedInformation"], None)
             out.append(d)

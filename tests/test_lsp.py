@@ -1709,3 +1709,32 @@ def test_an_open_spread_record_shows_its_fields_and_colours_them(lsp):
     c.wait_diags(uri)
     assert "out: (..., name: str)" in hover_text(c, uri, pos(text, "out"))
     assert "rest: (...)" in hover_text(c, uri, pos(text, "rest)"))
+
+
+def test_a_dot_read_of_an_undeclared_field_on_an_open_type_says_how_to_declare_it(lsp):
+    c, root, _ = lsp
+    text = "def log(p: (...)):\n    print(p.msg)\n"
+    uri = c.open(root / "undeclared.pyn", text)
+    want = '"msg" isn\'t declared on (...): declare it, (..., msg: <type>), or read it unchecked with ["msg"]'
+    assert wait_errors(c, uri, [(1, want)]) == [(1, want)]
+
+
+def test_an_undeclared_field_on_an_open_type_offers_reading_it_unchecked(lsp):
+    # brackets say "unchecked" in the text; pyright's own fix, an ignore comment, leaves `p.msg` looking checked
+    c, root, _ = lsp
+    text = "def log(p: (...)):\n    print(p.msg)\n"
+    uri = c.open(root / "unchecked.pyn", text)
+    want = '"msg" isn\'t declared on (...): declare it, (..., msg: <type>), or read it unchecked with ["msg"]'
+    assert wait_errors(c, uri, [(1, want)]) == [(1, want)]
+    d = next(d for d in c.diags[uri] if d.get("severity", 1) == 1)
+    actions = c.request(
+        "textDocument/codeAction", {"textDocument": {"uri": uri}, "range": d["range"], "context": {"diagnostics": [d]}}
+    )
+    assert actions[0]["title"] == 'Read it unchecked: p["msg"]'  # before the checker's ignore comment
+    ours = [a for a in actions if a["title"].startswith("Read it unchecked")]
+    assert len(ours) == 1
+    edit = ours[0]["edit"]["changes"][uri][0]
+    assert edit == {
+        "range": {"start": {"line": 1, "character": 11}, "end": {"line": 1, "character": 15}},
+        "newText": '["msg"]',
+    }

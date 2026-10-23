@@ -92,6 +92,11 @@ def log(p: (...)) -> None:                   # any record
     print(p["msg"])                          # brackets: unchecked, see Access above
 ```
 
+That's a path to typed code: start with `(...)` and brackets, then declare the fields you read,
+`(..., msg: str)`, and read them with dots, checked and completed. A dot read of a field the type doesn't
+declare says so: `"msg" isn't declared on (...): declare it, (..., msg: <type>), or read it unchecked with
+["msg"]`. In the editor, the quick fix *Read it unchecked* turns `p.msg` into `p["msg"]`.
+
 `...` goes first, so a long type says it's open before listing its fields; anywhere else it's an error.
 
 The written order is only for display: hover, printing, `_asdict()` and `**rec` show the fields as you

@@ -581,6 +581,25 @@ def test_brackets_read_a_record_unchecked(tmp_path):
         r["nmae"]
 
 
+def test_a_dot_read_of_an_undeclared_field_says_how_to_declare_it(tmp_path):
+    # the gradual path: `p: (...)` read with brackets, unchecked, then its fields declared, `(..., msg: str)`,
+    # and read with dots, checked. A dot read of a field the open type doesn't declare says both ways on (the
+    # editor's quick fix, Read it unchecked, writes the bracket read)
+    verdicts = checker(
+        """\
+        def log(p: (...), q: (..., step: int)):
+            print(p.msg, q.msg)
+        """,
+        tmp_path,
+    )
+    assert verdicts == {
+        2: '"msg" isn\'t declared on (...): declare it, (..., msg: <type>), or read it unchecked with ["msg"]'
+        " (reportAttributeAccessIssue)\n\n"
+        '"msg" isn\'t declared on (..., step: int): declare it, (..., step: int, msg: <type>), or read it unchecked '
+        'with ["msg"] (reportAttributeAccessIssue)'
+    }
+
+
 def test_an_open_type_takes_records_only(tmp_path):
     # unlike `.name`, `p["name"]` needs a mapping underneath: a dataclass or any other object won't do
     verdicts = checker(
