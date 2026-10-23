@@ -68,6 +68,7 @@ class Client:
         self.q: queue.Queue = queue.Queue()
         self.next_id = 0
         self.diags: dict[str, list] = {}
+        self.asked: list[str] = []  # the methods of the server's requests, in order
         self.settings = settings or {}  # the editor's, by section: what workspace/configuration gets
         threading.Thread(target=self.pump, daemon=True).start()
 
@@ -83,6 +84,7 @@ class Client:
     def handle(self, msg) -> dict | None:
         """Answer checker->editor requests; record diagnostics; return responses."""
         if "method" in msg and "id" in msg:  # server request
+            self.asked.append(msg["method"])
             if msg["method"] == "workspace/configuration":
                 self.send(
                     {"id": msg["id"], "result": [self.settings.get(i.get("section")) for i in msg["params"]["items"]]}
@@ -161,7 +163,7 @@ def lsp(tmp_path_factory):
     (root / "helpers.py").write_text(HELPERS)
     c = Client(root, tmp_path_factory.mktemp("cache"))
     caps = {  # like VS Code: the checker asks us for settings, and we accept semantic tokens
-        "workspace": {"configuration": True, "workspaceFolders": True},
+        "workspace": {"configuration": True, "workspaceFolders": True, "semanticTokens": {"refreshSupport": True}},
         "notebookDocument": {"synchronization": {}},
         "textDocument": {
             "semanticTokens": {
@@ -1736,6 +1738,38 @@ def test_a_spread_of_what_only_the_checker_knows_is_exact_in_the_editor(lsp):
     assert [(n, m.split("\n")[0]) for n, m in wait_errors(c, uri, want, key=lambda m: m.split("\n")[0])] == want
     assert not [d for d in c.diags[uri] if "Type of" in d["message"]]
     assert "moved: (name: str, age: int, zip: int)" in hover_text(c, uri, pos(text, "moved ="))
+
+
+def test_a_probed_spread_s_fields_are_coloured_once_its_final_text_is_in(lsp):
+    # the editor asks for tokens right after an edit, and gets the probe translation's, where moved.name has
+    # no colour: the final text's arrival tells it to ask again (refresh_tokens)
+    c, root, _ = lsp
+    text = (
+        "type User = (name: str, age: int)\n"
+        "def f(users: list[User]):\n"
+        "    for u in users:\n"
+        "        moved = (**u, zip=1)\n"
+        "        print(moved.name)\n"
+    )
+    before = c.asked.count("workspace/semanticTokens/refresh")
+    uri = c.open(root / "probed_tokens.pyn", text)
+    end = time.time() + 30
+    while c.asked.count("workspace/semanticTokens/refresh") == before and time.time() < end:
+        try:
+            c.handle(c.q.get(timeout=0.5))
+        except queue.Empty:
+            pass
+    assert c.asked.count("workspace/semanticTokens/refresh") > before
+    legend = c.init["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"]
+    data = c.request("textDocument/semanticTokens/full", {"textDocument": {"uri": uri}})["data"]
+    line = col = 0
+    kinds = set()
+    for i in range(0, len(data), 5):
+        dl, dc, length, typ, _ = data[i : i + 5]
+        line, col = line + dl, (col + dc if dl == 0 else dc)
+        if line == 4 and text.split("\n")[4][col : col + length] == "name":
+            kinds.add(legend[typ])
+    assert kinds == {"property"}
 
 
 def test_a_field_a_spread_brought_says_where_it_went_as_byname_tool_does(lsp):

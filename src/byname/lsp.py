@@ -73,6 +73,9 @@ def read_message(stream) -> dict | None:
     return json.loads(stream.read(length))
 
 
+OWN_REQUEST = "byname-"  # the id prefix of the proxy's own requests to the editor, whose answers it drops
+
+
 class Writer:
     def __init__(self, stream):
         self.stream = stream
@@ -889,6 +892,8 @@ class Proxy:
         self.held_lock = threading.Lock()  # diagnostics arrive on the checker thread, saves on ours
         # a probe's answer sends the final text from the checker thread: never after a newer edit (probed)
         self.text_lock = threading.RLock()
+        self.token_refresh = False  # the editor re-asks for semantic tokens when told to (refresh_tokens)
+        self.own_requests = 0
 
     # paths --------------------------------------------------------------
 
@@ -1103,6 +1108,8 @@ class Proxy:
         method, mid, params = msg.get("method"), msg.get("id"), msg.get("params") or {}
 
         if method is None:  # response to a checker request
+            if isinstance(mid, str) and mid.startswith(OWN_REQUEST):
+                return  # to ours (refresh_tokens)
             if mid in self.server_requests and isinstance(msg.get("result"), list):
                 msg = {**msg, "result": self.inject_config(self.server_requests.pop(mid), msg["result"])}
             self.server.send(msg)
@@ -1116,6 +1123,7 @@ class Proxy:
             self.mirror = mirror_dir(self.root, "lsp")
             self.sync()
             caps = params.get("capabilities", {})
+            self.token_refresh = bool(caps.get("workspace", {}).get("semanticTokens", {}).get("refreshSupport"))
             caps.get("general", {}).pop("positionEncodings", None)  # we map in UTF-16
             # one root, the mirror, given every way: with rootUri alone the checker doesn't read the project's
             # config (pyproject.toml, pyrightconfig.json; measured, 1.40.1). No folder support, so it doesn't
@@ -1413,6 +1421,20 @@ class Proxy:
             versions.append(final)
             del versions[:-5]
             self.send_text(key, final.tr.hidden, final)
+        self.refresh_tokens()
+
+    def refresh_tokens(self) -> None:
+        """Tell the editor to ask for semantic tokens again. It asked right after the edit, so it got the
+        probe translation's: there a probed spread's fields weren't known, and `moved.name` had no colour."""
+        if self.token_refresh:
+            self.own_requests += 1
+            self.client.send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": f"{OWN_REQUEST}{self.own_requests}",
+                    "method": "workspace/semanticTokens/refresh",
+                }
+            )
 
     def send_text(self, key: Path | str, hidden: str, doc: Doc | None) -> None:
         """didChange to the checker; doc=None marks a temporary completion-only text. A cell changes
