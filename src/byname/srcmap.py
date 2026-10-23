@@ -13,7 +13,7 @@ from bisect import bisect_right
 from functools import cached_property
 from pathlib import Path
 
-from .transform import Edit, Mark, declared_reads, prelude_offset, transform
+from .transform import Edit, Mark, prelude_offset, transform
 
 Hit = tuple[Edit, Mark | None] | None  # what generated text a body offset landed on
 
@@ -120,6 +120,7 @@ class Translation:
         self.fields: list[tuple[int, int]] = []  # source spans of record field names
         self.shorthands: list[tuple[int, int]] = []  # every bare `x=` (see Result.shorthands)
         self.type_fields: list[tuple[str, str, int, int]] = []  # see Result.type_fields
+        self.reads: list[tuple[int, int, str]] = []  # see Result.declared_reads
         self.labels: set[int] = set()  # where a walrus labelling a returned tuple starts (see Result.labels)
         try:
             r = transform(source, tolerant=True, checker=True, lookup=lookup)
@@ -127,6 +128,7 @@ class Translation:
             self.fields = r.fields
             self.shorthands = r.shorthands
             self.type_fields = r.type_fields
+            self.reads = r.declared_reads
             self.labels = {s for s, _ in r.labels}
         except Exception as e:  # mid-edit code: send it raw; the checker reports the syntax error
             self.error = e
@@ -146,20 +148,12 @@ class Translation:
 
     @cached_property
     def hints(self) -> list[dict]:
-        """`p["msg"]` where p's record type declares msg: a dot read is the checked one (lsp.quick_fix). Not
-        in __init__: it parses the translation, so it runs when diagnostics go out, not before each edit
-        reaches the checker."""
+        """`p["msg"]` where p's record type declares msg: a dot read is the checked one (lsp.quick_fix). The
+        reads come from the translation's token pass (transform.declared_reads)."""
         out: list[dict] = []
-        # no `name["..."]` written at all: skip the parse. On the source: the translation has `_L['a,b']` in
-        # every record type, so there it would always match
-        if self.error is not None or not re.search(r"\w\s*\[\s*['\"]", self.source):
-            return out
-        for hs, hv, he, field in declared_reads(self.hidden):
-            a, v, b = self._from_hidden(hs, False), self._from_hidden(hv, True), self._from_hidden(he, True)
-            if a is None or v is None or b is None:
-                continue
-            name = self.source[a[0] : v[0]]
-            rng = {"start": self.src_lines.position(v[0]), "end": self.src_lines.position(b[0])}
+        for a, b, field in self.reads:
+            name = re.search(r"\w*$", self.source[:a])[0]  # `p`: the range starts right after it
+            rng = {"start": self.src_lines.position(a), "end": self.src_lines.position(b)}
             message = f'"{field}" is declared on {name}\'s type: read it checked, {name}.{field}'
             out.append(
                 {"range": rng, "severity": 3, "source": "byname", "message": message, "data": {"bynameChecked": field}}

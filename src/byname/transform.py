@@ -246,6 +246,9 @@ class Result:
     # checker: (class, field, start, end) for each field name written in a record type, `name` in
     # `(name: str)`: its own class's field, so renaming that field reaches the text (see site_class)
     type_fields: list[tuple[str, str, int, int]] = field(default_factory=list)
+    # bracket reads of a field the reader's written record type declares, `p["msg"]` with
+    # `p: (..., msg: str)`: (end of `p`, end of the read, field), source offsets (see declared_reads)
+    declared_reads: list[tuple[int, int, str]] = field(default_factory=list)
 
 
 def field_error(name: str) -> str:
@@ -513,76 +516,6 @@ class _Scope:
 
 COMPOUND = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.TryStar, ast.With, ast.AsyncWith, ast.Match)
 COMPS = (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
-
-
-def declared_reads(hidden: str) -> list[tuple[int, int, int, str]]:
-    """Checker translation: bracket reads of a field the reader's written record type declares, `p["msg"]`
-    with `p: (..., msg: str)` (a parameter or an annotated name, the type inline or a `type` alias), as
-    offsets into `hidden`: (start of the read, end of `p`, end of the read, field). Brackets are the unchecked
-    read, so a declared field is better read with a dot (the editor says so, with a quick fix)."""
-    tree = parse_around_errors(hidden)
-    if tree is None:
-        return []
-    lines = hidden.splitlines(keepends=True)
-    starts = [0]
-    for line in lines:
-        starts.append(starts[-1] + len(line))
-
-    def at(lineno: int, col: int) -> int:  # ast columns count UTF-8 bytes
-        return starts[lineno - 1] + len(lines[lineno - 1].encode()[:col].decode(errors="ignore"))
-
-    aliases = {n.name.id: n.value for n in tree.body if isinstance(n, ast.TypeAlias) and isinstance(n.name, ast.Name)}
-
-    def fields_of(t: ast.expr | None) -> tuple[str, ...]:
-        if isinstance(t, ast.Name) and t.id in aliases:
-            t = aliases[t.id]
-        if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name):
-            for prefix in ("_typ_", "_opn_"):
-                if t.value.id.startswith(prefix):
-                    return class_fields(t.value.id.removeprefix(prefix))
-        return ()
-
-    out = []
-
-    def visit(scope: ast.AST, declared: dict[str, tuple[str, ...]]) -> None:
-        declared = dict(declared)
-        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            a = scope.args
-            for x in [*a.posonlyargs, *a.args, *a.kwonlyargs]:
-                declared[x.arg] = fields_of(x.annotation)
-        stack = list(ast.iter_child_nodes(scope))
-        nodes = []
-        while stack:
-            n = stack.pop()
-            nodes.append(n)
-            if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                stack.extend(ast.iter_child_nodes(n))
-        for n in nodes:
-            if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
-                declared[n.target.id] = fields_of(n.annotation)
-        for n in nodes:
-            if (
-                isinstance(n, ast.Subscript)
-                and isinstance(n.ctx, ast.Load)
-                and isinstance(n.value, ast.Name)
-                and isinstance(n.slice, ast.Constant)
-                and n.slice.value in declared.get(n.value.id, ())
-                and n.end_lineno is not None
-                and n.value.end_lineno is not None
-            ):
-                out.append(
-                    (
-                        at(n.lineno, n.col_offset),
-                        at(n.value.end_lineno, n.value.end_col_offset or 0),
-                        at(n.end_lineno, n.end_col_offset or 0),
-                        n.slice.value,
-                    )
-                )
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                visit(n, declared if not isinstance(n, ast.ClassDef) else {})
-
-    visit(tree, {})
-    return out
 
 
 def untyped_builds(body: str) -> set[tuple[int, int]]:
@@ -1008,6 +941,7 @@ def transform(
     kw_used = builds = False
     calls = 0  # `_byname_v<n>`: a spread call's value in a known build
     type_groups: set[int] = set()  # `(` of record types, for their fields' types and `(name: str)(...)`
+    group_fields: dict[int, tuple[str, ...]] = {}  # `(` of a record type -> its fields (declared_reads)
 
     def wrap_kw(its: list[list[int]]) -> None:
         # checker only: `**x` -> `**_byname_kw(x)` in calls and dict displays, so the checker sees a record's
@@ -1525,6 +1459,7 @@ def transform(
                 raise err(f"duplicate record field in {fields}", t)
             types[(fields, is_open)] = None
             type_groups.add(i)
+            group_fields[i] = fields
             group = span(i, close)
             standins.append((group[0], group[0] + 1, TYP + "["))
             standins.append((group[1] - 1, group[1], "]"))
@@ -1804,6 +1739,104 @@ def transform(
         prelude += "".join(tuple_def(t) for t in tuples)
     if record_used:
         prelude += "from typing import cast as _cast\n"
+
+    def declared_reads() -> list[tuple[int, int, str]]:
+        """`p["msg"]` where `p` has a written record type declaring `msg`: a parameter (`p: (..., msg: str)`,
+        read in its function's body) or an annotated name (read in the rest of its block), the type inline
+        or a `type` alias of one. From the tokens, no parse: it runs per edit. Brackets are the unchecked
+        read, so a declared field is better read with a dot (the editor hints so, with a quick fix)."""
+        depth, d = [], 0
+        for t in toks:
+            d += t.type == tokenize.INDENT
+            d -= t.type == tokenize.DEDENT
+            depth.append(d)
+        aliases = {  # `type Cfg = (..., lr: float)`
+            toks[k + 1].string: group_fields[k + 3]
+            for k in range(len(toks) - 3)
+            if toks[k].string == "type" and toks[k + 2].string == "=" and k + 3 in group_fields
+        }
+
+        def body(o: int) -> tuple[int, int]:
+            """A def's body, its parameter list opening at toks[o]: an indented block or the rest of the line."""
+            start = next(j for j in range(pair[o] + 1, len(toks)) if toks[j].string == ":" and j not in parent)
+            if toks[start + 1].type == tokenize.NEWLINE and toks[start + 2].type == tokenize.INDENT:
+                return start, next((j for j in range(start + 3, len(toks)) if depth[j] <= depth[start]), len(toks))
+            return start, next((j for j in range(start, len(toks)) if toks[j].type == tokenize.NEWLINE), len(toks))
+
+        # a nested def, lambda or comprehension binding the name again: there it's another variable
+        shadows: list[tuple[str, int, int]] = []  # (name, first token, end token)
+        for k, t in enumerate(toks):
+            if t.string == "def" and k + 2 < len(toks) and toks[k + 2].string == "(":
+                start, end = body(k + 2)
+                names = [toks[it[0]].string for it in items(k + 2) if is_name(toks[it[0]])]
+                names += [toks[it[1]].string for it in items(k + 2) if len(it) > 1 and toks[it[0]].string in "**"]
+                # and the names its body binds, which are its locals unless declared global or nonlocal
+                kept = {toks[j + 1].string for j in range(start, end) if toks[j].string in ("global", "nonlocal")}
+                for j in range(start + 1, end - 1):
+                    prev, nxt = toks[j - 1], toks[j + 1]
+                    stmt = prev.type in (tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT) or prev.string == ";"
+                    if is_name(toks[j]) and (
+                        (stmt and (nxt.string == "=" or nxt.string.endswith("=") and nxt.string not in ("==", "!=")))
+                        or nxt.string in (":=",)
+                        or (prev.string in ("for", "as", "import") and j not in parent)
+                    ):
+                        names.append(toks[j].string)
+                shadows += [(n, start, end) for n in names if n not in kept]
+            elif t.string in ("lambda", "for") and (t.string == "lambda" or k in parent):
+                stop = ":" if t.string == "lambda" else "in"
+                j = k + 1
+                while j < len(toks) and not (toks[j].string == stop and parent.get(j) == parent.get(k)):
+                    j += 1
+                o = parent.get(k)  # the bracket a lambda or comprehension stands in, or else its line
+                end = (
+                    pair[o]
+                    if o is not None
+                    else next((x for x in range(k, len(toks)) if toks[x].type == tokenize.NEWLINE), len(toks))
+                )
+                first = k if t.string == "lambda" else o
+                shadows += [(toks[x].string, first, end) for x in range(k + 1, j) if is_name(toks[x])]
+
+        declared: list[tuple[str, tuple[str, ...], int, int]] = []  # (name, fields, first token, end token)
+        for k, t in enumerate(toks[:-2]):
+            if t.string != ":" or not k or not is_name(toks[k - 1]):
+                continue
+            ann = toks[k + 1]
+            fields = group_fields.get(k + 1) or (aliases.get(ann.string) if is_name(ann) else None)
+            if not fields:
+                continue
+            o = parent.get(k)
+            if o is not None and toks[o].string == "(" and o >= 2 and toks[o - 2].string == "def":
+                start, end = body(o)  # a parameter: read in its function's body
+            else:  # an annotated name: read in the rest of its block
+                start = k
+                end = next((j for j in range(k + 1, len(toks)) if depth[j] < depth[k]), len(toks))
+            declared.append((toks[k - 1].string, fields, start, end))
+        out = []
+        for k in range(len(toks) - 3):
+            name, opening, key, closing = toks[k : k + 4]
+            if not (is_name(name) and opening.string == "[" and key.type == tokenize.STRING and closing.string == "]"):
+                continue
+            after = toks[k + 4].string if k + 4 < len(toks) else ""
+            if (
+                after == "="
+                or (after.endswith("=") and after not in ("==", "<=", ">=", "!="))
+                or toks[k - 1].string == "del"
+            ):
+                continue  # a store, not a read
+            try:
+                f = ast.literal_eval(key.string)
+            except (ValueError, SyntaxError):
+                continue  # an f-string
+            if any(
+                n == name.string
+                and f in fields
+                and a < k < b
+                and not any(m == n and a < s < k < e for m, s, e in shadows)  # bound again in between
+                for n, fields, a, b in declared
+            ):
+                out.append((off(name.end), off(closing.end), f))
+        return out
+
     standins.sort()
     shapes = list(dict.fromkeys([*((f, False) for f in records), *types]))
     return Result(
@@ -1818,6 +1851,7 @@ def transform(
         imports(),
         sorted(shorthand_spans),
         type_fields,
+        declared_reads() if checker and tolerant else [],
     )
 
 

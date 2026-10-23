@@ -212,3 +212,48 @@ def test_renaming_only_the_local_is_left_as_it_is():
     src = "fn(name=)\n"
     edits = [_edit(src, 8, 8, "who")]
     assert Translation(src).split_shorthands(edits) == edits
+
+
+def _hinted(src: str) -> list[int]:
+    return [d["range"]["start"]["line"] + 1 for d in Translation(src).hints]
+
+
+def test_a_bracket_read_is_hinted_only_where_the_name_is_the_typed_one():
+    # fix all turns a hinted p["msg"] into p.msg: on a dict that's an AttributeError, so a name bound again
+    # by a nested def, lambda or comprehension is another variable there, and gets no hint
+    src = (
+        "def outer(p: (..., msg: str)):\n"
+        "    def inner(p):\n"  # its own p, untyped
+        "        return p['msg']\n"
+        "    def typed(p: (..., msg: int)):\n"  # its own p, typed
+        "        return p['msg']\n"
+        "    fix = lambda p: p['msg']\n"
+        "    rows = [p['msg'] for p in [{'msg': 1}]]\n"
+        "    other = lambda q: p['msg']\n"  # the outer p
+        "    p = (msg='again')\n"  # the parameter rebound: still its declared type
+        "    p['msg'] = 'x'\n"  # a store
+        "    return p['msg'], p['other']\n"
+    )
+    assert _hinted(src) == [5, 8, 11]
+
+
+def test_a_module_name_assigned_in_a_function_is_its_local_there():
+    src = (
+        "x: (name: str) = (name='a')\n"
+        "def f():\n"
+        "    x = {'name': 1}\n"
+        "    return x['name']\n"
+        "def g():\n"
+        "    for x in [{'name': 1}]:\n"
+        "        print(x['name'])\n"
+        "def h():\n"
+        "    global x\n"
+        "    x = (name='b')\n"
+        "    return x['name']\n"
+        "def k():\n"
+        "    return x['name']\n"
+        "type Cfg = (..., lr: float)\n"
+        "def one(c: Cfg): return c['lr']\n"
+        "print(x['name'], x [ 'name' ])\n"
+    )
+    assert _hinted(src) == [11, 13, 15, 16, 16]
