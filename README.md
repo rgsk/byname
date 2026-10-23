@@ -157,14 +157,11 @@ q: (name: str, age: int, sex: str, surname: str) = (**u, **r)   # or write the t
 
 A spread record is checked against the type expected where it stands, so you never have to name one.
 With no type expected, like `x = (**u, **r)`, it still gets its exact type when every spread is a name
-the file shows the fields of: bound to a record or a spread of such names, to `rec._asdict()`, to a call
-of a function that shows them, or annotated with a record type (a parameter's too). Then `x` is
-`(name: str, age: int, sex: str, surname: str)` and a typo like `x.surnme` is an error. A function shows
-the fields of what it returns by its return annotation, or by its `return`s when they all show the same
-ones (`return (name=, age=)`, or another such function's call, in other modules too), so
-`(**make(), zip=1)` is typed. Anything else the
-checker knows the type of is typed too (a decorated function's call, `functools.cache` and the like): a loop's item (`for u in users` with `users: list[User]`),
-`users.pop()`, an attribute, a call to a method. byname asks the checker: a file with such spreads goes to it
+the file shows the fields of: bound to a record or a spread of such names, to `rec._asdict()`, or annotated
+with a record type of the file (a parameter's too). Then `x` is `(name: str, age: int, sex: str, surname:
+str)` and a typo like `x.surnme` is an error. Anything else the checker knows the type of is typed too: a
+type imported from another module, a call's result (`(**make(), zip=1)`, a decorated function's too), a
+loop's item (`for u in users` with `users: list[User]`), `users.pop()`, an attribute. byname asks the checker: a file with such spreads goes to it
 once more first, each source in `reveal_type(...)`, and its answers type the spreads (see "Cost" below).
 Names are scoped as in Python, and a name rebound in straight-line
 code is read at its nearest binding before the spread, so `u = (**u, city="pune")` stays typed. When more than
@@ -273,10 +270,9 @@ def greet(u: (..., name: str, age: int)):     # like def greet(name: str, age: i
 - **Records only:** destructuring reads attributes, so it works on any object, but only a record has a list
   of fields to take the rest of. Anything else is a checker error and a `TypeError` at runtime.
 - **Empty or whole:** naming every field gives an empty record, `()`; `(**rest) = r` is a copy, equal to `r`.
-- **Typed from where the record came from:** a record literal, a name with a record type (a parameter, an
-  annotated name, an imported type), or a call to a function that shows what it returns, in this file or a
-  .pyn module it imports, or anything else the checker knows the type of (a loop's item, `users[0]`, a
-  method's result), asked of it as for spreads: an exact type gives exactly the other fields, an open one
+- **Typed from where the record came from:** a record literal, a name with a record type of the file (a
+  parameter, an annotated name), or anything else the checker knows the type of (an imported type, a call's
+  result, a loop's item, `users[0]`), asked of it as for spreads: an exact type gives exactly the other fields, an open one
   `(..., age: int)` stays open. A record the checker can't type either (no annotation, `Any`, a union) gives
   `(...)`: any record, read with brackets (`rest["age"]`) only, and the editor and `byname tool` say how to
   give the record a type: `row: User = rows[0]`, or `rows: list[User]`.

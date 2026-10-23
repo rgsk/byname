@@ -121,6 +121,8 @@ PROBED: dict[Path, tuple[str, Probed]] = {}
 # a probe translation's last line, `reveal_type('_byname_probe')`: the checker answers it whatever else it
 # can't (an unanalysed function's body), so a publish with its answer is of the probe (lsp.Proxy.probed)
 PROBE_MARK = "_byname_probe"
+# a spread of what another asked spread returns is answered a round later (tools.probe, lsp.Proxy.probed)
+PROBE_ROUNDS = 3
 # a comment that hides every diagnostic on its line, a probe's answer too: `# pyright: ignore` with no rules,
 # `# type: ignore` with or without (the checker reads its rules as none). `# pyright: ignore[rule]` leaves it
 IGNORE = re.compile(r"#\s*(?:pyright:\s*ignore(?![\w\[])|type:\s*ignore\b(?:\[[^\]]*\])?)")
@@ -173,20 +175,16 @@ class Translation:
     """A .pyn source and its hidden Python, with LSP position mapping both ways."""
 
     def __init__(self, source: str, path: Path | None = None, probe: bool = False, probed: Probed | None = None):
-        """path: the file, to find record types it imports from other modules (imports.Modules).
+        """path: the file, whose answers `byname tool` keeps (PROBED).
         probe: wrap each unseen spread source and rest in `reveal_type(...)` (transform's probe); probed: the
         checker's answers (probed_from), which make them known. Without, those `byname tool` has for this
         text (PROBED)."""
-        from .imports import Modules
-
         if probed is None and path is not None and (got := PROBED.get(path)) is not None and got[0] == source:
             probed = got[1]
         self.source = source
         self.probe = probe
         self.probed: Probed = probed or {}  # the answers it was translated with
         self.unseen: list[tuple[str, int]] = []  # see Result.unseen
-        lookup = Modules(path) if path is not None else None
-        self.imports: set[Path] = set()  # module files whose record types the translation used
         self.error: Exception | None = None
         self.problems: list[dict] = []  # byname diagnostics from tolerant translation
         self.fields: list[tuple[int, int]] = []  # source spans of record field names
@@ -196,7 +194,7 @@ class Translation:
         self.unknown_rests: list[tuple[int, int]] = []  # see Result.unknown_rests
         self.labels: set[int] = set()  # where a walrus labelling a returned tuple starts (see Result.labels)
         try:
-            r = transform(source, tolerant=True, checker=True, lookup=lookup, probed=probed, probe=probe)
+            r = transform(source, tolerant=True, checker=True, probed=probed, probe=probe)
             body, prelude, edits = r.body, r.prelude, r.edits
             self.fields = r.fields
             self.shorthands = r.shorthands
@@ -208,8 +206,6 @@ class Translation:
         except Exception as e:  # mid-edit code: send it raw; the checker reports the syntax error
             self.error = e
             body, prelude, edits = source, "", []
-        if lookup is not None:
-            self.imports = lookup.used
         self.map = SourceMap(edits)
         self.at = prelude_offset(body) if prelude else 0
         self.plen = len(prelude)

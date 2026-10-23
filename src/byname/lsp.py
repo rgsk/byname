@@ -28,7 +28,7 @@ from urllib.parse import quote, urlparse
 from urllib.request import url2pathname
 
 from .output import output_path, render
-from .srcmap import PROBE_MARK, PROBED, LineIndex, Probed, Translation, probed_from
+from .srcmap import PROBE_MARK, PROBE_ROUNDS, PROBED, LineIndex, Probed, Translation, probed_from
 from .transform import DS, FIELDSET, ORDER, REPR, BynameError, pattern_slot
 
 DEFAULT_CHECKER = ["basedpyright-langserver", "--stdio"]
@@ -857,6 +857,7 @@ class Doc:
         # the file (a cell's notebook), where the record types it imports are looked up from
         self.path = uri_to_path(uri) if urlparse(uri).scheme in ("file", "vscode-notebook-cell") else None
         self.unanswered = 0  # the probe's publishes without an answer (Proxy.probed)
+        self.round = 0  # probes of this text before it (Proxy.probed)
         self.probing = False
         if probe and probed is None:
             # the background run's answers for this very text (PROBED) are newer than the last version's
@@ -1255,10 +1256,7 @@ class Proxy:
             if method == "workspace/didChangeWatchedFiles":
                 if changes := self.watched(params.get("changes", [])):
                     self.send_server({**msg, "params": {"changes": changes}})
-                # a module changed outside the editor (a script, git, an agent): its importers read it again
-                for c in params.get("changes", []):
-                    if c.get("uri", "").endswith(".pyn"):
-                        self.retranslate_importers(uri_to_path(c["uri"]))
+                # a module changed outside the editor (a script, git, an agent): what spreads of it are is asked again
                 if any(c.get("uri", "").endswith(".pyn") for c in params.get("changes", [])):
                     self.probe_project()
                 return
@@ -1328,9 +1326,8 @@ class Proxy:
         if method == "textDocument/didSave":
             versions = self.docs.get(path)
             self.place(path)
-            self.retranslate_importers(path)
             self.send_server({**msg, "params": {"textDocument": {"uri": uri}}})
-            self.probe_project()  # what other files' spreads of it are may have changed
+            self.probe_project()  # what other files' spreads of it are may have changed: asked again
             if self.output_on_save and versions:
                 self.write_output(path, versions[-1])
             if versions:
@@ -1351,19 +1348,6 @@ class Proxy:
             )
             return True
         return False
-
-    def retranslate_importers(self, saved: Path) -> None:
-        """Open files whose spreads read record types from `saved` are translated again: its types may have
-        changed (imports.Modules reads a module from disk). On a save, or a file event for a change made
-        outside the editor."""
-        for key, versions in self.docs.items():
-            doc = versions[-1]
-            if key != saved and saved in doc.tr.imports:
-                again = Doc(doc.uri, doc.tr.source, doc.version, probe=True, carry=doc.tr.probed)
-                with self.text_lock:
-                    versions.append(again)
-                    del versions[:-5]
-                    self.send_text(key, again.tr.hidden, again)
 
     # notebooks ----------------------------------------------------------
 
@@ -1478,11 +1462,18 @@ class Proxy:
         found = [
             (d["range"]["start"]["line"], d["range"]["start"]["character"], d.get("message", "")) for d in diagnostics
         ]
-        got, asked = probed_from(found, doc.tr), set(doc.tr.unseen)
-        if got == {k: v for k, v in doc.tr.probed.items() if k in asked}:
+        waiting: set = set()
+        got, asked = probed_from(found, doc.tr, waiting), set(doc.tr.unseen)
+        if waiting and doc.round < PROBE_ROUNDS - 1:
+            # an answer that's an open spread of this file's own unanswered ones (`(**first_moved())` of a
+            # function returning `(**u, ...)`): built with this round's answers, the next probe answers it
+            final = Doc(doc.uri, doc.tr.source, doc.version, probe=True, carry=got)
+            final.round = doc.round + 1
+        elif got == {k: v for k, v in doc.tr.probed.items() if k in asked}:
             doc.probing = False  # as it was built: the probe is the file's translation
             return False
-        final = Doc(doc.uri, doc.tr.source, doc.version, probed=got)
+        else:
+            final = Doc(doc.uri, doc.tr.source, doc.version, probed=got)
         with self.text_lock:
             versions = self.docs.get(key)
             if not versions or versions[-1] is not doc:
@@ -1527,7 +1518,8 @@ class Proxy:
 
     def answers_in(self, files: list[Path]) -> None:
         """New answers for these files (probe_project): their copies in the editor's mirror again, the checker
-        told, and every open file with a source still unanswered asked again, as it may ask about them."""
+        told; and every open file that asks the checker anything asked again: what it spreads may be of a
+        file just saved, or of these (with the answers it had, unchanged ones cost one analysis)."""
         from .tools import write_if_changed
 
         changed = []
@@ -1539,11 +1531,10 @@ class Proxy:
             existed = (dst := self.to_mirror(path)).exists()
             if write_if_changed(dst, Translation(text, path).hidden):  # a copy it hadn't: created, not changed
                 changed.append({"uri": dst.as_uri(), "type": 2 if existed else 1})
-        if not changed:
-            return
-        self.send_server(
-            {"jsonrpc": "2.0", "method": "workspace/didChangeWatchedFiles", "params": {"changes": changed}}
-        )
+        if changed:
+            self.send_server(
+                {"jsonrpc": "2.0", "method": "workspace/didChangeWatchedFiles", "params": {"changes": changed}}
+            )
         with self.text_lock:
             for key, versions in self.docs.items():
                 doc = versions[-1]

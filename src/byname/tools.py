@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 from .lsp import LOAD_EXT_RE, explain_fields, pretty
-from .srcmap import PROBED, Translation, generated, probed_from, unknown_rest
+from .srcmap import PROBE_ROUNDS, PROBED, Translation, generated, probed_from, unknown_rest
 
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 CONFIGS = {"pyproject.toml", "setup.cfg", "ruff.toml", ".ruff.toml", "pyrightconfig.json"}
@@ -166,9 +166,6 @@ def mirror(root: Path, kind: str = "tools", default_config: bool = True, changes
                         changes.append((p, 3))
     out.mkdir(parents=True, exist_ok=True)
     return out
-
-
-PROBE_ROUNDS = 3  # a spread of what another asked file's spread returns is answered a round later
 
 
 def probe(root: Path, out: Path, checker: str) -> int:

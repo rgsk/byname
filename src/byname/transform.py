@@ -497,22 +497,18 @@ def parse_around_errors(body: str, tries: int = 10) -> ast.Module | None:
 
 @dataclass(frozen=True)
 class Known:
-    """A name's record fields, read off the file (known_fields). is_dict: it holds a record's `_asdict()`,
-    so a spread reads it as `d["name"]`, not `d.name`. returns: it's a function, and these are the fields
-    of what a call to it returns. is_open: an open record type, `(..., name: str)`, which may hold other
-    fields too: a rest takes these apart (rest_of), a spread doesn't build from them (known_build)."""
+    """A name's record fields, read off the file (known_fields) or the checker's answer (srcmap.probed_from).
+    is_dict: it holds a record's `_asdict()`, so a spread reads it as `d["name"]`, not `d.name`. is_open: an
+    open record type, `(..., name: str)`, which may hold other fields too: a rest takes these apart
+    (rest_of), a spread doesn't build from them (known_build)."""
 
     fields: tuple[str, ...]
     is_dict: bool = False
-    returns: bool = False
     is_open: bool = False
 
 
-# the record fields of a name another module defines: (module, level, name) -> Known, or None if it shows none
-Lookup = Callable[[str, int, str], "Known | None"]  # imports.Modules
-# where a binding's fields show (_Bind.source): ("value" | "type", expr), ("import", (module, level, name)),
-# ("def", the function), whose fields are those of what it returns
-Source = tuple[str, ast.expr] | tuple[str, tuple[str, int, str]] | tuple[str, ast.FunctionDef]
+# where a binding's fields show (_Bind.source): ("value" | "type", expr)
+Source = tuple[str, ast.expr]
 
 
 @dataclass(eq=False)
@@ -520,9 +516,8 @@ class _Bind:
     """One binding of a name in a scope (known_fields). at: the index of the scope's statement it's in (-1 for
     parameters); straight: that statement is simple (no `if`, loop, `try`, ...), so the binding has run once
     the scope reaches the next statement; source: ("value" | "type", node) when it shows the fields (a
-    parameter's annotation is read where the function is defined), ("import", (module, level, name)) for
-    `from module import name`; anywhere: a function's binding of a `global` name, which can run before any
-    read of it."""
+    parameter's annotation is read where the function is defined); anywhere: a function's binding of a
+    `global` name, which can run before any read of it."""
 
     at: int
     straight: bool
@@ -613,31 +608,21 @@ def untyped_builds(body: str) -> set[tuple[int, int]]:
     return out
 
 
-def known_fields(
-    body: str,
-    lookup: Lookup | None = None,
-    exports: bool = False,
-    probed: dict[tuple[str, int], Known] | None = None,
-) -> dict[tuple[str, int], Known]:
-    """The record fields of names read in the translation, by (name, line), where a binding shows them: a
-    record literal, a spread record of such names, the rest of such a name (`**rest`), an annotation with a record type (inline, a `type`
-    alias, one imported with `from module import name` that lookup finds, or a parameter's), or
-    `x._asdict()` of such a name (a TypedDict: its keys can't be removed, so its fields stay). Names are
-    scoped as in Python (function, lambda, comprehension, class). A read is known when every binding that
-    may reach it shows the same fields (reaching): any of them may be the one that ran, and a wrong field
-    set would be worse than the generic spread path. exports: instead, the module's own names as another
-    module importing it sees them, by (name, 0). probed: what the checker said a read the file doesn't show
-    is, by (name, line) (srcmap.probed_from): the fields of a read byname can't tell. Checker translation only
-    (see known_build)."""
+def known_fields(body: str, probed: dict[tuple[str, int], Known] | None = None) -> dict[tuple[str, int], Known]:
+    """The record fields of names read in the translation, by (name, line), where a binding in the file shows
+    them: a record literal, a spread record of such names, the rest of such a name (`**rest`), an annotation
+    with a record type of the file (inline, a `type` alias, a parameter's), or `x._asdict()` of such a name (a
+    TypedDict: its keys can't be removed, so its fields stay). Names are scoped as in Python (function, lambda,
+    comprehension, class). A read is known when every binding that may reach it shows the same fields
+    (reaching): any of them may be the one that ran, and a wrong field set would be worse than the generic
+    spread path. Anything else (an imported type, a call's result, a loop's item) is the checker's to say:
+    probed, its answers by (name, line) (srcmap.probed_from). Checker translation only (see known_build)."""
     tree = parse_around_errors(body)
     if tree is None:
         return {}
     shared: set[str] = set()  # names in a `nonlocal`: rebound across scopes, never known
     sources: dict[int, tuple[str, ast.expr]] = {}  # id(Name target) -> its binding's source
     reads: list[tuple[str, int, _Scope, int]] = []  # name, line, scope, statement index
-    scopes: dict[int, _Scope] = {}  # id(def) -> its body's scope
-    returns: dict[int, list[tuple[ast.expr, int]]] = {}  # id(scope) -> its functions' `return` values, statement index
-    no_record: set[int] = set()  # id(scope) of functions that may return no record: a bare `return`, or a generator
 
     def bind(
         scope: _Scope,
@@ -683,11 +668,7 @@ def known_fields(
                     visit(d, scope, at, straight)
                 if node.returns is not None:
                     visit(node.returns, scope, at, straight)
-                # a call to a plain `def` returns what its annotation or its `return`s show; not an `async def`
-                # (a coroutine) or a decorated one (the decorator may return anything)
-                plain = isinstance(node, ast.FunctionDef) and not node.decorator_list
-                bind(scope, node.name, at, straight, ("def", node) if plain else None)
-                scopes[id(node)] = inner
+                bind(scope, node.name, at, straight)
             params(node.args, scope, inner, at, straight)
             if isinstance(node, ast.Lambda):
                 visit(node.body, inner, 0, True)
@@ -714,13 +695,6 @@ def known_fields(
             for e in [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]:
                 visit(e, inner, 0, True)
             return
-        if isinstance(node, ast.Return):
-            if node.value is None:
-                no_record.add(id(scope))
-            else:
-                returns.setdefault(id(scope), []).append((node.value, at))
-        elif isinstance(node, (ast.Yield, ast.YieldFrom)):
-            no_record.add(id(scope))
         if isinstance(node, ast.Name):
             if isinstance(node.ctx, ast.Load):
                 reads.append((node.id, node.lineno, scope, at))
@@ -731,8 +705,8 @@ def known_fields(
             visit(node.value, scope, at, straight)
             return
         elif isinstance(node, ast.ImportFrom):
-            for a in node.names:
-                bind(scope, a.asname or a.name, at, straight, ("import", (node.module or "", node.level, a.name)))
+            for a in node.names:  # what another module defines: the checker's to say (probed)
+                bind(scope, a.asname or a.name, at, straight)
         elif isinstance(node, ast.Import):
             for a in node.names:
                 bind(scope, (a.asname or a.name).split(".")[0], at, straight)
@@ -796,35 +770,12 @@ def known_fields(
             return None
         memo[id(b)] = None  # a cycle stays unknown
         kind, node = source
-        if isinstance(node, tuple):  # ("import", (module, level, name))
-            memo[id(b)] = lookup(*node) if lookup is not None else None
-        elif isinstance(node, ast.FunctionDef):
-            got = of_def(node, *where)
-            memo[id(b)] = Known(got.fields, returns=True) if got is not None else None
-        else:
-            memo[id(b)] = of_value(node, *where) if kind == "value" else of_type(node, *where)
+        memo[id(b)] = of_value(node, *where) if kind == "value" else of_type(node, *where)
         return memo[id(b)]
-
-    def of_def(d: ast.FunctionDef, scope: _Scope, at: int) -> Known | None:
-        """The fields of what a call to d returns: its return annotation's (read where d is defined), or else
-        those every `return` shows, when they all show the same ones (a function returning another's result
-        is followed). A bare `return` or a `yield`: none."""
-        if d.returns is not None:
-            got = of_type(d.returns, scope, at)
-            return got if got is not None and not got.is_dict else None
-        inner = scopes[id(d)]
-        if id(inner) in no_record or not (rs := returns.get(id(inner))):
-            return None
-        got = [of_value(v, inner, k) for v, k in rs]
-        first = got[0]
-        if first is None or first.is_dict or any(k != first for k in got):
-            return None
-        return first
 
     def of_value(e: ast.expr, scope: _Scope, at: int) -> Known | None:
         if isinstance(e, ast.Name):
-            got = resolve(e.id, scope, at) or (probed or {}).get((e.id, e.lineno))
-            return got if got is None or not got.returns else None  # a function isn't a record
+            return resolve(e.id, scope, at) or (probed or {}).get((e.id, e.lineno))
         if (  # `rec._asdict()`: a dict with the record's fields
             isinstance(e, ast.Call)
             and isinstance(e.func, ast.Attribute)
@@ -863,20 +814,16 @@ def known_fields(
                 else:
                     return None
             return Known(tuple(out))
-        got = resolve(e.func.id, scope, at)  # a call to a function that shows what it returns (of_def)
-        return Known(got.fields) if got is not None and got.returns else None
+        return None  # a call: the checker's to say (probed)
 
     def of_type(t: ast.expr, scope: _Scope, at: int) -> Known | None:
         if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id.startswith(("_typ_", "_opn_")):
             return Known(class_fields(t.value.id[5:]), is_open=t.value.id.startswith("_opn_"))
         if isinstance(t, ast.Name):
             got = resolve(t.id, scope, at)
-            return got if got is None or not (got.is_dict or got.returns) else None  # a dict isn't a type
+            return got if got is None or not got.is_dict else None  # a dict isn't a type
         return None
 
-    if exports:
-        names = (resolve(name, module, len(tree.body)) for name in module.binds)
-        return {(name, 0): k for name, k in zip(module.binds, names) if k is not None}
     out: dict[tuple[str, int], Known | None] = {}
     for name, line, scope, at in reads:
         key = (name, line)
@@ -896,7 +843,6 @@ def transform(
     portable: bool = False,
     checker: bool = False,
     known: dict[tuple[str, int], Known] | None = None,
-    lookup: Lookup | None = None,
     untyped: set[tuple[int, int]] | None = None,
     probed: dict[tuple[str, int], Known] | None = None,
     probe: bool = False,
@@ -906,7 +852,6 @@ def transform(
     checker: the translation only type checkers see; works around their bugs (see KW_PRELUDE). Never run.
     known: fields of names read in the file, by (name, line) (known_fields); set by the checker translation's second pass.
     untyped: spread records built where no type is expected (untyped_builds); set by that second pass too.
-    lookup: fields of record types imported from other modules (imports.Modules), for known_fields.
     probed: the checker's types of what the file doesn't show (Result.unseen), for known_fields.
     probe: wrap each unseen source in `reveal_type(...)`, so the checker prints its type (srcmap.probed_from)."""
     toks = [
@@ -1049,8 +994,8 @@ def transform(
         return toks[before - 1].string in ("(", ",")
 
     def known_build(i: int, close: int, its: list[list[int]]) -> bool:
-        """Checker only: a spread record whose `**` items are all names or calls with known fields
-        (known_fields) is built as a plain record, `(**u, age=27)` -> `_rec_name__age(name=u.name, age=27)`,
+        """Checker only: a spread record whose `**` items all have known fields, names the file shows
+        (known_fields) or anything the checker answered (probed), is built as a plain record, `(**u, age=27)` -> `_rec_name__age(name=u.name, age=27)`,
         `(**make(), age=27)` -> `_rec_name__age(name=(_byname_v0 := make()).name, age=27)`, so it has its
         exact type without an expected type. A later item wins and the first position stays, as at runtime.
         False: left to the generic path, which also reports any mistakes."""
@@ -1060,21 +1005,15 @@ def transform(
         def of(t: tokenize.TokenInfo) -> Known | None:
             return (known or {}).get((t.string, t.start[0]))  # the translation keeps the source's lines
 
-        def is_call(it: list[int]) -> bool:  # `**f(...)`
-            return len(it) >= 4 and toks[it[2]].string == "(" and pair.get(it[2]) == it[-1]
-
         once: set[int] = set()  # `**` items read once into a walrus: a call, or an expression the checker typed
         for it in its:
             first = toks[it[0]]
             if first.string == "**":
                 bare = len(it) == 2 and is_name(toks[it[1]])
-                got = of(toks[it[1]]) if bare or (is_name(toks[it[1]]) and is_call(it)) else None
-                if got is not None and got.returns != is_call(it):  # a call to a function showing its fields
+                # a name, as the file or the checker says; a call or any expression, as the checker does
+                got = of(toks[it[1]]) if bare else (probed or {}).get(expr_key(it))
+                if got is not None and not bare and got.is_dict:
                     got = None
-                if got is None and not bare:  # what the checker said it is (probed)
-                    got = (probed or {}).get(expr_key(it))
-                    if got is not None and (got.is_dict or got.returns):
-                        got = None
                 if got is None or got.is_open:  # open: it may hold fields its type doesn't name
                     return False
                 if not bare:
@@ -1332,7 +1271,7 @@ def transform(
         nested pattern's `_ds`, `users[0]`, a name bound to different shapes: `(...)`, any record, unchecked,
         and the editor says how to give it a type (unknown_rests)."""
         got = (known or {}).get((DS, line)) if line is not None and not chain else None
-        if got is not None and not got.is_dict and not got.returns:
+        if got is not None and not got.is_dict:
             keep = tuple(f for f in got.fields if f not in taken)
             again = probe and (DS, line) in (probed or {})  # the checker's answer: asked again (known_build)
             if again:
@@ -1794,9 +1733,9 @@ def transform(
     # checker: spread records and rests of names whose fields the file shows get their exact type (known_build,
     # rest_of)
     if checker and known is None and (builds or omit_used):
-        k, u = known_fields(body, lookup, probed=probed), untyped_builds(body)
+        k, u = known_fields(body, probed), untyped_builds(body)
         if k or u or probe or probed:
-            return transform(src, path, tolerant, portable, checker, k, lookup, u, probed, probe)
+            return transform(src, path, tolerant, portable, checker, k, u, probed, probe)
 
     def base_prelude() -> str:
         # the checker's translation never runs, so it doesn't read the project's config

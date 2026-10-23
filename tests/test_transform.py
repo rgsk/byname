@@ -685,10 +685,15 @@ def test_spread_records_of_known_names_are_plain_records():
     assert "_rec_" not in transform(SPREADS).body.split("both = ")[1].split("\n")[0]  # runtime: _byname_rec
 
 
-def test_a_spread_of_a_call_whose_function_shows_its_fields_is_a_plain_record():
-    # the call written once, its value kept for the other fields; checker only: what runs is _byname_rec
+def test_a_spread_of_a_call_the_checker_answered_is_a_plain_record():
+    # what a call returns is the checker's to say (probed, keyed by where the expression starts): the call
+    # written once, its value kept for the other fields; checker only: what runs is _byname_rec
     src = "def make():\n    return (name='a', age=1)\nx = (**make(), zip=1)\ny = (**make(), **make())\n"
-    body = transform(src, checker=True).body.splitlines()
+    assert (
+        transform(src, checker=True).body.splitlines()[2] == "x = _rec_zip___1_spread(**_byname_loose(make()), zip=1)"
+    )
+    answers = {(f"**{col}", line): Known(("name", "age")) for col, line in [(7, 3), (7, 4), (17, 4)]}
+    body = transform(src, checker=True, probed=answers).body.splitlines()
     assert body[2] == "x = _rec_name__age__zip___1(name=(_byname_v0 := make()).name, age=_byname_v0.age, zip=1)"
     # the second overrides every field of the first: not a plain record; no type expected, so open (open_build)
     assert body[3] == "y = _rec____2_spread(**_byname_loose(make()), **_byname_loose(make()))"  # no names to give

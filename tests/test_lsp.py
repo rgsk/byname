@@ -643,7 +643,11 @@ def test_a_rest_hovers_as_the_fields_not_named_and_fields_complete_before_it(lsp
     path = root / "rest.pyn"
     path.write_text(REST)
     rest_uri = c.open(path)
-    assert "rest: (age: int, city: str)" in hover_text(c, rest_uri, pos(REST, "rest)"))
+    for _ in range(50):  # load()'s return is the checker's to say: a probe, then the final text
+        if "rest: (age: int, city: str)" in (got := hover_text(c, rest_uri, pos(REST, "rest)"))):
+            break
+        time.sleep(0.1)
+    assert "rest: (age: int, city: str)" in got
     assert [d["message"] for d in c.wait_diags(rest_uri) if d.get("severity", 1) == 1] == []
 
 
@@ -1846,6 +1850,28 @@ def test_completion_on_a_probed_spread_lists_its_fields_while_typing(lsp):
     got = c.request("textDocument/completion", {"textDocument": {"uri": uri}, "position": {"line": 4, "character": 14}})
     labels = [i["label"] for i in (got["items"] if isinstance(got, dict) else got)]
     assert {"name", "age", "zip"} <= set(labels), labels[:10]
+
+
+def test_a_spread_of_this_file_s_asked_spread_is_answered_in_a_second_round(lsp):
+    # first_moved() returns (**u, zip=1), itself asked: the first probe's answer for first_moved() is that
+    # open spread (waiting), so the editor sends the next probe, built with u's answer, at once
+    c, root, _ = lsp
+    text = (
+        "type User = (name: str, age: int)\n"
+        "def all_users() -> list[User]: ...\n"
+        "def first_moved():\n"
+        "    for u in all_users():\n"
+        "        return (**u, zip=1)\n"
+        "    raise LookupError\n"
+        "x = (**first_moved(), k=1)\n"
+    )
+    uri = c.open(root / "same_file_chain.pyn", text)
+    want = "x: (name: str, age: int, zip: int, k: int)"
+    for _ in range(50):
+        if want in (got := hover_text(c, uri, pos(text, "x ="))):
+            break
+        time.sleep(0.1)
+    assert want in got
 
 
 def test_a_probed_spread_s_fields_are_coloured_once_its_final_text_is_in(lsp):
