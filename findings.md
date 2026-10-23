@@ -7,7 +7,7 @@ Alt+L (`byname tool`) and the editor (`byname lsp`).
 
 Status: **open** until fixed; a fix names its commit.
 
-## 1. Runtime errors name the record's generated class — open
+## 1. Runtime errors name the record's generated class — fixed (4ac353e)
 
 A record's attribute error at runtime shows byname's internal class, not the record:
 
@@ -18,7 +18,7 @@ AttributeError: '_rec_x__y' object has no attribute 'nope'
 The editor says `Cannot access attribute "nope" for class "(x: int, y: int)"` for the same line.
 Seen with `print(make().nope)` where `make()` returns `(x=1, y=2)`, run with `byname run`.
 
-## 2. Only byname's own entry points can import a .pyn module — open
+## 2. Only byname's own entry points can import a .pyn module — fixed (e632652)
 
 The import hook (`byname.hook.install()`) is installed by `byname run`, the pytest plugin and
 `%load_ext byname`. Anything else can't import a .pyn module, while the editor resolves it fine:
