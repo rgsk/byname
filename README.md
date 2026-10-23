@@ -65,7 +65,8 @@ record is built and nothing that reads it changes meaning.
   parameters, so a field `f` doesn't take is flagged.
 - **Equality** is by name and value: the same fields with the same values, in any written order, are equal
   and hash alike, so `(x=1, y=2) == (y=2, x=1)`. A record never equals a plain tuple.
-- **They print the way you write them:** `(name='Rahul', age=26)`.
+- **They print the way you write them:** `(name='Rahul', age=26)`, and error messages name them by their
+  fields: `'record(name, age)' object has no attribute 'nme'`.
 - **Records or tuples:** a tuple fits values unpacked right where they're returned (`x, y = get_batch()`),
   and hover labels each position with the name returned there, a bare name or a walrus:
   `return x, y.to(device)` shows `-> tuple[x: Tensor, Tensor]`, and

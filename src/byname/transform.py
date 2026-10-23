@@ -90,6 +90,9 @@ PRELUDE = (
     "    c.__add__ = c.__mul__ = c.__rmul__ = _byname_positional\n"
     "    c.__lt__ = c.__le__ = c.__gt__ = c.__ge__ = _byname_unordered\n"
     "    c.__getnewargs__, c._replace = _byname_args, _byname_replace\n"
+    # what error messages and type(r).__name__ say; __qualname__ stays the module global's name, which
+    # pickle finds the class by
+    "    c.__name__ = 'record(' + ', '.join(order) + ')'\n"
 )
 
 

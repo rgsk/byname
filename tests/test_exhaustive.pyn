@@ -233,15 +233,24 @@ def test_mappings_and_json_go_through_the_field_names():
 def test_pickle_and_copy_keep_a_record():
     r = (name="rahul", age=26)
     assert pickle.loads(pickle.dumps(r)) == copy.copy(r) == copy.deepcopy(r) == r
+    assert type(pickle.loads(pickle.dumps(r))) is type(r)  # found by __qualname__, the module's own name
     assert repr(copy.deepcopy(r)) == "(name='rahul', age=26)"
 
 
 def test_each_field_list_gets_one_class():
     r = (name="rahul", age=26)
-    assert type(r).__name__ == "_rec_name__age"
+    assert type(r).__name__ == "record(name, age)"  # what error messages say, fields as written
     assert type(r) is type((name="tasha", age=23))
     assert type(r) is type((name=23, age="tasha"))  # value types live only in the checker: (name: int, age: str)
     assert type(r) is not type((age=23, name="tasha"))  # another order, another class
+
+
+def test_error_messages_name_the_record_by_its_fields():
+    r = (name="rahul", age=26)
+    with pytest.raises(AttributeError, match=r"^'record\(name, age\)' object has no attribute 'nme'$"):
+        _ = r.nme  # pyright: ignore[reportAttributeAccessIssue]
+    with pytest.raises(TypeError, match=r"^record\(name, age\) is read by name only"):
+        _ = r[0]  # pyright: ignore[reportArgumentType]
 
 
 def test_a_record_is_immutable():
