@@ -574,9 +574,9 @@ def test_replace_and_asdict_are_typed_for_the_checker_only():
     # NamedTuple types them `(**kwargs: Any)` / `dict[str, Any]`; the checker gets per-field versions,
     # on the record's exact type (see record_def)
     r = transform("x = (name=, age=)\n")
-    assert "    def _replace(self, *, name: T0 = ..., age: T1 = ...) -> _S: ..." in r.prelude
-    assert "    def _asdict(self) -> _dct_name__age[T0, T1]: ..." in r.prelude
-    assert "class _dct_name__age[T0, T1](_TD):" in r.prelude
+    assert "    def _replace(self, *, name: _byname_T0 = ..., age: _byname_T1 = ...) -> _S: ..." in r.prelude
+    assert "    def _asdict(self) -> _dct_name__age[_byname_T0, _byname_T1]: ..." in r.prelude
+    assert "class _dct_name__age(_TD, _t.Generic[_byname_T0, _byname_T1]):" in r.prelude
     ns = {}
     exec(compile_pyn("r = (name='a', age=1)\nr2 = r._replace(age=2)\nd = r._asdict()\n"), ns)
     assert repr(ns["r2"]) == "(name='a', age=2)" and ns["d"] == {"name": "a", "age": 1}
@@ -728,7 +728,7 @@ def test_record_type_annotation():
     out = to_python(src)
     # a Protocol, not the record class: explicit types match records whatever their field order
     assert "def dfs(n: int) -> _typ_h__d[int, int]:" in out
-    assert "class _typ_h__d[T0, T1](_PR):" in out
+    assert "class _typ_h__d(_PR[_byname_T0, _byname_T1]):" in out
     # nested, and as a parameter / variable annotation
     out = to_python("def f(p: (x: (a: int, b: str))) -> None:\n    q: (y: int) = (y=1)\n")
     assert "def f(p: _typ_x[_typ_a__b[int, str]]) -> None:" in out
@@ -739,7 +739,7 @@ def test_open_record_type():
     # a leading `...`: any record with at least these fields; no field-set marker, no tuple access
     out = to_python("def f(p: (..., age: int)) -> int:\n    return p.age\n")
     assert "def f(p: _opn_age[int]) -> int:" in out
-    assert "class _opn_age[T0](_PR):" in out
+    assert "class _opn_age(_PR[_byname_T0]):" in out
     assert "_byname_fieldset" not in out.split("class _opn_age")[1]
     # read unchecked by any str key, never a position
     assert "    def __getitem__(self, k: _key_age, /) -> _Ay: ..." in out.split("class _opn_age")[1]
@@ -781,7 +781,8 @@ def test_open_record_type_dots_go_first():
 def test_records_carry_their_sorted_field_set():
     # what an exact record type matches on: same names, any order
     r = transform("x = (b=1, a=2)\n")
-    assert "class _typ_b__a[T0, T1](_PR):" in r.prelude  # in the checker a record is its exact type (see record_def)
+    # in the checker a record is its exact type (see record_def)
+    assert "class _typ_b__a(_PR[_byname_T0, _byname_T1]):" in r.prelude
     assert "    def _byname_fieldset(self) -> _L['a,b']: ..." in r.prelude
 
 
@@ -932,4 +933,4 @@ def test_a_rest_defines_only_the_imported_shapes_it_can_take_apart():
             return [(("name", "age"), False), *(((f"f{i}", f"g{i}"), False) for i in range(50))]
 
     r = transform("import many\n(name=, **rest) = many.load()\n", checker=True, lookup=Lookup())
-    assert "class _typ_name__age[" in r.prelude and "class _typ_f0__g0" not in r.prelude
+    assert "class _typ_name__age(" in r.prelude and "class _typ_f0__g0" not in r.prelude

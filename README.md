@@ -102,6 +102,11 @@ touch strings) can't leave a bracket read silently typed `Any`.
 
 `...` goes first, so a long type says it's open before listing its fields; anywhere else it's an error.
 
+A field takes a narrower type, as a tuple's items do: records are immutable, so `cfg = (dropout=0, lr=1e-3)`
+fits `(dropout: float, lr: float)` as `tuple[int, float]` fits `tuple[float, float]`. A list of them doesn't
+(`list[(dropout: int, ...)]` isn't `list[(dropout: float, ...)]`), for the same reason `list[int]` isn't
+`list[float]`.
+
 The written order is only for display: hover, printing, `_asdict()` and `**rec` show the fields as you
 wrote them. To a checker, records with the same fields are the same type whatever the order, so
 `rs.append((age=1, name="a"))` on a list of `(name=, age=)` records is fine.

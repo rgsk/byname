@@ -544,6 +544,32 @@ def test_a_record_type_takes_any_field_order_but_exactly_its_fields(tmp_path):
     assert '"age" is an incompatible type' in verdicts[5]
 
 
+def test_a_field_takes_a_narrower_type_as_a_tuple_does(tmp_path):
+    # records are immutable, so (dropout: int) fits (dropout: float) as tuple[int] fits tuple[float],
+    # even once the record is stored with no type; a list of them stays invariant, as list itself is
+    verdicts = checker(
+        """\
+        def train(cfg: (dropout: float, lr: float)) -> None: ...
+        def peek(p: (..., dropout: float)) -> None: ...
+        cfg = (dropout=0, lr=1e-3)
+        train(cfg)
+        peek(cfg)
+        train(cfg._replace(dropout=1))
+        nested: (inner: (dropout: float, lr: float)) = (inner=cfg)
+        cfg._replace(dropout="x")
+        s: (dropout: str, lr: float) = cfg
+        xs: list[(dropout: float, lr: float)] = [cfg]
+        ys = [cfg]
+        zs: list[(dropout: float, lr: float)] = ys
+        """,
+        tmp_path,
+    )
+    assert sorted(verdicts) == [8, 9, 12]  # lines 4-7 and 10 are fine
+    assert 'parameter "dropout" of type "int"' in verdicts[8]
+    assert '"dropout" is an incompatible type' in verdicts[9]
+    assert "list" in verdicts[12]
+
+
 def test_an_open_type_takes_at_least_its_fields(tmp_path):
     verdicts = checker(
         """\

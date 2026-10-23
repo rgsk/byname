@@ -278,6 +278,18 @@ def key_alias(fields: tuple[str, ...]) -> str:
     return "_key_" + "__".join(fields)
 
 
+def covariant(n: int) -> str:
+    """The type parameters of a record type, its TypedDict and its sites: `_byname_T0, _byname_T1`, declared
+    covariant in the prelude (covariant_defs), so `(dropout: int)` fits `(dropout: float)` as `tuple[int]` fits
+    `tuple[float]`. PEP 695's `class C[T0]` infers variance, and `_replace`'s keywords and `_asdict()`'s
+    TypedDict make it invariant; covariance is sound all the same, as both build a new object."""
+    return ", ".join(f"_byname_T{i}" for i in range(n))
+
+
+def covariant_defs(n: int) -> str:
+    return "".join(f"_byname_T{i} = _t.TypeVar('_byname_T{i}', covariant=True)\n" for i in range(n))
+
+
 def site_class(name: str, n: int) -> str:
     """Checker only: the class of one record literal or written record type, the n-th in the file,
     `_typ_name___3`. Records match by shape, so sites with the same fields are still the same type; but each
@@ -360,9 +372,8 @@ def fieldset(fields: tuple[str, ...]) -> str:
 def dict_def(fields: tuple[str, ...]) -> str:
     if not fields:  # the rest of a record once every field is taken: `(a=, **rest) = (a=1)`
         return f"class {dict_class(fields)}(_TD): pass\n"
-    params = ", ".join(f"T{i}" for i in range(len(fields)))
-    body = "; ".join(f"{f}: T{i}" for i, f in enumerate(fields))
-    return f"class {dict_class(fields)}[{params}](_TD):\n    {body}\n"
+    body = "; ".join(f"{f}: _byname_T{i}" for i, f in enumerate(fields))
+    return f"class {dict_class(fields)}(_TD, _t.Generic[{covariant(len(fields))}]):\n    {body}\n"
 
 
 def type_def(fields: tuple[str, ...], is_open: bool, portable: bool = False) -> str:
@@ -373,25 +384,30 @@ def type_def(fields: tuple[str, ...], is_open: bool, portable: bool = False) -> 
     name = type_class(fields, is_open)
     if portable:  # annotations are evaluated on old Pythons: a subscriptable stand-in is all they need
         return f"class {name}: __class_getitem__ = classmethod(lambda cls, _: cls)\n"
-    params = ", ".join(f"T{i}" for i in range(len(fields)))
-    out = f"class {name}[{params}](_PR):\n" if fields else f"class {name}(_PR):\n"
+    params = covariant(len(fields))
+    # the checker warns that _replace and _asdict want them invariant (see covariant)
+    out = (
+        f"class {name}(_PR[{params}]):  # pyright: ignore[reportInvalidTypeVarUse]\n"
+        if fields
+        else f"class {name}(_PR):\n"
+    )
     # read-only fields, so records (immutable) match; Final rather than @property, so `p.age` is coloured
     # like a record field (see remap_tokens). Checkers object to a type variable in Final: silenced.
     for i, f in enumerate(fields):
-        out += f"    {f}: _Fi[T{i}]  # pyright: ignore\n"
+        out += f"    {f}: _Fi[_byname_T{i}]  # pyright: ignore\n"
     out += f"    def __getitem__(self, k: {key_alias(fields)}, /) -> _Ay: ...\n"  # a str key, never a position
     out += "    def __contains__(self, k: object, /) -> bool: ...\n"  # a field name
     out += "    def keys(self) -> tuple[str, ...]: ...\n"  # what `**rec` reads
     if is_open:
         return out
-    kw = "".join(f", {f}: T{i} = ..." for i, f in enumerate(fields))
+    kw = "".join(f", {f}: _byname_T{i} = ..." for i, f in enumerate(fields))
     kw = f", *{kw}" if fields else ""
     asdict = dict_class(fields) + (f"[{params}]" if fields else "")
     return out + (  # no __iter__, and __getitem__ takes no position: a record is read by name (see record_def)
         f"    @property\n    def {FIELDSET}(self) -> _L[{fieldset(fields)!r}]: ...\n"
         f"    def __len__(self) -> int: ...\n"
         "    @property\n    def _fields(self) -> tuple[str, ...]: ...\n"
-        f"    def _replace(self{kw}) -> _S: ...\n"
+        f"    def _replace(self{kw}) -> _S: ...  # pyright: ignore[reportGeneralTypeIssues]\n"  # covariant
         f"    def _asdict(self) -> {asdict}: ...\n"
     )
 
@@ -435,12 +451,13 @@ def site_def(fields: tuple[str, ...], is_open: bool, n: int, literal: bool) -> s
     keywords too."""
     if not fields:  # open_build's `(**u)`: a record, fields unknown
         return f"if _t.TYPE_CHECKING:\n    def {site_class(record_class(fields), n)}(**_: object) -> _opn_: ...\n"
-    params = ", ".join(f"T{i}" for i in range(len(fields)))
+    params = covariant(len(fields))
     typ = site_class(type_class(fields, is_open), n)
-    out = f"class {typ}[{params}]({type_class(fields, is_open)}[{params}], _PR):\n"
-    out += "".join(f"    {f}: _Fi[T{i}]  # pyright: ignore\n" for i, f in enumerate(fields))
+    out = f"class {typ}({type_class(fields, is_open)}[{params}], _PR[{params}]):  # pyright: ignore[reportInvalidTypeVarUse]\n"
+    out += "".join(f"    {f}: _Fi[_byname_T{i}]  # pyright: ignore\n" for i, f in enumerate(fields))
     if not is_open:
-        out += f"    def _replace(self, *{''.join(f', {f}: T{i} = ...' for i, f in enumerate(fields))}) -> _S: ...\n"
+        out += f"    def _replace(self, *{''.join(f', {f}: _byname_T{i} = ...' for i, f in enumerate(fields))}) -> _S: ...  # pyright: ignore[reportGeneralTypeIssues]\n"
+    params = ", ".join(f"T{i}" for i in range(len(fields)))  # the literal's function: its own, PEP 695
     if literal:
         init = ", ".join(f"{f}: T{i}" for i, f in enumerate(fields)) + (", **_: object" if is_open else "")
         head = f"{site_class(record_class(fields), n)}[{params}]"
@@ -1705,7 +1722,9 @@ def transform(
         prelude = base_prelude()
         if not portable:
             dicts = dict.fromkeys([*records, *(f for f, o in types if not o)])
-            prelude += CHECKER_DIRECTIVE + TYPED_PRELUDE + "".join(dict_def(f) for f in dicts)
+            arity = max(len(f) for f in [*records, *(f for f, _ in types), *(s[0] for s in sites)])
+            prelude += CHECKER_DIRECTIVE + TYPED_PRELUDE + covariant_defs(arity)
+            prelude += "".join(dict_def(f) for f in dicts)
         if not portable:  # in the checker, each record is its exact type (see record_def)
             types = {**types, **dict.fromkeys((f, False) for f in records)}
         # types first: a record's checker function returns its type, and before Python 3.14 an annotation

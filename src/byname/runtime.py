@@ -6,7 +6,7 @@ silently builds whatever keys `d` has. `record()` checks instead: every field of
 (transform.py wraps it in `cast(T, ...)`).
 
 At runtime a record type alias `type C = (a: int, b: str)` is `_typ_a__b[int, str]`: a Protocol whose
-annotations list the fields in written order (`a: Final[T0]`) and whose subscript holds the field types.
+annotations list the fields in written order (`a: Final[_byname_T0]`) and whose subscript holds the field types.
 `_opn_...` is an open type `(..., a: int)`.
 
 Type checks follow the checker's rules where it's cheap: isinstance for classes, an int is a float,
@@ -56,9 +56,9 @@ def _record_type(tp: object) -> tuple[list[tuple[str, object]], bool] | None:
     if not isinstance(origin, type) or not name.startswith(("_typ_", "_opn_")):
         return None
     args = typing.get_args(tp)
-    params = getattr(origin, "__type_params__", ())
+    params = getattr(origin, "__parameters__", ())
     fields = []
-    for field, ann in origin.__annotations__.items():  # `a: Final[T0]`, in written order
+    for field, ann in origin.__annotations__.items():  # `a: Final[_byname_T0]`, in written order
         (param,) = typing.get_args(ann)
         fields.append((field, args[params.index(param)] if args else Any))
     return fields, name.startswith("_opn_")

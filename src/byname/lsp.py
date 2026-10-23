@@ -132,7 +132,7 @@ UNORDERED_RE = re.compile(
 # a target list read by position: `x, y` / `(x, _)` / `x,`
 TARGETS_RE = re.compile(r"\(?\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*,?\s*\)?")
 VARIANCE_RE = re.compile(
-    r'Type parameter "T(\d+)@_(?:typ|opn)_(\w+?)" is \w+, but "(.*)" is not (?:the same as|a subtype of|assignable to) "(.*)"'
+    r'Type parameter "_byname_T(\d+)@_(?:typ|opn)_(\w+?)" is \w+, but "(.*)" is not (?:the same as|a subtype of|assignable to) "(.*)"'
 )
 KEY_RE = re.compile(r'"_key_\w*"')
 # a field read with a dot on an open record type that doesn't declare it (after unsite)
@@ -404,6 +404,7 @@ def parameter_type(help: dict | None) -> str | None:
 
 SITE_RE = re.compile(r"(_(?:rec|typ|opn)_\w*?)___\d+\b")
 # a record type repeated in a union, once site numbers are gone: `(a: int) | (a: int)`
+COVARIANT_RE = re.compile(r"\b_byname_T(\d+)\b")
 REPEAT_RE = re.compile(r"(_(?:rec|typ|opn)_\w+(?:\[(?:[^\[\]]|\[[^\[\]]*\])*\])?)(?: \| \1(?![\w\[]))+")
 
 
@@ -417,7 +418,8 @@ def pretty(text: str) -> str:
     """Display form of record types: _rec_name__age[str, int] -> (name: str, age: int), and of the
     TypedDict a record's `_asdict()` returns: _dct_name__age[str, int] -> {name: str, age: int}, and of
     explicit record types: _typ_... -> (name: str, age: int), _opn_... -> (..., name: str, age: int), _opn_ -> (...),
-    and of a spread record whose fields aren't known: _byname_AnyRec -> (...)."""
+    and of a spread record whose fields aren't known: _byname_AnyRec -> (...), and of a record type's type
+    parameters (transform.covariant): _byname_T0 -> T0."""
     text = unsite(text)
     out, i = [], 0
     while m := REC_RE.search(text, i):
@@ -448,7 +450,7 @@ def pretty(text: str) -> str:
             out.append(lp + ", ".join(fields) + rp)
         i = j
     out.append(text[i:])
-    return "".join(out).replace("_byname_AnyRec", "(...)")  # a spread record whose fields aren't known
+    return COVARIANT_RE.sub(r"T\1", "".join(out).replace("_byname_AnyRec", "(...)"))
 
 
 def function_type(src: str, k: int, close: int, path) -> tuple[str, bool] | None:
@@ -679,7 +681,7 @@ def is_generated_name(name) -> bool:
     )
 
 
-FIELDS_CLASS_RE = re.compile(r"class _(typ|opn)_(\w+?)\[")
+FIELDS_CLASS_RE = re.compile(r"class _(typ|opn)_(\w+?)\(")
 STUB_RE = re.compile(r"    def _rec_(\w+?)\[")
 
 
@@ -717,7 +719,7 @@ def field_declarations(hidden: str, pos: dict) -> list[dict]:
     )
 
 
-TYPE_CLASS_RE = re.compile(r"class (_(?:typ|opn)_\w+?)\[")
+TYPE_CLASS_RE = re.compile(r"class (_(?:typ|opn)_\w+?)\(")
 
 
 def type_field_at(hidden: str, pos: dict) -> tuple[str, str] | None:
