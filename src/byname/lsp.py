@@ -508,6 +508,31 @@ def positional_fields(msg: str) -> list[str] | None:
     return (m[1] or m[2]).split("__") if m else None
 
 
+def quick_fix(tr: Translation, d: dict, sure: bool = False) -> tuple[str, int, int, str] | None:
+    """byname's quick fix for a diagnostic, as (title, start, end, text) in the source: for a record read by
+    position (`bynameFields`), read it by name; for a field an open type doesn't declare (`bynameUnchecked`),
+    read it unchecked, `p["msg"]`, which says so in the text, where pyright's own fix, an ignore comment,
+    leaves `p.msg` looking checked; and the other way, for a bracket read of a declared field
+    (`bynameChecked`), read it checked, `p.msg`. sure: only fixes with one right answer (fix all), so only
+    reading checked: reading unchecked has declaring the field as the other answer, and reading by name pairs
+    targets with fields in written order, a guess (`y, x = batch()` -> `(x=y, y=x)`) to see before taking."""
+    data = d.get("data") if isinstance(d.get("data"), dict) else {}
+    src, r = tr.source, d["range"]
+    start = tr.src_lines.offset(r["start"]["line"], r["start"]["character"])
+    end = tr.src_lines.offset(r["end"]["line"], r["end"]["character"])
+    if (fields := data.get("bynameFields")) and not sure:
+        fix = by_name_edit(src, start, end, fields)
+        return fix and (f"Read by name: {fix[2]}", *fix)
+    if checked := data.get("bynameChecked"):  # the diagnostic is on `["msg"]` (srcmap: declared_reads)
+        receiver = re.search(r"\w*$", src[:start])[0]  # `p` in `p["msg"]`
+        return f"Read it checked: {receiver}.{checked}", start, end, f".{checked}"
+    if (unchecked := data.get("bynameUnchecked")) and not sure:
+        fix = unchecked_edit(src, start, end, unchecked)
+        receiver = re.search(r"\w*$", src[: fix[0]])[0] if fix else ""  # `p` in `p.msg`
+        return fix and (f"Read it unchecked: {receiver}{fix[2]}", *fix)
+    return None
+
+
 def unchecked_edit(src: str, start: int, end: int, field: str) -> tuple[int, int, str] | None:
     """`p.msg` -> `p["msg"]`, src[start:end] being the field name read: (start, end, text) of the edit from
     the dot. None if it isn't a dot read."""
@@ -1634,18 +1659,27 @@ class Proxy:
         return {"jsonrpc": "2.0", "id": mid, "result": [{"range": whole, "newText": out}]}
 
     def fix(self, mid, path: Path, doc: Doc, kind: str) -> dict:
-        """source.fixAll / source.organizeImports (e.g. codeActionsOnSave): Ruff's safe fixes, see fix.py."""
+        """source.fixAll / source.organizeImports (e.g. codeActionsOnSave): Ruff's safe fixes, see fix.py.
+        Fix all also applies byname's quick fixes that have one right answer (quick_fix, sure), first. Those
+        come from byname's own hints on this very text (Translation.hints), so a save right after an edit,
+        before the checker has answered, gets them too."""
         from .fix import ORGANIZE, FixError, fix_pyn
 
-        src = doc.tr.source
+        src = ours = doc.tr.source
+        if kind != ORGANIZE_KIND:
+            done = len(src)
+            fixes = [f[1:] for d in doc.tr.hints if (f := quick_fix(doc.tr, d, sure=True))]
+            for a, b, text in sorted(fixes, reverse=True):
+                if b <= done:  # back to front, skipping any that overlaps one applied
+                    ours, done = ours[:a] + text + ours[b:], a
         try:
-            out = fix_pyn(src, *self.ruff_at(path), select=ORGANIZE if kind == ORGANIZE_KIND else None)
+            out = fix_pyn(ours, *self.ruff_at(path), select=ORGANIZE if kind == ORGANIZE_KIND else None)
         except (FixError, ValueError):
-            out = src  # mid-edit code: offer nothing rather than fail the save
+            out = ours  # mid-edit code: no Ruff fixes rather than fail the save
         if out == src:
             return {"jsonrpc": "2.0", "id": mid, "result": []}
         whole = {"start": {"line": 0, "character": 0}, "end": doc.tr.src_lines.position(len(src))}
-        title = "byname: organize imports (ruff)" if kind == ORGANIZE_KIND else "byname: fix all (ruff)"
+        title = "byname: organize imports (ruff)" if kind == ORGANIZE_KIND else "byname: fix all (byname, ruff)"
         edit = {"changes": {doc.uri: [{"range": whole, "newText": out}]}}
         return {"jsonrpc": "2.0", "id": mid, "result": [{"title": title, "kind": kind + ".byname", "edit": edit}]}
 
@@ -1703,29 +1737,13 @@ class Proxy:
         return [{"title": f"byname: {title} (ruff)", "kind": kind + ".byname", "edit": {"changes": changes}}]
 
     def by_name_actions(self, params: dict, doc: Doc) -> list[dict]:
-        """Quick fixes for records read by position (diagnostics carrying `bynameFields`): read them by name;
-        and for a field an open type doesn't declare (`bynameUnchecked`): read it unchecked, `p["msg"]`,
-        which says so in the text, where pyright's own fix, an ignore comment, leaves `p.msg` looking checked."""
+        """Quick fixes for byname's diagnostics (quick_fix), offered with the checker's."""
         out = []
         lines = doc.tr.src_lines
         for d in params.get("context", {}).get("diagnostics", []):
-            data = d.get("data") if isinstance(d.get("data"), dict) else {}
-            fields, unchecked = data.get("bynameFields"), data.get("bynameUnchecked")
-            if not fields and not unchecked:
+            if (fix := quick_fix(doc.tr, d)) is None:
                 continue
-            r = d["range"]
-            start = lines.offset(r["start"]["line"], r["start"]["character"])
-            end = lines.offset(r["end"]["line"], r["end"]["character"])
-            if fields:
-                fix = by_name_edit(doc.tr.source, start, end, fields)
-                title = fix and f"Read by name: {fix[2]}"
-            else:
-                fix = unchecked_edit(doc.tr.source, start, end, unchecked)
-                receiver = re.search(r"\w*$", doc.tr.source[: fix[0]])[0] if fix else ""  # `p` in `p.msg`
-                title = fix and f"Read it unchecked: {receiver}{fix[2]}"
-            if fix is None:
-                continue
-            a, b, text = fix
+            title, a, b, text = fix
             edit = {"range": {"start": lines.position(a), "end": lines.position(b)}, "newText": text}
             out.append(
                 {
@@ -1931,7 +1949,7 @@ class Proxy:
         key = self.key(doc.uri)
         if key not in self.docs:
             return None  # closed .pyn: its translation's diagnostics have nowhere to go
-        out = list(doc.tr.problems)
+        out = [*doc.tr.problems, *doc.tr.hints]
         flagged = {(p["range"]["start"]["line"], p["range"]["start"]["character"]) for p in out}
         # a broken byname rule: the checker got the raw .pyn, so all it says is noise (`"(" was not closed`)
         for d in [] if isinstance(doc.tr.error, BynameError) else params.get("diagnostics", []):

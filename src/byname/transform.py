@@ -515,6 +515,76 @@ COMPOUND = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.TryStar, ast.
 COMPS = (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
 
 
+def declared_reads(hidden: str) -> list[tuple[int, int, int, str]]:
+    """Checker translation: bracket reads of a field the reader's written record type declares, `p["msg"]`
+    with `p: (..., msg: str)` (a parameter or an annotated name, the type inline or a `type` alias), as
+    offsets into `hidden`: (start of the read, end of `p`, end of the read, field). Brackets are the unchecked
+    read, so a declared field is better read with a dot (the editor says so, with a quick fix)."""
+    tree = parse_around_errors(hidden)
+    if tree is None:
+        return []
+    lines = hidden.splitlines(keepends=True)
+    starts = [0]
+    for line in lines:
+        starts.append(starts[-1] + len(line))
+
+    def at(lineno: int, col: int) -> int:  # ast columns count UTF-8 bytes
+        return starts[lineno - 1] + len(lines[lineno - 1].encode()[:col].decode(errors="ignore"))
+
+    aliases = {n.name.id: n.value for n in tree.body if isinstance(n, ast.TypeAlias) and isinstance(n.name, ast.Name)}
+
+    def fields_of(t: ast.expr | None) -> tuple[str, ...]:
+        if isinstance(t, ast.Name) and t.id in aliases:
+            t = aliases[t.id]
+        if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name):
+            for prefix in ("_typ_", "_opn_"):
+                if t.value.id.startswith(prefix):
+                    return class_fields(t.value.id.removeprefix(prefix))
+        return ()
+
+    out = []
+
+    def visit(scope: ast.AST, declared: dict[str, tuple[str, ...]]) -> None:
+        declared = dict(declared)
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            a = scope.args
+            for x in [*a.posonlyargs, *a.args, *a.kwonlyargs]:
+                declared[x.arg] = fields_of(x.annotation)
+        stack = list(ast.iter_child_nodes(scope))
+        nodes = []
+        while stack:
+            n = stack.pop()
+            nodes.append(n)
+            if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                stack.extend(ast.iter_child_nodes(n))
+        for n in nodes:
+            if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+                declared[n.target.id] = fields_of(n.annotation)
+        for n in nodes:
+            if (
+                isinstance(n, ast.Subscript)
+                and isinstance(n.ctx, ast.Load)
+                and isinstance(n.value, ast.Name)
+                and isinstance(n.slice, ast.Constant)
+                and n.slice.value in declared.get(n.value.id, ())
+                and n.end_lineno is not None
+                and n.value.end_lineno is not None
+            ):
+                out.append(
+                    (
+                        at(n.lineno, n.col_offset),
+                        at(n.value.end_lineno, n.value.end_col_offset or 0),
+                        at(n.end_lineno, n.end_col_offset or 0),
+                        n.slice.value,
+                    )
+                )
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                visit(n, declared if not isinstance(n, ast.ClassDef) else {})
+
+    visit(tree, {})
+    return out
+
+
 def untyped_builds(body: str) -> set[tuple[int, int]]:
     """Checker translation, first pass: the spread records built where no type is expected, as (line, k),
     the k-th spread record built on that line: the whole value of a `return` in a function with no return

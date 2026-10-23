@@ -1738,3 +1738,66 @@ def test_an_undeclared_field_on_an_open_type_offers_reading_it_unchecked(lsp):
         "range": {"start": {"line": 1, "character": 11}, "end": {"line": 1, "character": 15}},
         "newText": '["msg"]',
     }
+
+
+def test_a_bracket_read_of_a_declared_field_offers_reading_it_checked(lsp):
+    # brackets are the unchecked read: once the type declares the field, the dot read checks it
+    c, root, _ = lsp
+    text = "def log(p: (..., msg: str)):\n    print(p['msg'], p['other'])\n"
+    uri = c.open(root / "declared.pyn", text)
+    c.wait_diags(uri)
+    infos = [d for d in c.diags[uri] if d.get("severity") == 3]
+    assert [d["message"] for d in infos] == ['"msg" is declared on p\'s type: read it checked, p.msg']
+    d = infos[0]
+    actions = c.request(
+        "textDocument/codeAction", {"textDocument": {"uri": uri}, "range": d["range"], "context": {"diagnostics": [d]}}
+    )
+    assert actions[0]["title"] == "Read it checked: p.msg"
+    edit = actions[0]["edit"]["changes"][uri][0]
+    assert edit == {
+        "range": {"start": {"line": 1, "character": 11}, "end": {"line": 1, "character": 18}},
+        "newText": ".msg",
+    }
+
+
+def test_fix_all_applies_byname_quick_fixes_with_one_right_answer(lsp):
+    # read it checked goes in; read it unchecked doesn't (declaring the field is the other answer), nor read by
+    # name (it pairs targets with fields in written order: `y, x = batch()` would bind them swapped)
+    c, root, _ = lsp
+    text = (
+        "def batch():\n    return (x=1, y=2)\n\n\n"
+        "def log(p: (..., msg: str), q: (...)):\n    print(p['msg'], q.msg)\n\n\n"
+        "x, y = batch()\n"
+    )
+    uri = c.open(root / "fixall.pyn", text)
+    end = time.time() + 60
+    while time.time() < end and len([d for d in c.diags.get(uri, []) if d.get("data")]) < 3:
+        c.handle(c.q.get(timeout=5))
+    rng = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}
+    actions = c.request(
+        "textDocument/codeAction",
+        {"textDocument": {"uri": uri}, "range": rng, "context": {"diagnostics": [], "only": ["source.fixAll"]}},
+    )
+    fixed = actions[0]["edit"]["changes"][uri][0]["newText"]
+    assert "print(p.msg, q.msg)" in fixed
+    assert "x, y = batch()" in fixed
+
+
+def test_fix_all_right_after_an_edit_reads_declared_fields_checked(lsp):
+    # a paste then a save: the checker hasn't answered for this text yet, and read it checked still applies
+    c, root, _ = lsp
+    uri = c.open(root / "quicksave.pyn", "def log(p: (..., msg: str)):\n    pass\n")
+    c.wait_diags(uri)
+    text = "def log(p: (..., msg: str)):\n    print(p['msg'])\n"
+    c.send(
+        {
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": text}]},
+        }
+    )
+    rng = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}
+    actions = c.request(
+        "textDocument/codeAction",
+        {"textDocument": {"uri": uri}, "range": rng, "context": {"diagnostics": [], "only": ["source.fixAll"]}},
+    )
+    assert "print(p.msg)" in actions[0]["edit"]["changes"][uri][0]["newText"]

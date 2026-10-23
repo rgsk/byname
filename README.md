@@ -95,7 +95,10 @@ def log(p: (...)) -> None:                   # any record
 That's a path to typed code: start with `(...)` and brackets, then declare the fields you read,
 `(..., msg: str)`, and read them with dots, checked and completed. A dot read of a field the type doesn't
 declare says so: `"msg" isn't declared on (...): declare it, (..., msg: <type>), or read it unchecked with
-["msg"]`. In the editor, the quick fix *Read it unchecked* turns `p.msg` into `p["msg"]`.
+["msg"]`. In the editor, the quick fix *Read it unchecked* turns `p.msg` into `p["msg"]`, and the other way,
+once the field is declared, a bracket read of it gets a hint and the quick fix *Read it checked*: `p["msg"]`
+becomes `p.msg` (fix all does every one in the file). Brackets stay unchecked even for a declared field, so a rename of the field (which doesn't
+touch strings) can't leave a bracket read silently typed `Any`.
 
 `...` goes first, so a long type says it's open before listing its fields; anywhere else it's an error.
 
@@ -402,7 +405,7 @@ disable it in the workspace so its fixes don't run alongside. In VS Code:
 - **Navigation and editing:** hover, completion, go to definition, rename, outline, and colours from semantic highlighting.
 - **Errors** shown where you wrote the code.
 - **Formatting:** Format Document and format-on-save.
-- **Ruff fixes on save:** `source.fixAll` and `source.organizeImports` in `editor.codeActionsOnSave` work as in `.py` files, e.g. `List[int]` becomes `list[int]` and the unused `typing` import goes.
+- **Ruff fixes on save:** `source.fixAll` and `source.organizeImports` in `editor.codeActionsOnSave` work as in `.py` files, e.g. `List[int]` becomes `list[int]` and the unused `typing` import goes. Fix all (on save, or *Fix All* by hand) also applies byname's *Read it checked*, the one quick fix with one right answer. *Read it unchecked* (declaring the field is the other answer) and *Read by name* (it pairs targets with fields in written order, so `y, x = batch()` would bind them swapped) stay choices you make.
 - **Readable record types:** hover and error messages show `(name: str, age: int)`, not the generated class name.
 - **Field suggestions inside a pattern,** like TS's `const { | } = fn()`. `(name=, |) = make(...)` offers the remaining fields, and typing `,` inside a pattern opens the list.
 - **Rename keeps a shorthand's two names apart:** renaming the parameter in `fn(name=)` to `who` gives `fn(who=name)`, still passing your local; renaming the local gives `fn(name=who)`. Where the parameter is passed as itself (`fn(n=)` inside `fn`), it stays a shorthand. Renaming a record field from a read (`r.name`), a pattern or `_replace` renames the record it came from: the literal `(name=...)` it was built from, or the record type `(name: str)` it was declared with. Another record that only has the same fields is left alone, and so is a literal checked against a type: if it no longer fits, the checker says so.

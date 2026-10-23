@@ -8,10 +8,12 @@ Three coordinate systems:
 LSP positions are (line, UTF-16 column), so LineIndex converts to and from offsets.
 """
 
+import re
 from bisect import bisect_right
+from functools import cached_property
 from pathlib import Path
 
-from .transform import Edit, Mark, prelude_offset, transform
+from .transform import Edit, Mark, declared_reads, prelude_offset, transform
 
 Hit = tuple[Edit, Mark | None] | None  # what generated text a body offset landed on
 
@@ -141,6 +143,28 @@ class Translation:
             for s, e, msg in r.problems:
                 rng = {"start": self.src_lines.position(s), "end": self.src_lines.position(e)}
                 self.problems.append({"range": rng, "severity": 1, "source": "byname", "message": msg})
+
+    @cached_property
+    def hints(self) -> list[dict]:
+        """`p["msg"]` where p's record type declares msg: a dot read is the checked one (lsp.quick_fix). Not
+        in __init__: it parses the translation, so it runs when diagnostics go out, not before each edit
+        reaches the checker."""
+        out: list[dict] = []
+        # no `name["..."]` written at all: skip the parse. On the source: the translation has `_L['a,b']` in
+        # every record type, so there it would always match
+        if self.error is not None or not re.search(r"\w\s*\[\s*['\"]", self.source):
+            return out
+        for hs, hv, he, field in declared_reads(self.hidden):
+            a, v, b = self._from_hidden(hs, False), self._from_hidden(hv, True), self._from_hidden(he, True)
+            if a is None or v is None or b is None:
+                continue
+            name = self.source[a[0] : v[0]]
+            rng = {"start": self.src_lines.position(v[0]), "end": self.src_lines.position(b[0])}
+            message = f'"{field}" is declared on {name}\'s type: read it checked, {name}.{field}'
+            out.append(
+                {"range": rng, "severity": 3, "source": "byname", "message": message, "data": {"bynameChecked": field}}
+            )
+        return out
 
     def quiet(self, start: int, message: str) -> bool:
         """The checker (or Ruff's F841) calls a walrus that labels a returned tuple unused: it's bound to

@@ -584,7 +584,8 @@ def test_brackets_read_a_record_unchecked(tmp_path):
 def test_a_dot_read_of_an_undeclared_field_says_how_to_declare_it(tmp_path):
     # the gradual path: `p: (...)` read with brackets, unchecked, then its fields declared, `(..., msg: str)`,
     # and read with dots, checked. A dot read of a field the open type doesn't declare says both ways on (the
-    # editor's quick fix, Read it unchecked, writes the bracket read)
+    # editor's quick fix, Read it unchecked, writes the bracket read; once the field is declared, the editor
+    # hints the other way, Read it checked: brackets stay unchecked even for a declared field)
     verdicts = checker(
         """\
         def log(p: (...), q: (..., step: int)):
