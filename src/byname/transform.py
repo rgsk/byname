@@ -253,10 +253,6 @@ class Result:
     fields: list[tuple[int, int]] = field(default_factory=list)  # source spans of record field names, for highlighting
     # source spans of walrus names labelling a returned tuple
     labels: list[tuple[int, int]] = field(default_factory=list)
-    # every record shape the translation defines, (fields, is_open): what another module's `**rest` can take
-    # the rest of (imports.Modules.shapes)
-    shapes: list[tuple[tuple[str, ...], bool]] = field(default_factory=list)
-    imports: list[tuple[str, int]] = field(default_factory=list)  # the modules it imports, (module, level)
     # source spans of every bare `x=` (calls, records, patterns, loops): `x` is also the local, so it's
     # coloured as that local (lsp.remap_tokens)
     shorthands: list[tuple[int, int]] = field(default_factory=list)
@@ -266,6 +262,8 @@ class Result:
     # bracket reads of a field the reader's written record type declares, `p["msg"]` with
     # `p: (..., msg: str)`: (end of `p`, end of the read, field), source offsets (see declared_reads)
     declared_reads: list[tuple[int, int, str]] = field(default_factory=list)
+    # checker: source spans of each `**rest` whose source's fields the file doesn't show, typed `(...)` (rest_of)
+    unknown_rests: list[tuple[int, int]] = field(default_factory=list)
 
 
 def field_error(name: str) -> str:
@@ -350,36 +348,19 @@ def omit_name(taken: tuple[str, ...]) -> str:
     return "_byname_omit_" + "__".join(taken)
 
 
-def omit_def(taken: tuple[str, ...], shapes: list[tuple[tuple[str, ...], bool]]) -> str:
-    """Checker only: `rest` in `(name=, **rest) = r` is `_byname_omit_name(r)`. A checker can't take fields out
-    of a type, so this is an overload per record shape the file has that holds every field taken: an exact
-    `(name, age, city)` gives exactly `(age, city)`, an open `(..., name, age)` gives `(..., age)`. Exact
-    types match their field set only (FIELDSET), so exact shapes go first; open ones match any record with
-    their fields, so the one with the most goes first. A record of a shape the file doesn't show (another
-    module's inferred return, say) gives `(...)`: any record, unchecked. Not a record: no overload fits."""
-    name = omit_name(taken)
-    fits = [(f, o) for f, o in shapes if f and set(taken) <= set(f)]
-    fits.sort(key=lambda s: (s[1], -len(s[0])))
-    out = ""
-    for f, is_open in fits:
-        keep = [k for k, x in enumerate(f) if x not in taken]
-        params = ", ".join(f"T{k}" for k in range(len(f)))
-        rest = type_ref(tuple(f[k] for k in keep), is_open, [f"T{k}" for k in keep])
-        out += f"@_ov\ndef {name}[{params}](x: {type_ref(f, is_open, params.split(', '))}, /) -> {rest}: ...\n"
-    if not out:
-        return f"def {name}(x: _opn_, /) -> _opn_: ...  # pyright: ignore\n"
-    return out + f"@_ov\ndef {name}(x: _opn_, /) -> _opn_: ...\ndef {name}(x: _A, /) -> _A: ...  # pyright: ignore\n"
+def omit_def(taken: tuple[str, ...]) -> str:
+    """Checker only: the rest of a source whose fields the file doesn't show (rest_of): any record, `(...)`,
+    unchecked. Not a record: an error on `x` (lsp's OMIT_RE words it)."""
+    return f"def {omit_name(taken)}(x: _opn_, /) -> _opn_: ...  # pyright: ignore\n"
 
 
-def omit_types(
-    taken: tuple[str, ...], shapes: list[tuple[tuple[str, ...], bool]]
-) -> list[tuple[tuple[str, ...], bool]]:
-    """The record types omit_def returns, for the prelude to define."""
-    out = [((), True)]
-    for f, is_open in shapes:
-        if f and set(taken) <= set(f):
-            out.append((tuple(x for x in f if x not in taken), is_open))
-    return out
+def rest_def(name: str, fields: tuple[str, ...], is_open: bool, taken: tuple[str, ...]) -> str:
+    """Checker only: the rest of an open record type the file shows, `(..., name, age, city)` -> `(..., age,
+    city)`, or of an exact one when nothing is left, `(name)` -> `()` (rest_of): one function, for that type."""
+    params = [f"T{k}" for k in range(len(fields))]
+    keep = [k for k, f in enumerate(fields) if f not in taken]
+    rest = type_ref(tuple(fields[k] for k in keep), is_open, [params[k] for k in keep])
+    return f"def {name}[{', '.join(params)}](x: {type_ref(fields, is_open, params)}, /) -> {rest}: ...\n"
 
 
 def fieldset(fields: tuple[str, ...]) -> str:
@@ -505,15 +486,17 @@ def parse_around_errors(body: str, tries: int = 10) -> ast.Module | None:
 class Known:
     """A name's record fields, read off the file (known_fields). is_dict: it holds a record's `_asdict()`,
     so a spread reads it as `d["name"]`, not `d.name`. returns: it's a function, and these are the fields
-    of what a call to it returns."""
+    of what a call to it returns. is_open: an open record type, `(..., name: str)`, which may hold other
+    fields too: a rest takes these apart (rest_of), a spread doesn't build from them (known_build)."""
 
     fields: tuple[str, ...]
     is_dict: bool = False
     returns: bool = False
+    is_open: bool = False
 
 
 # the record fields of a name another module defines: (module, level, name) -> Known, or None if it shows none
-Lookup = Callable[[str, int, str], "Known | None"]  # imports.Modules, which also has .shapes(module, level)
+Lookup = Callable[[str, int, str], "Known | None"]  # imports.Modules
 # where a binding's fields show (_Bind.source): ("value" | "type", expr), ("import", (module, level, name)),
 # ("def", the function), whose fields are those of what it returns
 Source = tuple[str, ast.expr] | tuple[str, tuple[str, int, str]] | tuple[str, ast.FunctionDef]
@@ -546,6 +529,9 @@ class _Scope:
     is_class: bool = False
     binds: dict[str, list[_Bind]] = field(default_factory=dict)
     globals: set[str] = field(default_factory=set)  # names in its `global` statements
+    # names annotated in it, `u: User`, with the statement: every binding of the name there, an assignment or a
+    # loop's `for u in users`, has that type, as for the checker (of_bind)
+    declared: dict[str, tuple[ast.expr, int]] = field(default_factory=dict)
 
 
 COMPOUND = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.TryStar, ast.With, ast.AsyncWith, ast.Match)
@@ -740,6 +726,7 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
             sources[id(node.targets[0])] = ("value", node.value)
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             sources[id(node.target)] = ("type", node.annotation)
+            scope.declared.setdefault(node.target.id, (node.annotation, at))
         elif isinstance(node, ast.TypeAlias):
             sources[id(node.name)] = ("type", node.value)
         inside = straight and not isinstance(node, COMPOUND)
@@ -772,23 +759,28 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
     memo: dict[int, Known | None] = {}
 
     def resolve(name: str, scope: _Scope, at: int) -> Known | None:
-        got = [of_bind(b) for b in reaching(name, scope, at)]
+        got = [of_bind(b, name) for b in reaching(name, scope, at)]
         return got[0] if got and all(k is not None and k == got[0] for k in got) else None
 
-    def of_bind(b: _Bind) -> Known | None:
-        if b.source is None:
-            return None
+    def of_bind(b: _Bind, name: str) -> Known | None:
         if id(b) in memo:
             return memo[id(b)]
+        source, where = b.source, b.where
+        # a name declared in its scope, `r: T`, has that type at every binding, an assignment's or a loop's,
+        # as for the checker: each must fit it (_Scope.declared)
+        if (source is None or source[0] == "value") and (decl := where[0].declared.get(name)) is not None:
+            source, where = ("type", decl[0]), (where[0], decl[1])
+        if source is None:
+            return None
         memo[id(b)] = None  # a cycle stays unknown
-        kind, node = b.source
+        kind, node = source
         if isinstance(node, tuple):  # ("import", (module, level, name))
             memo[id(b)] = lookup(*node) if lookup is not None else None
         elif isinstance(node, ast.FunctionDef):
-            got = of_def(node, *b.where)
+            got = of_def(node, *where)
             memo[id(b)] = Known(got.fields, returns=True) if got is not None else None
         else:
-            memo[id(b)] = of_value(node, *b.where) if kind == "value" else of_type(node, *b.where)
+            memo[id(b)] = of_value(node, *where) if kind == "value" else of_type(node, *where)
         return memo[id(b)]
 
     def of_def(d: ast.FunctionDef, scope: _Scope, at: int) -> Known | None:
@@ -820,7 +812,7 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
             and not e.keywords
         ):
             got = of_value(e.func.value, scope, at)
-            return Known(got.fields, is_dict=True) if got is not None and not got.is_dict else None
+            return Known(got.fields, is_dict=True) if got is not None and not (got.is_dict or got.is_open) else None
         if not isinstance(e, ast.Call) or not isinstance(e.func, ast.Name):
             return None
         if e.func.id.startswith("_rec_") and all(k.arg for k in e.keywords) and not e.args:
@@ -829,7 +821,9 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
             # `rest` of `(name=, **rest) = u`: u's fields but those taken (omit_name)
             got = of_value(e.args[0], scope, at)
             taken = set(e.func.id.removeprefix("_byname_omit_").split("__"))
-            return Known(tuple(f for f in got.fields if f not in taken)) if got and not got.is_dict else None
+            if got is None or got.is_dict:
+                return None
+            return Known(tuple(f for f in got.fields if f not in taken), is_open=got.is_open)
         if e.func.id in ("_byname_ctx", "_byname_arg"):  # a spread record: its dict display, in order
             d = next((n for n in ast.walk(e) if isinstance(n, ast.Dict)), None)
             if d is None:
@@ -839,7 +833,7 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
                 if k is None:
                     inner = v.args[0] if isinstance(v, ast.Call) and v.args else v  # _byname_kw(x) / _pick(x, ...)
                     got = of_value(inner, scope, at)
-                    if got is None:
+                    if got is None or got.is_open:  # it may hold fields its type doesn't name
                         return None
                     out.update(dict.fromkeys(got.fields))
                 elif isinstance(k, ast.Constant) and isinstance(k.value, str):
@@ -851,8 +845,8 @@ def known_fields(body: str, lookup: Lookup | None = None, exports: bool = False)
         return Known(got.fields) if got is not None and got.returns else None
 
     def of_type(t: ast.expr, scope: _Scope, at: int) -> Known | None:
-        if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id.startswith("_typ_"):
-            return Known(class_fields(t.value.id.removeprefix("_typ_")))  # exact types only, not `_opn_`
+        if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id.startswith(("_typ_", "_opn_")):
+            return Known(class_fields(t.value.id[5:]), is_open=t.value.id.startswith("_opn_"))
         if isinstance(t, ast.Name):
             got = resolve(t.id, scope, at)
             return got if got is None or not (got.is_dict or got.returns) else None  # a dict isn't a type
@@ -1028,6 +1022,8 @@ def transform(
             if first.string == "**":
                 if not is_name(toks[it[1]]) or (len(it) != 2 and not is_call(it)) or (got := of(toks[it[1]])) is None:
                     return False
+                if got.is_open:  # it may hold fields its type doesn't name
+                    return False
                 if got.returns != is_call(it):  # a call to a function that shows its fields; else a record
                     return False
                 for f in got.fields:
@@ -1167,7 +1163,10 @@ def transform(
         standins.append((g0, g0, PAT))  # formatter: a call, `__P(**u, age=27)`
 
     consumed: set[int] = set()  # `(` of nested pattern groups, handled with their outer pattern
-    omits: dict[tuple[str, ...], None] = {}  # checker: field sets a `**rest` leaves out (omit_def)
+    omits: dict[tuple[str, ...], None] = {}  # checker: field sets an unknown `**rest` leaves out (omit_def)
+    rest_defs: dict[str, tuple[tuple[str, ...], bool, tuple[str, ...]]] = {}  # checker: rest_def's, by name
+    unknown_rests: list[tuple[int, int]] = []  # checker: Result.unknown_rests
+    pattern_line: int | None = None  # the line a pattern statement's bindings go on (rest_of)
     omit_used = False
 
     def is_rest(item: list[int]) -> bool:
@@ -1237,16 +1236,38 @@ def transform(
             text += f
         return text
 
-    def omit(node: list, chain: list[int], text: str, marks: list[Mark]) -> str:
-        """Append the rest of `_ds.a.b` (chain) without the fields `node` names: `_byname_omit(_ds, ('name',))`,
-        and for the checker `_byname_omit_name(_ds)`, typed by overloads on the record shapes (see omit_def)."""
+    def omit(node: list, chain: list[int], text: str, marks: list[Mark], line: int | None = None) -> str:
+        """Append the rest of `_ds.a.b` (chain) without the fields `node` names: `_byname_omit(_ds, ('name',))`.
+        The checker's is rest_of's. line: where a pattern statement's `_ds` is read (None in a loop)."""
         nonlocal omit_used
         taken = tuple(sorted({toks[it[0]].string for it, kind, _ in node if kind != "rest"}))
         omit_used = True
         if checker:
-            omits[taken] = None
-            return access(chain, text + omit_name(taken) + "(", marks) + ")"
+            return rest_of(node, taken, chain, text, marks, line)
         return access(chain, text + "_byname_omit(", marks) + f", {taken!r})"
+
+    def rest_of(node: list, taken: tuple[str, ...], chain: list[int], text: str, marks: list[Mark], line) -> str:
+        """Checker only: the rest's type, from the fields of the record it takes apart, `_ds`, as known_fields
+        reads them on the second pass. A checker can't take fields out of a type, so the rest is built as a
+        spread is (known_build): exact fields known, `(name=, **rest) = u` -> `rest = _rec_age__city(age=_ds.age,
+        city=_ds.city)`; an open type, one function from it to its rest (rest_def). Otherwise, a loop's or a
+        nested pattern's `_ds`, `users[0]`, a name bound to different shapes: `(...)`, any record, unchecked,
+        and the editor says how to give it a type (unknown_rests)."""
+        got = (known or {}).get((DS, line)) if line is not None and not chain else None
+        if got is not None and not got.is_dict and not got.returns:
+            keep = tuple(f for f in got.fields if f not in taken)
+            if keep and not got.is_open:
+                records[keep] = None
+                return text + literal_class(keep) + "(" + ", ".join(f"{f}={DS}.{f}" for f in keep) + ")"
+            name = f"_byname_rest{len(rest_defs)}"
+            rest_defs[name] = (got.fields, got.is_open, taken)
+            types.update(dict.fromkeys([(got.fields, got.is_open), (keep, got.is_open)]))
+            return text + name + f"({DS})"
+        rest = next(it for it, kind, _ in node if kind == "rest")
+        unknown_rests.append(span(rest[0], rest[-1]))
+        omits[taken] = None
+        types[(), True] = None
+        return access(chain, text + omit_name(taken) + "(", marks) + ")"
 
     def bindings(node: list, chain: list[int], text: str, marks: list[Mark], ann: tuple[int, int] | None) -> str:
         """Append `; local = _ds.field` for each item of a parsed pattern, marked back to the source.
@@ -1270,7 +1291,7 @@ def transform(
                 ts = len(text)
                 text += val
                 marks.append(Mark(ts, len(text), *span(it[1], it[-1])))
-                text = omit(node, chain, assign(text), marks)
+                text = omit(node, chain, assign(text), marks, pattern_line)
                 continue
             if kind == "short":  # target is implicit: insertion point right after `field=`
                 shorthand_spans.append(span(it[0]))
@@ -1615,6 +1636,7 @@ def transform(
                         raise err(msg, toks[close + 2])
                     problems.append((*ann, msg))  # half-typed, `(a=): Fin = r`: bound as if unannotated
                     ann = None
+            pattern_line = toks[j - 1].end[0]  # where the bindings go, so where `_ds` is read (rest_of)
             binds = bindings(tree, [], "", marks, ann)
             stmt_end = off(toks[j - 1].end)
             # a pattern over several lines keeps its line breaks, `(_ds\n\n)`, so the lines after it keep
@@ -1677,45 +1699,14 @@ def transform(
 
     tuples = label_returns() if checker else {}
 
-    def imports() -> list[tuple[str, int]]:
-        """The modules this file imports, `from m import f` / `import m`, as (module, level)."""
-        modules: list[tuple[str, int]] = []
-        for k, t in enumerate(toks):
-            if t.type != tokenize.NAME or t.string not in ("from", "import"):
-                continue
-            if k and toks[k - 1].type not in STMT_START and toks[k - 1].string != ";":
-                continue  # `yield from`, `raise X from e`, the `import` of `from m import`
-            j, level, name = k + 1, 0, ""
-            while toks[j].type not in (tokenize.NEWLINE, tokenize.ENDMARKER) and toks[j].string != ";":
-                s = toks[j].string
-                if t.string == "from" and s == "import":
-                    break
-                if s in (".", "...") and not name:
-                    level += len(s)
-                elif s == "as":
-                    j += 1  # the alias
-                elif s == ",":  # `import a, b`
-                    modules.append((name, 0))
-                    name = ""
-                elif s != "(":
-                    name += s
-                j += 1
-            modules.append((name, level))
-        return list(dict.fromkeys(modules))
-
-    def imported_shapes() -> list[tuple[tuple[str, ...], bool]]:
-        """The record shapes of the .pyn modules this file imports and theirs in turn (imports.Modules.shapes),
-        so a rest of a record made there, `(name=, **rest) = f()`, has an omit overload too (omit_def)."""
-        shapes_of = getattr(lookup, "shapes", None)
-        return [] if shapes_of is None else [s for m in imports() for s in shapes_of(*m)]
-
     # apply edits back-to-front
     edits.sort(key=lambda e: (e.start, e.end))
     body = src
     for e in reversed(edits):
         body = body[: e.start] + e.text + body[e.end :]
-    # checker: spread records of names whose fields the file shows get their exact type (known_build)
-    if checker and known is None and builds:
+    # checker: spread records and rests of names whose fields the file shows get their exact type (known_build,
+    # rest_of)
+    if checker and known is None and (builds or omit_used):
         k, u = known_fields(body, lookup), untyped_builds(body)
         if k or u:
             return transform(src, path, tolerant, portable, checker, known=k, lookup=lookup, untyped=u)
@@ -1725,16 +1716,9 @@ def transform(
         return prelude_for(ITER_CALLERS if checker else iter_callers(path))
 
     prelude = ""
-    omit_defs = ""
-    if omits:  # checker: `**rest` typed per record shape (omit_def), so the types it returns must exist too
-        imported = imported_shapes()
-        shapes = list(dict.fromkeys([*((f, False) for f in records), *types, *imported]))
-        # an overload's parameter type, defined here like the file's own: only those holding a rest's taken
-        # fields (the others have no overload, and a project's imports can bring hundreds)
-        types.update(dict.fromkeys(s for s in imported if s[0] and any(set(t) <= set(s[0]) for t in omits)))
-        for taken in omits:
-            omit_defs += omit_def(taken, shapes)
-            types.update(dict.fromkeys(omit_types(taken, shapes)))
+    # checker: the rests' functions (rest_of); the types they take and return are in `types`
+    omit_defs = "".join(omit_def(taken) for taken in omits)
+    omit_defs += "".join(rest_def(name, *d) for name, d in rest_defs.items())
     if records or types:  # only files with records: plain Python is left exactly as written
         prelude = base_prelude()
         if not portable:
@@ -1757,7 +1741,7 @@ def transform(
             prelude = base_prelude()
         if not portable:
             prelude += HASDICT + (KW_PRELUDE if kw_used else "")
-        rec = builds or (omit_used and not checker)  # the checker types a rest with omit_defs instead
+        rec = builds or (omit_used and not checker)  # the checker types a rest with rest_of instead
         if rec and not portable:
             prelude += BUILD_PRELUDE + (BUILD_REC_TYPED if checker else "")
             prelude += CTX_PRELUDE if checker and builds else ""
@@ -1872,7 +1856,6 @@ def transform(
         return out
 
     standins.sort()
-    shapes = list(dict.fromkeys([*((f, False) for f in records), *types]))
     return Result(
         prelude,
         body,
@@ -1881,11 +1864,10 @@ def transform(
         standins,
         sorted(field_spans),
         sorted(label_spans),
-        shapes,
-        imports(),
         sorted(shorthand_spans),
         type_fields,
         declared_reads() if checker and tolerant else [],
+        unknown_rests,
     )
 
 

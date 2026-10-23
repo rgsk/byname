@@ -257,3 +257,16 @@ def test_a_module_name_assigned_in_a_function_is_its_local_there():
         "print(x['name'], x [ 'name' ])\n"
     )
     assert _hinted(src) == [11, 13, 15, 16, 16]
+
+
+def test_a_rest_whose_record_byname_cannot_tell_is_hinted():
+    # its rest is (...), unchecked: the hint says how to give the record a type (transform.rest_of)
+    src = (
+        "type User = (name: str, age: int)\n"
+        "def f(u: User, users: list[User]):\n"
+        "    (name=, **known) = u\n"
+        "    (name=, **unknown) = users[0]\n"
+    )
+    (hint,) = Translation(src).hints
+    assert hint["range"]["start"] == {"line": 3, "character": 12}
+    assert hint["message"].startswith("unknown is (...), any record, unchecked:")

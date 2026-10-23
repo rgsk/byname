@@ -105,6 +105,14 @@ class LineIndex:
         return {"line": lo, "character": col}
 
 
+def unknown_rest(name: str) -> str:
+    """The hint on a `**rest` typed `(...)` (transform.rest_of), in the editor and `byname tool`."""
+    return (
+        f"{name} is (...), any record, unchecked: byname can't tell the fields of the record it takes apart."
+        " Give that record a type: `row: User = users[0]`, or `u: User` before `for u in users`"
+    )
+
+
 class Translation:
     """A .pyn source and its hidden Python, with LSP position mapping both ways."""
 
@@ -121,6 +129,7 @@ class Translation:
         self.shorthands: list[tuple[int, int]] = []  # every bare `x=` (see Result.shorthands)
         self.type_fields: list[tuple[str, str, int, int]] = []  # see Result.type_fields
         self.reads: list[tuple[int, int, str]] = []  # see Result.declared_reads
+        self.unknown_rests: list[tuple[int, int]] = []  # see Result.unknown_rests
         self.labels: set[int] = set()  # where a walrus labelling a returned tuple starts (see Result.labels)
         try:
             r = transform(source, tolerant=True, checker=True, lookup=lookup)
@@ -129,6 +138,7 @@ class Translation:
             self.shorthands = r.shorthands
             self.type_fields = r.type_fields
             self.reads = r.declared_reads
+            self.unknown_rests = r.unknown_rests
             self.labels = {s for s, _ in r.labels}
         except Exception as e:  # mid-edit code: send it raw; the checker reports the syntax error
             self.error = e
@@ -149,8 +159,13 @@ class Translation:
     @cached_property
     def hints(self) -> list[dict]:
         """`p["msg"]` where p's record type declares msg: a dot read is the checked one (lsp.quick_fix). The
-        reads come from the translation's token pass (transform.declared_reads)."""
+        reads come from the translation's token pass (transform.declared_reads). And a `**rest` typed `(...)`,
+        whose record byname can't tell the fields of (unknown_rest)."""
         out: list[dict] = []
+        for a, b in self.unknown_rests:
+            rng = {"start": self.src_lines.position(a), "end": self.src_lines.position(b)}
+            message = unknown_rest(self.source[a:b].removeprefix("**").strip())
+            out.append({"range": rng, "severity": 3, "source": "byname", "message": message})
         for a, b, field in self.reads:
             name = re.search(r"\w*$", self.source[:a])[0]  # `p`: the range starts right after it
             rng = {"start": self.src_lines.position(a), "end": self.src_lines.position(b)}

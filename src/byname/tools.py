@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 from .lsp import LOAD_EXT_RE, explain_fields, pretty
-from .srcmap import Translation, generated
+from .srcmap import Translation, generated, unknown_rest
 
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 CONFIGS = {"pyproject.toml", "setup.cfg", "ruff.toml", ".ruff.toml", "pyrightconfig.json"}
@@ -359,7 +359,10 @@ def main(argv: list[str]) -> int:
             if located:
                 located_lines.append(new)
             lines.append(new)
-    if dropped or quiet:  # the tool's own totals count what byname hid: recount what's shown
+    hinted = Path(cmd).name in ("basedpyright", "pyright") and add_rest_hints(
+        root, argv[1:], lines, located_lines, cache
+    )
+    if dropped or quiet or hinted:  # the tool's own totals count what byname hid or added: recount what's shown
         lines = recount(lines, located_lines)
     if os.environ.get("BYNAME_DEBUG"):
         if dropped:
@@ -368,6 +371,41 @@ def main(argv: list[str]) -> int:
             lines.append(f"byname: hid {quiet} unused-variable warning(s) on walrus labels in returns")
     print("\n".join(lines))
     return 0 if (dropped or quiet) and not located_lines else proc.returncode
+
+
+def add_rest_hints(root: Path, args: list[str], lines: list[str], located: list[str], cache: dict) -> bool:
+    """The editor's hint on a `**rest` typed `(...)` (srcmap.unknown_rest), as checker notes in `lines` (and
+    `located`), under its file's header: for the .pyn files named in args, or every .pyn in the project.
+    Whether any were added."""
+    named = [Path(a).resolve() for a in args if a.endswith(".pyn")]
+    if not named:
+        for d, dirs, files in os.walk(root):
+            dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
+            named += [Path(d) / f for f in files if f.endswith(".pyn")]
+    added = False
+    for pyn in sorted(named):
+        if pyn not in cache:
+            cache[pyn] = Translation(pyn.read_text(encoding="utf-8"), pyn)
+        tr = cache[pyn]
+        rel = str(pyn.relative_to(root))
+        notes = []
+        for a, b in tr.unknown_rests:
+            pos = tr.src_lines.position(a)
+            note = f"  {rel}:{pos['line'] + 1}:{pos['character'] + 1} - information: "
+            notes.append(note + unknown_rest(tr.source[a:b].removeprefix("**").strip()))
+        if not notes:
+            continue
+        added = True
+        located.extend(notes)
+        if rel in lines:  # after the file's own findings
+            k = lines.index(rel) + 1
+            while k < len(lines) and lines[k].startswith(" "):
+                k += 1
+            lines[k:k] = notes
+        else:  # before the totals
+            k = next((i for i, ln in enumerate(lines) if re.match(r"\d+ errors?, ", ln.strip())), len(lines))
+            lines[k:k] = [rel, *notes]
+    return added
 
 
 def plural(n: int, word: str) -> str:

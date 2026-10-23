@@ -1268,8 +1268,9 @@ def test_rest_follows_imports_to_the_module_that_made_the_record(tmp_path):
     assert verdicts == {3: 'Type of "r" is "(age: int, city: str)"'}
 
 
-def test_rest_of_a_record_whose_shape_no_file_shows_is_any_record(tmp_path):
-    # the checker can't take fields out of a type, so byname types a rest per record shape the file has
+def test_rest_of_a_record_whose_fields_the_file_does_not_show_is_any_record(tmp_path):
+    # the checker can't take fields out of a type, so byname builds the rest from the fields the file shows,
+    # as a spread is built; where it shows none, the rest is (...), and byname says how to give it a type
     verdicts = checker(
         """\
         from dataclasses import dataclass
@@ -1284,8 +1285,49 @@ def test_rest_of_a_record_whose_shape_no_file_shows_is_any_record(tmp_path):
         """,
         tmp_path,
     )
+    assert verdicts[7].startswith("r is (...), any record, unchecked: byname can't tell the fields")
     assert verdicts[8] == 'Type of "r" is "(...)"'
-    assert verdicts[9].startswith('"D" is not a record: **rest takes the rest of a record')
+    assert '"D" is not a record: **rest takes the rest of a record' in verdicts[9]
+
+
+def test_a_rest_s_record_gets_a_type_with_one_annotation(tmp_path):
+    # a loop's item or `users[0]`: byname doesn't follow them, and the rest is (...), with a hint. A type
+    # written on the name, or declared before the loop or the branches binding it, gives the rest its fields
+    verdicts = checker(
+        """\
+        type User = (name: str, age: int, city: str)
+        def f(users: list[User]) -> None:
+            for u in users:
+                (name=, **r1) = u
+                reveal_type(r1)
+            (name=, **r2) = users[0]
+            row: User = users[0]
+            (name=, **r3) = row
+            reveal_type(r3)
+            w: User
+            for w in users:
+                (name=, **r4) = w
+                reveal_type(r4)
+            for (name=, **r5) in users:
+                reveal_type(r5)
+            r: (..., name: str, age: int)  # bound to two shapes below: the declared type fits both
+            if users:
+                r = users[0]
+            else:
+                r = (name="b", age=2, zip=9)
+            (name=, **r6) = r
+            reveal_type(r6)
+        """,
+        tmp_path,
+    )
+    hint = "is (...), any record, unchecked: byname can't tell the fields of the record it takes apart"
+    assert verdicts[4].startswith(f"r1 {hint}") and verdicts[6].startswith(f"r2 {hint}")
+    assert verdicts[14].startswith(f"r5 {hint}")
+    assert verdicts[5] == 'Type of "r1" is "(...)"'
+    assert verdicts[9] == 'Type of "r3" is "(age: int, city: str)"'
+    assert verdicts[13] == 'Type of "r4" is "(age: int, city: str)"'
+    assert verdicts[22] == 'Type of "r6" is "(..., age: int)"'
+    assert sorted(verdicts) == [4, 5, 6, 9, 13, 14, 15, 22]
 
 
 # ============================================================================

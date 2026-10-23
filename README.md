@@ -259,10 +259,12 @@ def greet(u: (..., name: str, age: int)):     # like def greet(name: str, age: i
 - **Records only:** destructuring reads attributes, so it works on any object, but only a record has a list
   of fields to take the rest of. Anything else is a checker error and a `TypeError` at runtime.
 - **Empty or whole:** naming every field gives an empty record, `()`; `(**rest) = r` is a copy, equal to `r`.
-- **Typed by the source's record shape:** a checker can't take fields out of a type, so byname writes
-  one case per record shape in the file and in the .pyn modules it imports, theirs included: an exact type
-  gives exactly the other fields, an open one `(..., age: int)` stays open. A record whose shape none of them
-  shows (typed `Any`, say) gives `(...)`: any record, read with brackets (`rest["age"]`) only.
+- **Typed from where the record came from:** a record literal, a name with a record type (a parameter, an
+  annotated name, an imported type), or a call to a function that shows what it returns, in this file or a
+  .pyn module it imports: an exact type gives exactly the other fields, an open one `(..., age: int)` stays
+  open. Anything else (a loop's item, `users[0]`, a value typed `Any`) gives `(...)`: any record, read with
+  brackets (`rest["age"]`) only, and the editor and `byname tool` say how to give the record a type:
+  `row: User = users[0]`, or `u: User` before `for u in users`.
 
 **Final:** `: Final` after a pattern makes every local it binds `Final`, nested, renamed and rest ones
 included, so a checker rejects changing one later in the scope:
