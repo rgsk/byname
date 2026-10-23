@@ -246,6 +246,12 @@ for (x=, y=) in pts: ...               # for-loop targets
 (id=, user=(name=, age=a)) = r         # nested: name = r.user.name
 ```
 
+**When to destructure:** destructuring is tuple unpacking by name. Use it where Python would return a
+tuple: a bundle whose parts matter and whose whole doesn't (`(x=, y=) = get_batch()`,
+`(train=, val=) = split(ids)`). When the whole is a thing with a name worth keeping, keep it and read
+its fields where they're used (`user.name`, `cfg.max_steps`): a bare `max_steps` says nothing about
+where it came from.
+
 **Rest:** `**rest` collects the fields you didn't name into a record, the way `match` does for a dict
 (`case {"name": n, **rest}`). It's how you take a few fields and pass the others on:
 
