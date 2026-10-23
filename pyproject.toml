@@ -39,3 +39,8 @@ extend-exclude = ["*.md"]  # README examples are laid out by hand
 # the editor (byname lsp) and `byname tool basedpyright` both read this; "recommended", basedpyright's
 # default, is noisy
 typeCheckingMode = "standard"
+
+[tool.hatch.build.targets.wheel.force-include]
+# installs the import hook in every interpreter of the venv, so plain `python`, `python -m`, kernels and
+# spawned workers import .pyn modules (src/byname/hook.py)
+"byname.pth" = "byname.pth"

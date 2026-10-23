@@ -1,16 +1,19 @@
-"""Import hook: lets `import foo` find and run foo.pyn (and packages with __init__.pyn)."""
+"""Import hook: lets `import foo` find and run foo.pyn (and packages with __init__.pyn).
+
+Installed in every interpreter of the venv (byname.pth runs `import byname`), so it must cost next to nothing
+until a .pyn is loaded: the translator is imported then, not here."""
 
 import sys
 from importlib import _bootstrap_external
 from importlib.machinery import FileFinder, SourceFileLoader
-
-from .transform import to_code
 
 SUFFIX = ".pyn"
 
 
 class PynLoader(SourceFileLoader):
     def source_to_code(self, data, path, *, _optimize=-1):
+        from .transform import to_code  # here, not at the top: see the module docstring
+
         return to_code(data.decode("utf-8"), path)
 
     def set_data(self, path, data, *, _mode=0o666):

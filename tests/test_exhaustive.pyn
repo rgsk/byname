@@ -204,6 +204,17 @@ def test_reading_by_position_raises_at_runtime_too():
         _ = r + ()  # pyright: ignore[reportOperatorIssue]
 
 
+def test_pandas_is_told_how_to_keep_the_written_order():
+    # pandas reads a NamedTuple by position with `_fields`, the sorted storage order, as its columns: (step=, loss=)
+    # would come out as loss, step. So it isn't let in; its error says what keeps the order: dict(rec) goes by keys()
+    rows = [(step=1, loss=0.5)]
+    with pytest.raises(TypeError, match=r"for a DataFrame, pd.DataFrame\(map\(dict, rows\)\) keeps the written order$"):
+        exec("[tuple(r) for r in rows]", {"__name__": "pandas.core.internals.construction", "rows": rows})
+    with pytest.raises(TypeError, match=r"_asdict\(\)$"):  # anyone else: no hint
+        exec("[tuple(r) for r in rows]", {"__name__": "mylib", "rows": rows})
+    assert list(map(dict, rows)) == [{"step": 1, "loss": 0.5}]
+
+
 def test_a_traceback_shows_byname_s_own_code_under_its_own_name(tmp_path):
     # byname's runtime code (the prelude) is compiled into each file; its frames say so, with their own lines,
     # and the file's lines stay its own
@@ -1614,3 +1625,56 @@ def test_deepdict_takes_a_record_and_gives_a_dict_to_the_checker(tmp_path):
     assert verdicts[record_given] == 'Type of "deepdict(cfg)" is "dict[str, Any]"'
     # a list of records is [deepdict(row) for row in rows]
     assert verdicts[list_given].startswith('Argument of type "list[')
+
+
+# ============================================================================
+# 12. ANY PYTHON IMPORTS A .pyn: byname.pth installs the import hook in every interpreter of the venv
+# ============================================================================
+# not only `byname run`, pytest and `%load_ext byname`: plain `python`, `python -m`, a plain notebook's kernel,
+# a debugger, multiprocessing's spawned workers (DataLoader's). Next to it, `both.pyn` wins over `both.py`.
+
+
+def python(tmp_path: Path, *args: str) -> str:
+    out = subprocess.run([sys.executable, *args], cwd=tmp_path, capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    return out.stdout
+
+
+def test_plain_python_imports_a_pyn_module(tmp_path):
+    (tmp_path / "shapes.pyn").write_text("def box(): return (w=2, h=3)\nif __name__ == '__main__': print(box())\n")
+    assert python(tmp_path, "-c", "import shapes; print(shapes.box().w)") == "2\n"
+    assert python(tmp_path, "-m", "shapes") == "(w=2, h=3)\n"
+
+
+def test_a_pyn_wins_over_a_py_of_the_same_name(tmp_path):
+    # as the editor resolves it
+    (tmp_path / "both.py").write_text("WHO = 'py'\n")
+    (tmp_path / "both.pyn").write_text("WHO = (who='pyn').who\n")
+    assert python(tmp_path, "-c", "import both; print(both.WHO)") == "pyn\n"
+
+
+def test_a_package_s_init_can_be_a_pyn(tmp_path):
+    (tmp_path / "pynpkg").mkdir()
+    (tmp_path / "pynpkg" / "__init__.pyn").write_text("WHO = (who='pkg').who\n")
+    assert python(tmp_path, "-c", "from pynpkg import WHO; print(WHO)") == "pkg\n"
+
+
+def test_a_spawned_worker_imports_a_pyn_module(tmp_path):
+    # DataLoader workers: the worker imports the function's module afresh, and the record comes back pickled
+    (tmp_path / "work.pyn").write_text("def step(i): return (i=i, sq=i * i)\n")
+    (tmp_path / "main.py").write_text(
+        dedent("""\
+        import multiprocessing as mp
+        import work
+        if __name__ == "__main__":
+            with mp.get_context("spawn").Pool(1) as pool:
+                print(pool.map(work.step, [2, 3]))
+        """)
+    )
+    assert python(tmp_path, "main.py") == "[(i=2, sq=4), (i=3, sq=9)]\n"
+
+
+def test_a_python_that_never_loads_a_pyn_does_not_load_the_translator(tmp_path):
+    # the hook is in every interpreter of the venv, so it must cost next to nothing until a .pyn is loaded
+    imported = python(tmp_path, "-c", "import sys; print(sorted(m for m in sys.modules if m.startswith('byname')))")
+    assert imported == "['byname', 'byname.hook']\n"

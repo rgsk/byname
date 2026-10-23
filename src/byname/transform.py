@@ -57,7 +57,15 @@ PRELUDE = (
     # The one exception is reading by position from inside the iter callers (config.ITER_CALLERS and the
     # project's `iter-callers`), libraries that rebuild the record. `{iter_callers}` is them, each with a dot.
     "def _byname_positional(self, *_):\n"
-    "    raise TypeError(f'{type(self).__name__} is read by name only: use .field, keys() or _asdict()')\n"
+    "    raise TypeError(f'{type(self).__name__} is read by name only: use .field, keys() or _asdict()' + _byname_hint())\n"
+    # pandas reads a NamedTuple by position, with `_fields` (the sorted storage order) as the columns: not an
+    # iter caller, as its columns would come out sorted, not as written. The error says what keeps them
+    "def _byname_hint():\n"
+    "    f = _byname_sys._getframe(2)\n"
+    "    while f and f.f_code.co_name.startswith('_byname_'): f = f.f_back\n"
+    "    if f and f.f_globals.get('__name__', '').startswith('pandas.'):\n"
+    "        return '; for a DataFrame, pd.DataFrame(map(dict, rows)) keeps the written order'\n"
+    "    return ''\n"
     # whether the code reading by position is in an iter caller (see above): the frame two up from here,
     # one up from __iter__ or __getitem__, is the Python code that asked, also through list(), zip() or *
     "def _byname_lib():\n"

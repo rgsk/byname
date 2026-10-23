@@ -65,6 +65,10 @@ record is built and nothing that reads it changes meaning.
   parameters, so a field `f` doesn't take is flagged.
 - **Equality** is by name and value: the same fields with the same values, in any written order, are equal
   and hash alike, so `(x=1, y=2) == (y=2, x=1)`. A record never equals a plain tuple.
+- **DataFrames:** `pd.DataFrame(map(dict, rows))`, which keeps the written order (`dict(rec)` goes by
+  field name). `pd.DataFrame(rows)` raises: pandas reads a NamedTuple by position, with its storage order
+  (sorted by name) as the columns, so `(step=, loss=)` would come out as `loss, step`. The error says so.
+  Nested records: `pd.json_normalize(map(deepdict, rows))` gives `user.name`-style columns.
 - **They pickle,** however they were built (literal, spread, rest, `record(T, d)`), so DataLoader workers,
   `multiprocessing` and `torch.save` take them; unpickled, a record is the same class it was.
 - **They print the way you write them:** `(name='Rahul', age=26)`, and error messages name them by their
@@ -351,6 +355,12 @@ uv add --editable ../path/to/byname
 uv add --dev basedpyright ruff            # editor checker, formatter and linter (optional)
 ```
 
+byname installs `byname.pth`, which puts its import hook in every interpreter of the venv: plain `python`,
+`python -m pkg.mod`, debuggers, a notebook kernel without `%load_ext byname`, and multiprocessing's spawned
+workers (DataLoader's) all import `.pyn` modules. A venv that had byname before the `.pth` existed gets it with
+`uv sync --reinstall-package byname`. Running a `.pyn` by its path still takes `byname run file.pyn`: Python
+compiles a file it's given by path as Python.
+
 ## Command line
 
 | Command | What it does |
@@ -362,8 +372,9 @@ uv add --dev basedpyright ruff            # editor checker, formatter and linter
 | `byname tool <cmd> [args] file.pyn` | run Ruff or basedpyright on `.pyn` files, with positions mapped back |
 | `byname lsp [-- checker cmd]` | language server (see below) |
 
-`import byname` installs an import hook. After that, `import foo` finds `foo.pyn`, and `.py` and `.pyn`
-modules can import each other.
+With the import hook (installed by `byname.pth`, see Install), `import foo` finds `foo.pyn`, and `.py` and
+`.pyn` modules import each other. Where `foo.py` and `foo.pyn` sit side by side, `foo.pyn` wins, in every
+interpreter, as the editor resolves it. Importing byname costs under a millisecond until a `.pyn` is loaded.
 
 ## Editor support (VS Code)
 
