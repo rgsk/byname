@@ -202,6 +202,41 @@ class Translation:
                 return {"start": self.src_lines.position(span[0]), "end": self.src_lines.position(span[1])}
         return None
 
+    def split_shorthands(self, edits: list[dict]) -> list[dict]:
+        """TextEdits already mapped to the source: keep each shorthand `x=` naming both of its symbols.
+
+        `x=` is one text for two symbols, the label (parameter, field, attribute) and the implicit local.
+        A rename of the local arrives as an insertion after `=` (see range_from_hidden), giving `x=new`.
+        A rename of the label replaces the `x` written, which would silently rename the local too: `fn(x=)`
+        -> `fn(new=)` passes whatever local is called `new`. So the old local is inserted after `=`,
+        giving `new=x`. When one rename hits both halves (one symbol, `fn(n=)` inside `fn`), the insertion
+        is dropped and the shorthand stays: `m=`, not `m=m`."""
+        if not self.shorthands or not edits:
+            return edits
+
+        def span(e: dict) -> tuple[int, int]:
+            r = e["range"]
+            return (
+                self.src_lines.offset(r["start"]["line"], r["start"]["character"]),
+                self.src_lines.offset(r["end"]["line"], r["end"]["character"]),
+            )
+
+        spans = [span(e) if isinstance(e, dict) and "range" in e and "newText" in e else None for e in edits]
+        out, drop = list(edits), set()
+        for fs, fe in self.shorthands:
+            eq = self.source.find("=", fe)
+            if eq < 0:
+                continue
+            value_at = eq + 1
+            label = next((k for k, s in enumerate(spans) if s == (fs, fe)), None)
+            value = next((k for k, s in enumerate(spans) if s == (value_at, value_at)), None)
+            if label is not None and value is not None:
+                drop.add(value)
+            elif label is not None:
+                p = self.src_lines.position(value_at)
+                out.append({"range": {"start": p, "end": p}, "newText": self.source[fs:fe]})
+        return [e for k, e in enumerate(out) if k not in drop]
+
     def position_from_hidden(self, pos: dict) -> dict | None:
         hit = self._from_hidden(self.hid_lines.offset(pos["line"], pos["character"]), False)
         return None if hit is None else self.src_lines.position(hit[0])

@@ -388,6 +388,7 @@ disable it in the workspace so its fixes don't run alongside. In VS Code:
 - **Ruff fixes on save:** `source.fixAll` and `source.organizeImports` in `editor.codeActionsOnSave` work as in `.py` files, e.g. `List[int]` becomes `list[int]` and the unused `typing` import goes.
 - **Readable record types:** hover and error messages show `(name: str, age: int)`, not the generated class name.
 - **Field suggestions inside a pattern,** like TS's `const { | } = fn()`. `(name=, |) = make(...)` offers the remaining fields, and typing `,` inside a pattern opens the list.
+- **Rename keeps a shorthand's two names apart:** renaming the parameter in `fn(name=)` to `who` gives `fn(who=name)`, still passing your local; renaming the local gives `fn(name=who)`. Where the parameter is passed as itself (`fn(n=)` inside `fn`), it stays a shorthand. Renaming a record field from a read (`r.name`) doesn't reach the `(name=)` that built it yet.
 - **Ctrl+click on a shorthand name** (`name` in `fn(name=)`) goes to the **local variable**. *Go to Declaration* goes to the parameter.
 
 **Install the extension:**

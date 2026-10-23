@@ -67,6 +67,18 @@ def test_order_never_matters_because_every_argument_is_named():
     assert greet(age=, name=) == greet(name=, age=) == "rahul is 26"
 
 
+def test_renaming_one_half_of_a_shorthand_splits_it():
+    # `name=` is two symbols, the parameter and the local. The editor's rename changes only the one asked
+    # for: renaming the parameter to `who` writes `who=name`, the local to `who` writes `name=who`. A plain
+    # `who=` would pass whatever local is called `who`.
+    def hello(*, who: str) -> str:
+        return f"hello {who}"
+
+    who, name = "someone else", "rahul"
+    assert hello(who=name) == "hello rahul"
+    assert hello(who=) == "hello someone else"
+
+
 # ============================================================================
 # 2. RECORDS: build a value from locals by name
 # ============================================================================

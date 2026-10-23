@@ -907,12 +907,17 @@ class Proxy:
                 changes = {}
                 for u, edits in v.items():
                     target = self.doc_for(u)
-                    changes[target.uri if target else self.uri_to_editor(u)] = self.to_editor(edits, target)
+                    mapped = self.to_editor(edits, target)
+                    if target is not None:
+                        mapped = target.tr.split_shorthands(mapped)
+                    changes[target.uri if target else self.uri_to_editor(u)] = mapped
                 out[k] = changes
                 continue
             nv = self.to_editor(v, outer if k == "originSelectionRange" else doc, display and "newText" not in obj, k)
             if nv is DROP:
                 return DROP
+            if k == "edits" and isinstance(nv, list) and doc is not None and isinstance(td, dict):
+                nv = doc.tr.split_shorthands(nv)  # documentChanges: {textDocument, edits: [TextEdit]}
             out[k] = nv
         return out
 

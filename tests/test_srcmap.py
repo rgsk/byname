@@ -163,3 +163,52 @@ def test_cursor_after_half_typed_item_maps_after_attribute():
     h = t.position_to_hidden(p)
     assert t.hidden.splitlines()[0][: h["character"]].endswith("_ds.ag")
     assert t.problems[0]["message"] == "pattern item 'ag' needs '='"
+
+
+def _edit(src: str, s: int, e: int, text: str) -> dict:
+    t = Translation(src)
+    return {"range": {"start": t.src_lines.position(s), "end": t.src_lines.position(e)}, "newText": text}
+
+
+def _apply(src: str, edits: list[dict]) -> str:
+    t = Translation(src)
+    spans = sorted(
+        (
+            (
+                t.src_lines.offset(*e["range"]["start"].values()),
+                t.src_lines.offset(*e["range"]["end"].values()),
+                e["newText"],
+            )
+            for e in edits
+        ),
+        reverse=True,
+    )
+    for s, e, text in spans:
+        src = src[:s] + text + src[e:]
+    return src
+
+
+def test_renaming_a_shorthands_label_keeps_its_local():
+    # the parameter `name` renamed: the edit replaces the `name` written, so the old local goes after `=`
+    src = "fn(name=)\n"
+    edits = Translation(src).split_shorthands([_edit(src, 3, 7, "who")])
+    assert _apply(src, edits) == "fn(who=name)\n"
+
+
+def test_renaming_a_shorthands_label_in_a_pattern_keeps_its_local():
+    src = "(age=) = p\n"
+    edits = Translation(src).split_shorthands([_edit(src, 1, 4, "years")])
+    assert _apply(src, edits) == "(years=age) = p\n"
+
+
+def test_renaming_both_halves_of_a_shorthand_keeps_it_a_shorthand():
+    # one symbol is the label and the local: the label edit plus the insertion after `=` -> just `m=`
+    src = "fn(n=)\n"
+    edits = Translation(src).split_shorthands([_edit(src, 3, 4, "m"), _edit(src, 5, 5, "m")])
+    assert _apply(src, edits) == "fn(m=)\n"
+
+
+def test_renaming_only_the_local_is_left_as_it_is():
+    src = "fn(name=)\n"
+    edits = [_edit(src, 8, 8, "who")]
+    assert Translation(src).split_shorthands(edits) == edits
