@@ -380,8 +380,8 @@ compiles a file it's given by path as Python.
 |---|---|
 | `byname run file.pyn [args]` | run a `.pyn` script. Tracebacks point at `.pyn` lines |
 | `byname show [--no-main] file.pyn` | print the plain-Python translation (`--no-main` drops the `if __name__ == "__main__":` block) |
-| `byname format [--check] files…` | format `.pyn` files with Ruff |
-| `byname fix [--check] files…` | apply Ruff's safe lint fixes to `.pyn` files (what `source.fixAll` does on save) |
+| `byname format [--check] files…` | format `.pyn` files and notebooks with Ruff |
+| `byname fix [--check] files…` | apply Ruff's safe lint fixes to `.pyn` files and notebooks (what `source.fixAll` does on save) |
 | `byname tool <cmd> [args] file.pyn` | run Ruff or basedpyright on `.pyn` files, with positions mapped back |
 | `byname lsp [-- checker cmd]` | language server (see below) |
 
@@ -519,6 +519,11 @@ then swaps them back:
 
 `byname fix` runs `ruff check` on the translation, so `f(os=)` counts as a use of `os`, and applies
 the safe fixes whose edits fall on code you wrote. Fixes that would touch generated code are skipped.
+
+Both take notebooks too, byname or plain, and do what saving one in the editor does: `byname format
+nb.ipynb` formats each code cell. A cell holding a magic (`%time`, `!pip`) is left as it is, and so
+is any other cell Ruff can't parse, with a note saying which. `byname fix nb.ipynb` sees the whole
+notebook, so an import used in a later cell stays.
 
 ## Tests in `.pyn`
 

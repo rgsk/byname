@@ -276,7 +276,10 @@ def ungrid(code: str) -> str:
 
 def format_pyn(src: str, filename: str = "file.pyn", cwd: Path | None = None) -> str:
     """Formatted source. filename (as .py) lets ruff find the project's config."""
-    code = encode(grid(src))
+    try:
+        code = encode(grid(src))
+    except tokenize.TokenError as e:  # an unclosed bracket: unparsable, as Ruff would say, not a crash
+        raise UnparsableError(f"error: Failed to parse: {e.args[0]}") from None
     p = subprocess.run(
         [resolve("ruff"), "format", "--stdin-filename", str(Path(filename).with_suffix(".py")), "-"],
         input=code,

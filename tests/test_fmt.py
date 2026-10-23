@@ -1,5 +1,8 @@
 import ast
+import json
+import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -95,6 +98,8 @@ def test_code_ruff_cannot_parse_is_unparsable_not_a_failure(tmp_path):
     # a half-typed line: the editor offers no edits (as the Ruff extension does); `byname format` still says so
     with pytest.raises(UnparsableError, match="Failed to parse"):
         format_pyn("r = (a=1)\nprint(r.)\n", cwd=tmp_path)
+    with pytest.raises(UnparsableError, match="Failed to parse"):  # an unclosed bracket: tokenizing fails first
+        format_pyn("print(r.\n", cwd=tmp_path)
 
 
 def test_format_record_types(tmp_path):
@@ -147,3 +152,61 @@ def test_grid_from_items_right_after_the_bracket(tmp_path):
 def test_grid_needs_a_trailing_comma(tmp_path):
     # no trailing comma: plain ruff, which joins what fits on one line
     assert format_pyn("s = [1, 2, 3,\n4, 5, 6]\n", cwd=tmp_path) == "s = [1, 2, 3, 4, 5, 6]\n"
+
+
+def notebook(*cells: tuple[str, str | list[str]]) -> str:
+    return json.dumps(
+        {
+            "cells": [
+                {"cell_type": kind, "metadata": {}, "source": src}
+                | ({"outputs": [], "execution_count": None} if kind == "code" else {})
+                for kind, src in cells
+            ],
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        },
+        indent=1,
+    )
+
+
+def byname_cli(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, "XDG_CACHE_HOME": str(cwd / ".cache")}
+    return subprocess.run([sys.executable, "-m", "byname", *args], cwd=cwd, env=env, capture_output=True, text=True)
+
+
+def test_the_cli_formats_and_fixes_notebooks_as_saving_in_the_editor_does(tmp_path):
+    # byname format / fix take a .ipynb: each code cell as the editor formats it on save (a byname notebook's
+    # through the translation), a magic's cell left as it is, a cell's last line still without a newline;
+    # fix sees the whole notebook, so the import a later cell uses stays
+    nb = tmp_path / "nb.ipynb"
+    nb.write_text(
+        notebook(
+            ("code", "%load_ext byname"),
+            ("markdown", "# messy   markdown  stays"),
+            ("code", ["import os\n", "import json\n", "u=( name='r',age = 1 )"]),
+            ("code", "%time x=1"),
+            ("code", "(name=,age=)=u\nprint( os.sep,name )\n"),
+        )
+    )
+    assert byname_cli(tmp_path, "format", "--check", "nb.ipynb").returncode == 1
+    done = byname_cli(tmp_path, "format", "nb.ipynb")
+    assert (done.returncode, done.stdout, done.stderr) == (0, "reformatted nb.ipynb\n", "")
+    cells = [c["source"] for c in json.loads(nb.read_text())["cells"]]
+    assert cells == [
+        "%load_ext byname",
+        "# messy   markdown  stays",
+        ["import os\n", "import json\n", "\n", 'u = (name="r", age=1)'],  # a list of lines stays one
+        "%time x=1",
+        "(name=, age=) = u\nprint(os.sep, name)\n",
+    ]
+    assert byname_cli(tmp_path, "format", "--check", "nb.ipynb").returncode == 0
+    assert byname_cli(tmp_path, "fix", "nb.ipynb").stdout == "fixed nb.ipynb\n"
+    assert json.loads(nb.read_text())["cells"][2]["source"] == ["import os\n", "\n", 'u = (name="r", age=1)']
+
+    # a plain notebook, and a cell that doesn't parse: said, and left as it is
+    plain = tmp_path / "plain.ipynb"
+    plain.write_text(notebook(("code", "x=[1,2]"), ("code", "print(x.")))
+    done = byname_cli(tmp_path, "format", "plain.ipynb")
+    assert "plain.ipynb: cell 2 left as it is: error: Failed to parse" in done.stderr
+    assert [c["source"] for c in json.loads(plain.read_text())["cells"]] == ["x = [1, 2]", "print(x."]
