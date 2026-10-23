@@ -558,7 +558,8 @@ ignore the written order) and shows them in the order written. The checker sees 
 the same type `(name: str, age: int)` is, so it infers `make() -> (name: str, age: int)` without annotations
 and has no positional access to offer. The translation keeps every line on the same
 line number. The generated classes go in a header that's spliced in, which is why tracebacks and editor
-positions line up with your `.pyn`.
+positions line up with your `.pyn`. byname's own runtime code in that header shows as
+`<byname prelude: file.pyn>` in tracebacks, debuggers and coverage, at its own lines, never as lines of your file.
 
 ## Development
 

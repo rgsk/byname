@@ -12,7 +12,7 @@ from _pytest.assertion.rewrite import rewrite_asserts
 from _pytest.pathlib import fnmatch_ex
 
 from .hook import install
-from .transform import to_ast
+from .transform import compile_ast, to_ast
 
 
 def pytest_collect_file(file_path: Path, parent: pytest.Collector) -> pytest.Module | None:
@@ -38,5 +38,5 @@ class PynModule(pytest.Module):
         mod = types.ModuleType(self.path.stem)
         mod.__file__ = str(self.path)
         sys.modules[mod.__name__] = mod  # dataclasses and pickle look a module up by name
-        exec(compile(tree, str(self.path), "exec", dont_inherit=True), mod.__dict__)  # noqa: S102 -- importing the test module is the point
+        exec(compile_ast(tree, str(self.path)), mod.__dict__)  # noqa: S102 -- importing the test module is the point
         return mod

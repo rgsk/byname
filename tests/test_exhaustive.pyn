@@ -204,6 +204,37 @@ def test_reading_by_position_raises_at_runtime_too():
         _ = r + ()  # pyright: ignore[reportOperatorIssue]
 
 
+def test_a_traceback_shows_byname_s_own_code_under_its_own_name(tmp_path):
+    # byname's runtime code (the prelude) is compiled into each file; its frames say so, with their own lines,
+    # and the file's lines stay its own
+    (tmp_path / "tb.pyn").write_text(
+        dedent("""\
+        import sys
+        class Bad:
+            def __repr__(self):
+                raise ValueError("no repr")
+        r = (a=1, b=2)
+        def by_position():
+            x, y = r
+        if sys.argv[1] == "repr":
+            repr((a=Bad()))
+        by_position()
+        """)
+    )
+    run = [sys.executable, "-m", "byname", "run", "tb.pyn"]
+    out = subprocess.run([*run, "position"], cwd=tmp_path, capture_output=True, text=True, check=False).stderr
+    assert 'File "tb.pyn", line 10, in <module>\n    by_position()' in out
+    assert 'File "tb.pyn", line 7, in by_position\n    x, y = r' in out
+    assert re.search(r'File "<byname prelude: tb.pyn>", line \d+, in _byname_positional\n +raise TypeError', out)
+    assert not re.search(r'File "tb.pyn", line \d+, in _byname', out)
+    # code nested in byname's own (a generator in its __repr__) too
+    out = subprocess.run([*run, "repr"], cwd=tmp_path, capture_output=True, text=True, check=False).stderr
+    assert re.search(r'File "<byname prelude: tb.pyn>", line \d+, in <genexpr>', out)
+    assert 'File "tb.pyn", line 4, in __repr__\n    raise ValueError("no repr")' in out
+    # this file runs through the pytest plugin, the same way
+    assert type((a=1)).__iter__.__code__.co_filename == f"<byname prelude: {__file__}>"
+
+
 def test_records_have_no_order():
     with pytest.raises(TypeError, match="'<' not supported"):
         sorted([(name="rahul", age=26), (name="tasha", age=22)])  # pyright: ignore[reportArgumentType]

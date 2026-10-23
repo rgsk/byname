@@ -24,7 +24,9 @@ The body keeps the input's line count; record classes go in a separate prelude.
 import ast
 import io
 import keyword
+import linecache
 import tokenize
+import types
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -1990,20 +1992,52 @@ def source_ast(src: str, path: str = "<pyn>") -> ast.Module:
     return ast.parse(transform(src, path).body, path)
 
 
+# The prelude is compiled into the module, so its functions would carry the .pyn's name and their own line
+# numbers, lines the file doesn't have (or other lines of it). Its lines are moved past this one before
+# compiling, then its code objects are given back their own lines under their own name (compile_ast).
+PRELUDE_LINE = 1_000_000
+
+
+def prelude_file(path: str) -> str:
+    """The filename tracebacks, debuggers and coverage show for the prelude's code: its own per file, as each
+    file's prelude differs (its record classes, its iter callers)."""
+    return f"<byname prelude: {path}>"
+
+
 def to_ast(src: str, path: str) -> ast.Module:
-    """The module that runs, as an AST, prelude included: what to_code compiles. Body line numbers match
-    the .pyn file exactly. For tools that rewrite it first (the pytest plugin rewrites asserts)."""
+    """The module that runs, as an AST, prelude included: what to_code compiles, with compile_ast. Body line
+    numbers match the .pyn file exactly; the prelude's are past PRELUDE_LINE. For tools that rewrite it first
+    (the pytest plugin rewrites asserts). Puts the prelude's text in linecache, so tracebacks show its lines."""
     r = transform(src, path)
     tree = ast.parse(r.body, path)
     if r.prelude:
+        prelude = ast.parse(r.prelude)
+        ast.increment_lineno(prelude, PRELUDE_LINE)
         k = prelude_index(tree)
-        tree.body[k:k] = ast.parse(r.prelude).body
+        tree.body[k:k] = prelude.body
+        lines = r.prelude.splitlines(keepends=True)
+        linecache.cache[prelude_file(path)] = (len(r.prelude), None, lines, prelude_file(path))
     return tree
 
 
-def to_code(src: str, path: str):
+def compile_ast(tree: ast.Module, path: str) -> types.CodeType:
+    """Compile to_ast's module: each code object of the prelude's (its functions, and what's nested in them)
+    gets the prelude's filename and lines. Line numbers are stored relative to co_firstlineno, so moving that
+    moves them all. The prelude's module-level statements stay in the module's code, past PRELUDE_LINE."""
+
+    def relabel(code: types.CodeType) -> types.CodeType:
+        consts = tuple(relabel(c) if isinstance(c, types.CodeType) else c for c in code.co_consts)
+        if code.co_firstlineno > PRELUDE_LINE:
+            first = code.co_firstlineno - PRELUDE_LINE
+            return code.replace(co_consts=consts, co_filename=prelude_file(path), co_firstlineno=first)
+        return code.replace(co_consts=consts)
+
+    return relabel(compile(tree, path, "exec", dont_inherit=True))
+
+
+def to_code(src: str, path: str) -> types.CodeType:
     """Compile .pyn source. Body line numbers match the .pyn file exactly."""
-    return compile(to_ast(src, path), path, "exec", dont_inherit=True)
+    return compile_ast(to_ast(src, path), path)
 
 
 def prelude_offset(body: str) -> int:
