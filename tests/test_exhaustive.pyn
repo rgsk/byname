@@ -980,6 +980,8 @@ def test_a_spread_is_exact_wherever_the_checker_knows_its_source(tmp_path):
             label = "😀"; top = (**users[0], zip=1)  # an expression, after a wide character
             reveal_type(top)
             reveal_type((**db.users[-1], zip=1))
+            ignored = (**users[1], zip=1)  # pyright: ignore
+            reveal_type(ignored)  # the comment hid the probe's answer; the probe blanks it
         """,
         tmp_path,
     )
@@ -988,8 +990,8 @@ def test_a_spread_is_exact_wherever_the_checker_knows_its_source(tmp_path):
     assert verdicts[15] == 'Type of "again" is "(name: str, age: int, zip: int, city: str)"'
     assert verdicts[18] == 'Type of "open_" is "(..., zip: int)"'
     assert verdicts[20] == 'Type of "m" is "(..., zip: int)"'
-    assert verdicts[22].endswith(exact) and verdicts[23].endswith(exact)
-    assert sorted(verdicts) == [7, 9, 11, 15, 18, 20, 22, 23]
+    assert verdicts[22].endswith(exact) and verdicts[23].endswith(exact) and verdicts[25].endswith(exact)
+    assert sorted(verdicts) == [7, 9, 11, 15, 18, 20, 22, 23, 25]
 
     users = [(name="a", age=1)]
     assert (**users[0], zip=1) == (name="a", age=1, zip=1)

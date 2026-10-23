@@ -949,3 +949,23 @@ def test_an_unseen_spread_source_is_asked_of_the_checker_and_its_answer_types_it
     union = 'Type of "u" is "_typ_name___0[str] | _typ_age___1[int]"'
     assert probed_from([(at, col, union)], tr) == {}
     assert probed_from([(at, col, 'Type of "u" is "_typ_name___0[list[int]]"')], tr) == {("u", 3): Known(("name",))}
+
+
+def test_a_probe_blanks_an_ignore_comment_that_would_hide_its_answer():
+    # `# pyright: ignore` hides every diagnostic on its line, reveal_type's answer too: in the probe it's
+    # blanked, columns kept, and the line remembered so the editor still hides what the comment would
+    src = (
+        "def f(rows):\n"
+        "    a = (**rows[0], zip=1)  # pyright: ignore\n"
+        "    b = (**rows[1], zip=1)  # type: ignore[misc]\n"
+        "    c = (**rows[2], zip=1)  # pyright: ignore[reportGeneralTypeIssues]\n"  # a rule: reveal_type has none
+        "    d = 1  # pyright: ignore\n"  # no probe on it
+    )
+    tr = Translation(src, probe=True)
+    lines = tr.hidden.splitlines()
+    hidden = [next(k for k, h in enumerate(lines) if v in h) for v in ("rows[0]", "rows[1]", "rows[2]", "d = 1  #")]
+    assert "ignore" not in lines[hidden[0]] and "ignore" not in lines[hidden[1]]
+    assert lines[hidden[0]].endswith("  " + " " * len("# pyright: ignore"))
+    assert "# pyright: ignore[reportGeneralTypeIssues]" in lines[hidden[2]] and "# pyright: ignore" in lines[hidden[3]]
+    assert tr.unignored == {hidden[0], hidden[1]}
+    assert "ignore" in Translation(src).hidden.splitlines()[hidden[0]]  # only the probe

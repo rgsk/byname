@@ -121,6 +121,9 @@ PROBED: dict[Path, tuple[str, Probed]] = {}
 # a probe translation's last line, `reveal_type('_byname_probe')`: the checker answers it whatever else it
 # can't (an unanalysed function's body), so a publish with its answer is of the probe (lsp.Proxy.probed)
 PROBE_MARK = "_byname_probe"
+# a comment that hides every diagnostic on its line, a probe's answer too: `# pyright: ignore` with no rules,
+# `# type: ignore` with or without (the checker reads its rules as none). `# pyright: ignore[rule]` leaves it
+IGNORE = re.compile(r"#\s*(?:pyright:\s*ignore(?![\w\[])|type:\s*ignore\b(?:\[[^\]]*\])?)")
 REVEAL = re.compile(r'Type of "(.+?)" is "(_typ_|_opn_)(\w+)(.*)"$')
 
 
@@ -224,6 +227,16 @@ class Translation:
                 continue
             pos = self.hid_lines.position(m.end())
             self.reveals.add((pos["line"], pos["character"]))
+        # a probe's line whose comment would hide its answer: the comment blanked (same columns), and what
+        # the checker says on that line not shown (lsp.Proxy.diagnostics), as the comment would have it
+        self.unignored: set[int] = set()
+        if self.reveals:
+            lines = self.hidden.split("\n")
+            for line in {n for n, _ in self.reveals}:
+                if m := IGNORE.search(lines[line]):
+                    lines[line] = lines[line][: m.start()] + " " * (m.end() - m.start()) + lines[line][m.end() :]
+                    self.unignored.add(line)
+            self.hidden = "\n".join(lines)
         if self.error is None:
             for s, e, msg in r.problems:
                 rng = {"start": self.src_lines.position(s), "end": self.src_lines.position(e)}

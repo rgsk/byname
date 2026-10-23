@@ -2147,11 +2147,12 @@ class Proxy:
             return None  # closed .pyn: its translation's diagnostics have nowhere to go
         if doc.probing and (key is None or self.probed(doc, key, params.get("diagnostics", []))):
             return None
-        if doc.tr.reveals:  # the probe's own reveal_type notes
+        if doc.tr.reveals:  # the probe's own reveal_type notes, and what an ignore comment it blanked hid
             kept = [
                 d
                 for d in params.get("diagnostics", [])
                 if (d["range"]["start"]["line"], d["range"]["start"]["character"]) not in doc.tr.reveals
+                and d["range"]["start"]["line"] not in doc.tr.unignored
             ]
             params = {**params, "diagnostics": kept}
         out = [*doc.tr.problems, *doc.tr.hints]
