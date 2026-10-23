@@ -197,9 +197,10 @@ def probe(root: Path, out: Path, checker: str) -> int:
         report = json.loads(proc.stdout)
     except ValueError:
         report = {}
-    found: dict[Path, list[tuple[int, str]]] = {}
+    found: dict[Path, list[tuple[int, int, str]]] = {}
     for d in report.get("generalDiagnostics", []):
-        found.setdefault(Path(d["file"]).resolve(), []).append((d["range"]["start"]["line"], d["message"]))
+        start = d["range"]["start"]
+        found.setdefault(Path(d["file"]).resolve(), []).append((start["line"], start["character"], d["message"]))
     for pyn, (dst, tr) in asked.items():
         PROBED[pyn] = (tr.source, probed_from(found.get(dst.resolve(), []), tr))
         write_if_changed(dst, Translation(tr.source, pyn).hidden)

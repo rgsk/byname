@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 from byname import source_ast, to_code, to_python, transform
-from byname.srcmap import SourceMap
-from byname.transform import pattern_slot
+from byname.srcmap import SourceMap, Translation, probed_from
+from byname.transform import Known, pattern_slot
 
 
 def compile_pyn(src):
@@ -924,3 +924,28 @@ def test_a_record_not_imported_from_byname_is_left_alone():
 def test_record_call_is_an_error_in_output_files():
     with pytest.raises(SyntaxError, match="record\\(\\) needs byname at runtime"):
         to_python(RECORD_CALL, portable=True)
+
+
+def test_an_unseen_spread_source_is_asked_of_the_checker_and_its_answer_types_it():
+    # probe: each source whose fields the file doesn't show goes in reveal_type, in place, and is listed by
+    # (name, line), or for an expression by where it starts; probed: the answers, read as known names
+    src = "def f(users, rows):\n    for u in users:\n        a = (**u, zip=1)\n    b = (**rows[0], zip=1)\n"
+    r = transform(src, checker=True, probe=True)
+    assert r.unseen == [("u", 3), ("**11", 4)]
+    lines = re.sub(r"___\d+", "", r.body).splitlines()
+    assert lines[2].endswith("a = _rec_zip_spread__u(**_byname_loose(reveal_type(u)), zip=1)")
+    assert lines[3].endswith("b = _rec_zip_spread(**_byname_loose(reveal_type(rows[0])), zip=1)")
+    probed = {("u", 3): Known(("name",)), ("**11", 4): Known(("name",))}
+    r = transform(src, checker=True, probed=probed)
+    lines = re.sub(r"___\d+", "", r.body).splitlines()
+    assert r.unseen == []
+    assert lines[2].endswith("a = _rec_name__zip(name=u.name, zip=1)")
+    assert lines[3].endswith("b = _rec_name__zip(name=(_byname_v0 := rows[0]).name, zip=1)")
+    # what the checker can't type (a union, an open record built from unseen spreads) isn't an answer
+    tr = Translation(src, probe=True)
+    hidden = tr.hidden.splitlines()
+    at = next(k for k, line in enumerate(hidden) if "reveal_type(u)" in line)
+    col = hidden[at].index("reveal_type(u)") + len("reveal_type(")
+    union = 'Type of "u" is "_typ_name___0[str] | _typ_age___1[int]"'
+    assert probed_from([(at, col, union)], tr) == {}
+    assert probed_from([(at, col, 'Type of "u" is "_typ_name___0[list[int]]"')], tr) == {("u", 3): Known(("name",))}

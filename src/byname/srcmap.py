@@ -118,7 +118,7 @@ Probed = dict[tuple[str, int], Known]
 # before it translates (tools.probe), so every Translation of that text reads the same types
 PROBED: dict[Path, tuple[str, Probed]] = {}
 # a probe's answer: `Type of "u" is "_typ_name__age___0[str, int]"`; an open record `_opn_...`
-REVEAL = re.compile(r'Type of "(\w+)" is "(_typ_|_opn_)(\w+)(.*)"$')
+REVEAL = re.compile(r'Type of "(.+?)" is "(_typ_|_opn_)(\w+)(.*)"$')
 
 
 def one_type(args: str) -> bool:
@@ -133,19 +133,26 @@ def one_type(args: str) -> bool:
     return False
 
 
-def probed_from(found: list[tuple[int, str]], tr: "Translation") -> Probed:
+def probed_from(found: list[tuple[int, int, str]], tr: "Translation") -> Probed:
     """What the checker said each unseen source of tr's probe translation is: its revealed record type's
-    fields, by (name, source line), from (hidden line, message) pairs, 0-based. A type that isn't one record
-    (a union, a dict, Any) or is itself built from unseen spreads says nothing, and is left out."""
+    fields, by (name, source line), from (hidden line, character, message), 0-based. A spread of an
+    expression is keyed by where it starts (transform's expr_key), found from where the answer stands. A type
+    that isn't one record (a union, a dict, Any) or is itself built from unseen spreads says nothing."""
     shift = tr.hidden.count("\n", tr.at, tr.at + tr.plen)
     first = tr.hidden.count("\n", 0, tr.at + tr.plen)  # the body's line after the prelude
     asked = set(tr.unseen)
     out: Probed = {}
-    for line, message in found:
+    for line, character, message in found:
         m = REVEAL.match(message)
         if m is None or SPREAD in m[3] or not one_type(m[4]):
             continue
-        key = (m[1], line + 1 - (shift if line >= first else 0))
+        if m[1].isidentifier():  # a name, maybe byname's `_ds`: the translation keeps the source's lines
+            key = (m[1], line + 1 - (shift if line >= first else 0))
+        elif (hit := tr._from_hidden(tr.hid_lines.offset(line, character), False)) is not None:
+            at = hit[0]
+            key = (f"**{at - tr.source.rfind(chr(10), 0, at) - 1}", tr.source.count("\n", 0, at) + 1)
+        else:
+            continue
         if key in asked:
             got = Known(class_fields(m[3]), is_open=m[2] == "_opn_")
             out[key] = got if out.get(key, got) == got else None  # two answers on a line that disagree

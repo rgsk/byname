@@ -1000,17 +1000,31 @@ def transform(
     type_groups: set[int] = set()  # `(` of record types, for their fields' types and `(name: str)(...)`
     group_fields: dict[int, tuple[str, ...]] = {}  # `(` of a record type -> its fields (declared_reads)
 
-    def wrap_kw(its: list[list[int]]) -> None:
+    def expr_key(it: list[int]) -> tuple[str, int]:
+        """A spread of an expression, `**users[0]`, as Result.unseen and probed key it: by where it starts."""
+        line, col = toks[it[1]].start
+        return f"**{col}", line
+
+    def ask_expr(it: list[int]) -> bool:
+        """`**expr`, not a bare name, whose fields the checker wasn't asked yet: listed in unseen. Whether to
+        wrap it in `reveal_type(...)` (probe)."""
+        if len(it) == 2 and is_name(toks[it[1]]) or expr_key(it) in (probed or {}):
+            return False
+        unseen.append(expr_key(it))
+        return probe
+
+    def wrap_kw(its: list[list[int]], ask: bool = False) -> None:
         # checker only: `**x` -> `**_byname_kw(x)` in calls and dict displays, so the checker sees a record's
-        # fields one by one (see RESERVED); what runs is untouched
+        # fields one by one (see RESERVED); what runs is untouched. ask: a spread record's, asked (ask_expr)
         nonlocal kw_used
         if not checker:
             return
         for it in its:
             if len(it) >= 2 and toks[it[0]].string == "**":
                 a, b = off(toks[it[1]].start), off(toks[it[-1]].end)
-                edits.append(Edit(a, a, "_byname_kw(", span(it[1], it[-1])))
-                edits.append(Edit(b, b, ")", span(it[1], it[-1])))
+                reveal = ask and ask_expr(it)
+                edits.append(Edit(a, a, "_byname_kw(" + "reveal_type(" * reveal, span(it[1], it[-1])))
+                edits.append(Edit(b, b, ")" * reveal + ")", span(it[1], it[-1])))
                 kw_used = True
 
     def one_line(text: str) -> str:
@@ -1046,15 +1060,22 @@ def transform(
         def is_call(it: list[int]) -> bool:  # `**f(...)`
             return len(it) >= 4 and toks[it[2]].string == "(" and pair.get(it[2]) == it[-1]
 
+        once: set[int] = set()  # `**` items read once into a walrus: a call, or an expression the checker typed
         for it in its:
             first = toks[it[0]]
             if first.string == "**":
-                if not is_name(toks[it[1]]) or (len(it) != 2 and not is_call(it)) or (got := of(toks[it[1]])) is None:
+                bare = len(it) == 2 and is_name(toks[it[1]])
+                got = of(toks[it[1]]) if bare or (is_name(toks[it[1]]) and is_call(it)) else None
+                if got is not None and got.returns != is_call(it):  # a call to a function showing its fields
+                    got = None
+                if got is None and not bare:  # what the checker said it is (probed)
+                    got = (probed or {}).get(expr_key(it))
+                    if got is not None and (got.is_dict or got.returns):
+                        got = None
+                if got is None or got.is_open:  # open: it may hold fields its type doesn't name
                     return False
-                if got.is_open:  # it may hold fields its type doesn't name
-                    return False
-                if got.returns != is_call(it):  # a call to a function that shows its fields; else a record
-                    return False
+                if not bare:
+                    once.add(it[0])
                 for f in got.fields:
                     if f in order and toks[order[f][0]].string != "**":
                         return False  # overrides a field written before it: rare, generic path
@@ -1078,10 +1099,10 @@ def transform(
                 # `**u` -> `name=u.name, age=u.age`: the user's `u` stays real text (hover, colour, rename).
                 # A dict from `_asdict()` is read by key: `name=d["name"]`
                 name, (first, *rest) = toks[it[1]].string, given[it[0]]
-                is_dict = (got := of(toks[it[1]])) is not None and got.is_dict
+                is_dict = it[0] not in once and (got := of(toks[it[1]])) is not None and got.is_dict
                 read = (lambda f: f'["{f}"]') if is_dict else (lambda f: f".{f}")
                 head, at, close_call = f"{first}=", off(toks[it[1]].end), ""
-                if is_call(it):  # `**make()`: the call once, as written, its value kept for the other fields
+                if it[0] in once:  # `**make()`: the call once, as written, its value kept for the other fields
                     name, at, close_call = f"_byname_v{calls}", off(toks[it[-1]].end), ")"
                     head = f"{first}=({name} := "
                     calls += 1
@@ -1137,7 +1158,7 @@ def transform(
                 ask = it in unseen_its and len(it) == 2 and is_name(toks[it[1]])
                 if ask:
                     unseen.append((toks[it[1]].string, toks[it[1]].start[0]))
-                ask = ask and probe
+                ask = ask and probe or ask_expr(it)
                 edits.append(Edit(a, a, "_byname_loose(" + "reveal_type(" * ask, span(it[1], it[-1])))
                 edits.append(Edit(b, b, ")" + ")" * ask, span(it[1], it[-1])))
             else:  # the field name as generated text, as in known_build
@@ -1165,7 +1186,7 @@ def transform(
         # checker, no type written: `**name` spreads are read through a lambda default (see below)
         hoist = [it for it in its if toks[it[0]].string == "**" and len(it) == 2 and is_name(toks[it[1]])]
         hoist = hoist if checker else []
-        wrap_kw([it for it in its if it not in hoist])
+        wrap_kw([it for it in its if it not in hoist], ask=checker)
         for it in its:
             first = toks[it[0]]
             if len(it) >= 2 and first.string == "**":
@@ -1761,7 +1782,7 @@ def transform(
     # rest_of)
     if checker and known is None and (builds or omit_used):
         k, u = known_fields(body, lookup, probed=probed), untyped_builds(body)
-        if k or u or probe:
+        if k or u or probe or probed:
             return transform(src, path, tolerant, portable, checker, k, lookup, u, probed, probe)
 
     def base_prelude() -> str:

@@ -1412,7 +1412,9 @@ class Proxy:
         shown: the final's follow."""
         if not diagnostics:  # the checker clears a file before it analyses it; a translation always gets some
             return
-        found = [(d["range"]["start"]["line"], d.get("message", "")) for d in diagnostics]
+        found = [
+            (d["range"]["start"]["line"], d["range"]["start"]["character"], d.get("message", "")) for d in diagnostics
+        ]
         final = Doc(doc.uri, doc.tr.source, doc.version, probed=probed_from(found, doc.tr))
         with self.text_lock:
             versions = self.docs.get(key)

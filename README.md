@@ -179,8 +179,7 @@ give u a record type; or read it unchecked with ["name"]`, and passing it where 
 same under its missing fields. A spread of a dict is the same, and silent until then. **Cost:** asking the
 checker means a second analysis of each such file: in the editor its diagnostics take about twice as long
 after an edit (0.4 s to 0.9 s on a 400-line torch file), and `byname tool basedpyright` runs the checker once
-more over those files (+0.5 to 1.3 s). Files without one cost nothing more. A spread of an index written in
-place, `(**users[0])`, isn't asked: name it first, `first = users[0]`. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
+more over those files (+0.5 to 1.3 s). Files without one cost nothing more. Any expression is asked, `(**users[0], zip=1)` too. Overloads work: `f(x: int)` / `f(p: Person)` picks the `Person` one for
 `f((**u, **r))`.
 A field can't be called `keys`: records have a `keys()` method, which is what lets `**` work.
 
