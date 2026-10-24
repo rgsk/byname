@@ -245,6 +245,22 @@ def test_hover_in_a_record_call_shows_the_record_type_and_the_function(lsp):
     assert "cfg: Config" in hover_text(c, rec_uri, pos(RECORD_CALL, "cfg ="))  # named by its alias, as with cast
 
 
+def test_hover_on_a_record_field_reads_the_same_everywhere(lsp):
+    # a literal's field is its stub's keyword to the checker ("(parameter)"), and a field written in a type has
+    # no text there (it hovered `str`): both shown as a read is, `(constant) sku: str`
+    c, root, _ = lsp
+    src = "type Item = (sku: str, items: list[int])\nit: Item = (sku='a', items=[])\nsku = 'b'\nr = (sku=)\nprint(it.sku)\n"
+    path = root / "hovers.pyn"
+    path.write_text(src)
+    uri = c.open(path)
+    c.wait_diags(uri)
+    assert hover_text(c, uri, pos(src, "sku: str")) == "(constant) sku: str"
+    assert hover_text(c, uri, pos(src, "items: list")) == "(constant) items: list[int]"
+    assert hover_text(c, uri, pos(src, "sku='a'")) == "(constant) sku: str"
+    assert hover_text(c, uri, pos(src, "sku=)")) == "(constant) sku: str"
+    assert hover_text(c, uri, pos(src, "it.sku", delta=3)) == "(constant) sku: str"
+
+
 def test_hover_renamed_local(lsp):
     c, root, uri = lsp
     assert "years: int" in hover_text(c, uri, pos(MAIN, "years", nth=0))

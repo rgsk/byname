@@ -780,6 +780,43 @@ def type_field_at(hidden: str, pos: dict) -> tuple[str, str] | None:
     return None
 
 
+def field_annotation(src: str, end: int) -> str | None:
+    """The annotation written after a record type's field name ending at `end`, `list[Item]` in
+    `(items: list[Item], ...)`: up to the next top-level `,` or the closing bracket."""
+    j = end
+    while j < len(src) and src[j] in " \t":
+        j += 1
+    if j >= len(src) or src[j] != ":":
+        return None
+    start, depth, j = j + 1, 0, j + 1
+    while j < len(src):
+        c = src[j]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if not depth:
+                break
+            depth -= 1
+        elif c == "," and not depth:
+            break
+        j += 1
+    return " ".join(src[start:j].split()) or None
+
+
+def field_hover(result: dict, doc: "Doc | None", pos: dict) -> None:
+    """A record literal's field is its stub's keyword to the checker, `(parameter) sku: str`: shown as a
+    read of it is, `(constant) sku: str` (records' fields are Final). Only on a field name written in a
+    record (Translation.fields)."""
+    if doc is None:
+        return
+    off = doc.tr.src_lines.offset(pos["line"], pos["character"])
+    if not any(a <= off <= b for a, b in doc.tr.fields):
+        return
+    contents = result.get("contents")
+    if isinstance(contents, dict) and isinstance(contents.get("value"), str):
+        contents["value"] = re.sub(r"\(parameter\) (\w+):", r"(constant) \1:", contents["value"], count=1)
+
+
 def word_at(text: str, lines: LineIndex, pos: dict) -> str:
     """The identifier at `pos` (source), or ''."""
     at = lines.offset(pos["line"], pos["character"])
@@ -994,6 +1031,8 @@ class Proxy:
         self.site_docs: dict[Path | str, Doc] = {}
         self.site_opened: list[Path] = []  # closed .pyn files opened in the checker for a rename (start_rename)
         self.definition_asks: dict = {}  # definition request id -> (key, params, doc), for definition_in_sites
+        self.hover_at: dict = {}  # hover request id -> its source position, for field_hover
+        self.hover_markdown = False  # the editor reads hovers as markdown (initialize)
         self.server_requests: dict = {}  # checker request id -> configuration items
         self.last_completion: Doc | None = None
         self.counter = 0  # checker-side document versions
@@ -1254,6 +1293,8 @@ class Proxy:
             self.sync()
             caps = params.get("capabilities", {})
             self.token_refresh = bool(caps.get("workspace", {}).get("semanticTokens", {}).get("refreshSupport"))
+            formats = caps.get("textDocument", {}).get("hover", {}).get("contentFormat") or []
+            self.hover_markdown = bool(formats) and formats[0] == "markdown"  # for the hovers we answer
             caps.get("general", {}).pop("positionEncodings", None)  # we map in UTF-16
             # one root, the mirror, given every way: with rootUri alone the checker doesn't read the project's
             # config (pyproject.toml, pyrightconfig.json; measured, 1.40.1). No folder support, so it doesn't
@@ -1367,6 +1408,19 @@ class Proxy:
             return
         if method == "textDocument/codeAction" and mid is not None and (actions := self.by_name_actions(params, doc)):
             self.own_actions[mid] = actions
+        if method == "textDocument/hover" and mid is not None:
+            if (at := written_field(doc, params["position"])) and (typ := field_annotation(doc.tr.source, at[3])):
+                # the checker has no text at a field written in a type (it's the type's class): it hovered `str`
+                self.pending.pop(mid, None)
+                rng = {"start": doc.tr.src_lines.position(at[2]), "end": doc.tr.src_lines.position(at[3])}
+                text = f"(constant) {at[1]}: {typ}"
+                value = f"```python\n{text}\n```" if self.hover_markdown else text
+                kind = "markdown" if self.hover_markdown else "plaintext"
+                self.client.send(
+                    {"jsonrpc": "2.0", "id": mid, "result": {"contents": {"kind": kind, "value": value}, "range": rng}}
+                )
+                return
+            self.hover_at[mid] = params["position"]
         if (
             method == "textDocument/prepareRename"
             and mid is not None
@@ -2332,6 +2386,8 @@ class Proxy:
         if method is None:  # response to an editor request
             method_doc = self.pending.pop(mid, None)
             ask = self.definition_asks.pop(mid, None)
+            if (at := self.hover_at.pop(mid, None)) is not None and method_doc and isinstance(msg.get("result"), dict):
+                field_hover(msg["result"], method_doc[1], at)
             if ask is not None and self.definition_in_sites(msg, ask):
                 return
             if method_doc and method_doc[0] == "references_site":
