@@ -348,10 +348,14 @@ def test_hover_on_a_record_type_alias_shows_it_as_written(lsp):
 
 
 def test_a_record_type_in_a_hover_has_a_field_a_line(lsp):
-    # as TypeScript shows an object type (lsp.layout_records): a variable's, a list's item's, a literal's on its
-    # `(`; a record in a field one level deeper; a function's parameters are left
+    # as TypeScript shows an object type (lsp.layout_records), wherever it is: a variable's, a list's item's, a
+    # literal's on its `(`, a parameter's (under its line); a record in a field one level deeper. A parameter
+    # list isn't a record, nor is a callable's
     c, root, _ = lsp
-    src = "u = (name='r', home=(city='p'))\nus = [u]\n\n\ndef f(a: int) -> int:\n    return a\n"
+    src = (
+        "u = (name='r', home=(city='p'))\nus = [u]\n\n\ndef f(a: int) -> int:\n    return a\n\n\n"
+        "def g(user: (name: str, age: int), sex: str) -> None: ...\n"
+    )
     path = root / "layout.pyn"
     path.write_text(src)
     uri = c.open(path)
@@ -361,6 +365,9 @@ def test_a_record_type_in_a_hover_has_a_field_a_line(lsp):
     assert hover_text(c, uri, pos(src, "us ="), laid_out=True) == f"(variable) us: list[{record}]"
     assert hover_text(c, uri, pos(src, "(name"), laid_out=True) == record
     assert "(\n" not in hover_text(c, uri, pos(src, "f(a"), laid_out=True)
+    assert "    user: (\n        name: str,\n        age: int,\n    )," in hover_text(
+        c, uri, pos(src, "g(u"), laid_out=True
+    )
 
 
 def test_hover_renamed_local(lsp):

@@ -847,16 +847,16 @@ def alias_declaration(src: str, at: int, name: str) -> str | None:
     return record_lines(text) if text else None
 
 
-RECORD_OPEN_RE = re.compile(r"\((?=\s*(?:\.\.\.|\w+\s*:))")  # a record type's `(`: `(name: ...` or `(..., ...`
-NOT_A_TYPE_RE = re.compile(r"^\s*(?:\((?:function|method)\)|def |class |async def )")
+# a record type's `(`, `(name: ...` or `(..., ...`; not a parameter list's, which follows the function's name (`fn(`,
+# `fn[T](`)
+RECORD_OPEN_RE = re.compile(r"(?<![\w\]])\((?=\s*(?:\.\.\.|\w+\s*:))")
 
 
 def layout_records(text: str, level: int = 0) -> str:
-    """Each record type in a hover's type laid out a field per line (record_lines), as TypeScript shows an
-    object type: `(variable) u: (name: str)`, `list[(name: str)]`, and a record in a field one level deeper.
-    A function's signature is left: its `(a: int)` is a parameter list."""
-    if level == 0 and NOT_A_TYPE_RE.match(text):
-        return text
+    """Each record type in a hover laid out a field per line (record_lines), as TypeScript shows an object
+    type, wherever it is: `(variable) u: (name: str)`, `list[(name: str)]`, a function's parameter (indented
+    under its line), and a record in a field one level deeper. Not a parameter list (RECORD_OPEN_RE), nor a
+    callable type, `(x: int) -> str`, which only looks like a record."""
     out, i = [], 0
     while m := RECORD_OPEN_RE.search(text, i):
         depth, k = 0, m.start()
@@ -865,22 +865,27 @@ def layout_records(text: str, level: int = 0) -> str:
             if depth == 0:
                 break
             k += 1
-        out.append(text[i : m.start()] + record_lines(text[m.start() : k + 1], level))
+        if re.match(r"\s*->", text[k + 1 :]):  # a callable's parameters
+            out.append(text[i : k + 1])
+        else:
+            line = text[text.rfind("\n", 0, m.start()) + 1 :]
+            indent = (len(line) - len(line.lstrip(" "))) // 4  # a parameter's line: the record sits under it
+            out.append(text[i : m.start()] + record_lines(text[m.start() : k + 1], level + indent))
         i = k + 1
     return "".join(out) + text[i:]
 
 
 def layout_hover(result: dict) -> None:
     """The checker's hover with its record types laid out (layout_records): the first code block of a markdown
-    one, the first line of a plain one."""
+    one, the code of a plain one (up to its first blank line)."""
     contents = result.get("contents")
     if not isinstance(contents, dict) or not isinstance(value := contents.get("value"), str):
         return
     if m := re.search(r"```python\n(.*?)\n```", value, re.S):
         contents["value"] = value[: m.start(1)] + layout_records(m[1]) + value[m.end(1) :]
-    else:
-        first, _, rest = value.partition("\n")
-        contents["value"] = layout_records(first) + ("\n" + rest if rest else "")
+    else:  # its code up to the blank line before the docs: a signature spans lines
+        code, _, rest = value.partition("\n\n")
+        contents["value"] = layout_records(code) + ("\n\n" + rest if rest else "")
 
 
 def record_lines(text: str, level: int = 0) -> str:
