@@ -825,8 +825,8 @@ RECORD_CLASS_RE = re.compile(r"\b_(?:typ|opn)_")
 
 
 def alias_declaration(src: str, at: int, name: str) -> str | None:
-    """The value of `type <name> = ...` whose name is at `at`, as written: on one line, a trailing comma
-    before a closing bracket dropped (a multi-line one's)."""
+    """The value of `type <name> = ...` whose name is at `at`, as written, laid out as TypeScript shows a
+    declared type: a record's fields one per line (record_lines), anything else on one line."""
     if src[at : at + len(name)] != name or not re.match(r"\s*=", src[at + len(name) :]):
         return None
     j = src.index("=", at + len(name)) + 1
@@ -843,7 +843,30 @@ def alias_declaration(src: str, at: int, name: str) -> str | None:
             break
         k += 1
     text = " ".join(src[j:k].split())
-    return re.sub(r",\s*([)\]}])", r"\1", text).replace("( ", "(").replace(" )", ")") or None
+    text = re.sub(r",\s*([)\]}])", r"\1", text).replace("( ", "(").replace(" )", ")")
+    return record_lines(text) if text else None
+
+
+def record_lines(text: str) -> str:
+    """`(id: int, items: list[Item])` as `(\n    id: int,\n    items: list[Item],\n)`: the fields at its top
+    level one per line (a nested record stays on its field's line). Text that isn't one record is as it was."""
+    if not text.startswith("("):
+        return text
+    items, depth, start = [], 0, 1
+    for k, c in enumerate(text):
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                if k != len(text) - 1:
+                    return text  # `(a: int) | None`: not one record
+                items.append(text[start:k])
+        elif c == "," and depth == 1:
+            items.append(text[start:k])
+            start = k + 1
+    fields = [f.strip() for f in items if f.strip()]
+    return "(\n" + "".join(f"    {f},\n" for f in fields) + ")" if fields else text
 
 
 def literal_fields(src: str, start: int) -> tuple[list[tuple[str, int]], int]:

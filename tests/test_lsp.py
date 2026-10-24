@@ -240,7 +240,8 @@ def test_hover_in_a_record_call_shows_the_record_type_and_the_function(lsp):
     path = root / "rec_call.pyn"
     path.write_text(RECORD_CALL)
     rec_uri = c.open(path)
-    assert "Config = (n_layer: int, dropout: float)" in hover_text(c, rec_uri, pos(RECORD_CALL, "Config,"))
+    want = "Config = (\n    n_layer: int,\n    dropout: float,\n)"  # as declared, a field a line (Proxy.alias_hover)
+    assert want in hover_text(c, rec_uri, pos(RECORD_CALL, "Config,"))
     assert "def record(" in hover_text(c, rec_uri, pos(RECORD_CALL, "record(C"))
     assert "cfg: Config" in hover_text(c, rec_uri, pos(RECORD_CALL, "cfg ="))  # named by its alias, as with cast
 
@@ -332,7 +333,7 @@ def test_hover_on_a_record_type_alias_shows_it_as_written(lsp):
     path.write_text(src)
     uri = c.open(path)
     c.wait_diags(uri)
-    want = "(type) Order = (id: int, items: list[Item])"
+    want = "(type) Order = (\n    id: int,\n    items: list[Item],\n)"  # a field a line, as TypeScript shows it
     assert hover_text(c, uri, pos(src, "Order\n")) == want
     assert hover_text(c, uri, pos(src, "Order =")) == want
     types = c.open(root / "alias_types.pyn")  # and on its own declaration
