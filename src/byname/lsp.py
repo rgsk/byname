@@ -780,6 +780,17 @@ def type_field_at(hidden: str, pos: dict) -> tuple[str, str] | None:
     return None
 
 
+def word_at(text: str, lines: LineIndex, pos: dict) -> str:
+    """The identifier at `pos` (source), or ''."""
+    at = lines.offset(pos["line"], pos["character"])
+    a = b = at
+    while a > 0 and (text[a - 1].isalnum() or text[a - 1] == "_"):
+        a -= 1
+    while b < len(text) and (text[b].isalnum() or text[b] == "_"):
+        b += 1
+    return text[a:b]
+
+
 def written_field(doc: "Doc", pos: dict) -> tuple[str, str, int, int] | None:
     """If `pos` (source) is on a field name written in a record type, `label` in `(label: str)`: its
     (class, field, start, end) in the site translation (Result.type_fields). The checker has no text there
@@ -964,6 +975,7 @@ class Proxy:
         self.rename_to: dict = {}  # rename request id -> its newName, for rename_fields
         # while a rename runs: each open document as the checker holds it then, with site classes (start_rename)
         self.site_docs: dict[Path | str, Doc] = {}
+        self.site_opened: list[Path] = []  # closed .pyn files opened in the checker for a rename (start_rename)
         self.server_requests: dict = {}  # checker request id -> configuration items
         self.last_completion: Doc | None = None
         self.counter = 0  # checker-side document versions
@@ -1348,7 +1360,7 @@ class Proxy:
             return
         if method == "textDocument/rename" and mid is not None:
             self.rename_to[mid] = params.get("newName")
-            doc = self.start_rename(key, doc)
+            doc = self.start_rename(key, doc, word_at(doc.tr.source, doc.tr.src_lines, params["position"]))
             self.pending[mid] = (method, doc)
         mapped = self.to_checker(params, doc)
         if method == "textDocument/rename" and (at := written_field(doc, params["position"])):
@@ -1800,11 +1812,14 @@ class Proxy:
         self.send_text(key, latest.tr.hidden, latest)  # restore the real text
         self.complete_plainly(msg, doc)
 
-    def start_rename(self, key: Path | str, doc: Doc) -> Doc:
+    def start_rename(self, key: Path | str, doc: Doc, word: str) -> Doc:
         """The checker gets every open document translated with site classes (transform's `sites`) until the
         rename is answered (end_rename), so renaming `r.name` reaches only the literal or type `r` came from.
         The real translation shares one class per shape: with a class per site, a list of literals wouldn't
-        fit `list[Item]` (list is invariant). Returns the document the request is mapped through."""
+        fit `list[Item]` (list is invariant). The project's other .pyn files that hold `word` (the name
+        renamed) are opened in it too: the mirror's copy on disk is the real translation, where a literal
+        written against another file's type isn't tied to it. Returns the document the request is mapped
+        through."""
         with self.text_lock:
             for k, versions in self.docs.items():
                 d = versions[-1]
@@ -1812,14 +1827,51 @@ class Proxy:
                 site.tr = Translation(d.tr.source, d.path, probed=d.tr.probed, sites=True)
                 self.site_docs[k] = site
                 self.send_text(k, site.tr.hidden, None)
+            for pyn in self.closed_pyns(word):
+                try:
+                    text = pyn.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                site = Doc(pyn.as_uri(), text, None)
+                site.tr = Translation(text, pyn, sites=True)
+                self.site_docs[pyn] = site
+                self.site_opened.append(pyn)
+                v = self.next_version()
+                self.temp_versions.add(v)
+                td = {"uri": pyn.as_uri(), "languageId": "python", "version": v, "text": site.tr.hidden}
+                self.send_server({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": td}})
         return self.site_docs.get(key, doc)
 
+    def closed_pyns(self, word: str) -> list[Path]:
+        """The project's .pyn files not open in the editor whose text holds `word` (start_rename)."""
+        if self.root is None or self.mirror is None or not word:
+            return []
+        from .tools import walk
+
+        # walked each time (0.08s on dream-robot's 63k files, excludes skipped): probe_pyns lags a file made since
+        pyns = {d / f for d, fs in walk(self.root, self.mirror) for f in fs if f.endswith(".pyn")}
+        out = []
+        for pyn in sorted(pyns):
+            if pyn in self.docs:
+                continue
+            try:
+                if word in pyn.read_text(encoding="utf-8"):
+                    out.append(pyn)
+            except OSError:
+                pass
+        return out
+
     def end_rename(self) -> None:
-        """The real translations back to the checker (start_rename)."""
+        """The real translations back to the checker (start_rename): open documents get theirs again, and
+        the files opened for the rename are closed, so the checker reads the mirror's copy again."""
         with self.text_lock:
             for k in self.site_docs:
                 if versions := self.docs.get(k):
                     self.send_text(k, versions[-1].tr.hidden, versions[-1])
+            for pyn in self.site_opened:
+                td = {"uri": pyn.as_uri()}
+                self.send_server({"jsonrpc": "2.0", "method": "textDocument/didClose", "params": {"textDocument": td}})
+            self.site_opened.clear()
             self.site_docs.clear()
 
     def rename_fields(self, msg: dict, doc: Doc | None) -> bool:

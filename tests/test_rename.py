@@ -239,3 +239,27 @@ def test_a_literal_nested_in_any_display_renames_with_its_type(client):
     )
     assert rename(client, "displays.pyn", src, pos(src, "sku: str"), "code") == src.replace("sku", "code")
     assert rename(client, "displays.pyn", src, pos(src, "sku='a'"), "code") == src.replace("sku", "code")
+
+
+def test_a_closed_file_s_literals_rename_with_another_file_s_type(client):
+    # only types.pyn is open: uses.pyn is opened in the rename translation for the rename (start_rename),
+    # so its literal written against Item follows, not just its read
+    c, root = client
+    (root / "uses.pyn").write_text(
+        "from types_mod import Item\n\nit: Item = (sku='a')\nlater = [(sku='b')]\nprint(it.sku)\n"
+    )
+    src = "type Item = (sku: str)\n"
+    path = root / "types_mod.pyn"
+    path.write_text(src)
+    # as the editor does: the checker hears of files made since it started from these events
+    made = [{"uri": (root / n).as_uri(), "type": 1} for n in ("uses.pyn", "types_mod.pyn")]
+    c.send({"method": "workspace/didChangeWatchedFiles", "params": {"changes": made}})
+    uri = c.open(path)
+    c.wait_diags(uri)
+    edit = c.request(
+        "textDocument/rename", {"textDocument": {"uri": uri}, "position": pos(src, "sku"), "newName": "code"}
+    )
+    assert apply(src, uri, edit) == "type Item = (code: str)\n"
+    uses = (root / "uses.pyn").as_uri()
+    got = apply((root / "uses.pyn").read_text(), uses, edit)
+    assert got == "from types_mod import Item\n\nit: Item = (code='a')\nlater = [(sku='b')]\nprint(it.code)\n"
