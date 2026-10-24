@@ -281,6 +281,21 @@ def test_a_shape_first_typed_in_the_editor_is_typed(lsp):
     assert any('"int" is not assignable to declared type "str"' in d["message"] for d in c.diags[uri])
 
 
+def test_hover_shows_each_record_in_the_order_it_was_written(lsp):
+    # every order of a field set is one class to the checker (transform.canonical); as in TypeScript, a name
+    # bound from a literal shows that literal's order, and a list of both orders is one type, shown in the
+    # order the file first writes the fields in (lsp.display_orders)
+    c, root, _ = lsp
+    src = "u2 = (age=26, name='r')\nu1 = (name='r', age=26)\nusers = [u1, u2]\nprint(u1, u2, users)\n"
+    path = root / "orders.pyn"
+    path.write_text(src)
+    uri = c.open(path)
+    c.wait_diags(uri)
+    assert hover_text(c, uri, pos(src, "u1 =")) == "(variable) u1: (name: str, age: int)"
+    assert hover_text(c, uri, pos(src, "u2 =")) == "(variable) u2: (age: int, name: str)"
+    assert hover_text(c, uri, pos(src, "users =")) == "(variable) users: list[(age: int, name: str)]"
+
+
 def test_hover_renamed_local(lsp):
     c, root, uri = lsp
     assert "years: int" in hover_text(c, uri, pos(MAIN, "years", nth=0))

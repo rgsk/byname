@@ -14,6 +14,8 @@ as the kernel runs it, under its URI in the mirror, where the checker chains cel
 """
 
 import ast
+import contextlib
+import contextvars
 import copy
 import json
 import keyword
@@ -29,7 +31,17 @@ from urllib.parse import quote, urlparse
 from urllib.request import url2pathname
 
 from .output import output_path, render
-from .srcmap import NEW_SHAPES, PROBE_MARK, PROBE_ROUNDS, PROBED, LineIndex, Probed, Translation, probed_from
+from .srcmap import (
+    NEW_SHAPES,
+    PROBE_MARK,
+    PROBE_ROUNDS,
+    PROBED,
+    PROJECT_ORDERS,
+    LineIndex,
+    Probed,
+    Translation,
+    probed_from,
+)
 from .transform import DS, FIELDSET, ORDER, REPR, SHAPES, BynameError, pattern_slot
 
 DEFAULT_CHECKER = ["basedpyright-langserver", "--stdio"]
@@ -424,6 +436,27 @@ def unsite(text: str) -> str:
     return REPEAT_RE.sub(r"\1", SITE_RE.sub(r"\1", text))
 
 
+# a field set -> the order to show it in (transform.canonical: the checker names every order of a field set by
+# one, sorted, class): the order written in the file the text is about (Translation.orders), set by
+# display_orders where a file's text is mapped; unset, the class's own order
+ORDERS: contextvars.ContextVar[dict[frozenset[str], tuple[str, ...]] | None] = contextvars.ContextVar(
+    "byname_orders", default=None
+)
+
+
+@contextlib.contextmanager
+def display_orders(orders: dict | None):
+    """pretty() shows each field set in `orders`' order inside; an outer one (a hover's) wins."""
+    if orders is None or ORDERS.get() is not None:
+        yield
+        return
+    token = ORDERS.set(orders)
+    try:
+        yield
+    finally:
+        ORDERS.reset(token)
+
+
 def pretty(text: str) -> str:
     """Display form of record types: _rec_name__age[str, int] -> (name: str, age: int), and of the
     TypedDict a record's `_asdict()` returns: _dct_name__age[str, int] -> {name: str, age: int}, and of
@@ -440,6 +473,8 @@ def pretty(text: str) -> str:
             continue
         fields = m.group(2).split("__")
         lp, rp = {"dct": ("{", "}"), "opn": ("(..., ", ")"), "tup": ("tuple[", "]")}.get(m.group(1), ("(", ")"))
+        key = frozenset(fields)
+        order = ((ORDERS.get() or {}).get(key) or PROJECT_ORDERS.get(key)) if m.group(1) != "tup" else None
         j = m.end()
         if j < len(text) and text[j] == "[":
             args, depth, start = [], 0, j + 1
@@ -455,9 +490,12 @@ def pretty(text: str) -> str:
                 elif text[k] == "," and depth == 1:
                     args.append(text[start:k].strip())
                     start = k + 1
-            out.append(lp + ", ".join(f"{f}: {pretty(a)}" if f else pretty(a) for f, a in zip(fields, args)) + rp)
+            pairs = list(zip(fields, args))
+            if order and len(order) == len(pairs):  # shown in the order written (ORDERS)
+                pairs = [(f, dict(pairs)[f]) for f in order]
+            out.append(lp + ", ".join(f"{f}: {pretty(a)}" if f else pretty(a) for f, a in pairs) + rp)
         else:
-            out.append(lp + ", ".join(fields) + rp)
+            out.append(lp + ", ".join(order if order and len(order) == len(fields) else fields) + rp)
         i = j
     out.append(text[i:])
     return COVARIANT_RE.sub(r"T\1", "".join(out).replace("_byname_AnyRec", "(...)"))
@@ -1033,6 +1071,7 @@ class Proxy:
         self.definition_asks: dict = {}  # definition request id -> (key, params, doc), for definition_in_sites
         self.hover_at: dict = {}  # hover request id -> its source position, for field_hover
         self.hover_markdown = False  # the editor reads hovers as markdown (initialize)
+        self.hover_orders: dict = {}  # hover request id -> display orders, on a name bound from a literal
         self.server_requests: dict = {}  # checker request id -> configuration items
         self.last_completion: Doc | None = None
         self.counter = 0  # checker-side document versions
@@ -1216,6 +1255,12 @@ class Proxy:
         return {k: v if k == "data" else self.to_checker(v, doc) for k, v in obj.items()}
 
     def to_editor(self, obj, doc: Doc | None, display: bool = True, key: str = ""):
+        """Results: mirror uri -> editor uri, hidden ranges -> source ranges (DROP if in the prelude); record types
+        shown in the orders written in `doc` (display_orders)."""
+        with display_orders(doc.tr.orders if doc is not None else None):
+            return self.mapped_to_editor(obj, doc, display, key)
+
+    def mapped_to_editor(self, obj, doc: Doc | None, display: bool = True, key: str = ""):
         """Results: mirror uri -> editor uri, hidden ranges -> source ranges (DROP if in the prelude).
         Locations widen to the source they came from (display); TextEdits keep exact insertion points."""
         if isinstance(obj, list):
@@ -1438,6 +1483,8 @@ class Proxy:
                 )
                 return
             self.hover_at[mid] = params["position"]
+            if bound := doc.tr.bound.get(word_at(doc.tr.source, doc.tr.src_lines, params["position"])):
+                self.hover_orders[mid] = {**doc.tr.orders, frozenset(bound): bound}
         if (
             method == "textDocument/prepareRename"
             and mid is not None
@@ -2494,7 +2541,8 @@ class Proxy:
                 elif req == "textDocument/rename" and self.rename_fields(msg, doc):
                     return
                 else:
-                    result = self.to_editor(msg["result"], doc)
+                    with display_orders(self.hover_orders.pop(mid, None)):  # a name bound from a literal
+                        result = self.to_editor(msg["result"], doc)
                     msg = {**msg, "result": None if result is DROP else result}
                     if req == "textDocument/completion":
                         self.last_completion = doc
@@ -2558,7 +2606,8 @@ class Proxy:
                 continue
             fields = positional_fields(d.get("message", ""))
             undeclared = UNDECLARED_RE.search(unsite(d.get("message", "")))
-            d = {**d, "range": r, "message": pretty(explain_fields(d.get("message", "")))}
+            with display_orders(doc.tr.orders):
+                d = {**d, "range": r, "message": pretty(explain_fields(d.get("message", "")))}
             if fields and "data" not in d:
                 d["data"] = {"bynameFields": fields}  # for the quick fix (by_name_actions)
             elif undeclared and "data" not in d:

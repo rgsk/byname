@@ -438,16 +438,42 @@ def type_def(fields: tuple[str, ...], is_open: bool, portable: bool = False) -> 
 SHAPES = "_byname_shapes"
 
 
+def canonical(fields: tuple[str, ...]) -> tuple[str, ...]:
+    """A field set's one order for the checker: sorted. Every written order of it is that one class (an alias
+    in the file, order_alias), as pyright takes two classes as the same type argument of an invariant
+    list/dict/set only when they're one: `[(qty=1, sku="a")]` fits `list[Item]` of `(sku: str, qty: int)`, and a
+    list of both orders is one type, not a union of two. Display puts the fields back in the order written
+    (lsp.pretty, display_orders)."""
+    return tuple(sorted(fields))
+
+
 def shape_module(fields: tuple[str, ...], is_open: bool) -> str:
-    """The module of a shape's classes, by a hash of it: field names can be long, a file name can't."""
-    key = ("..., " if is_open else "") + ", ".join(fields)
+    """The module of a field set's classes, by a hash of it: field names can be long, a file name can't."""
+    key = ("..., " if is_open else "") + ", ".join(canonical(fields))
     return "_s_" + hashlib.sha1(key.encode()).hexdigest()[:16]
 
 
 def shape_source(fields: tuple[str, ...], is_open: bool) -> str:
-    """A shape module: its type class (type_def), the key alias and `_asdict()` TypedDict that use."""
+    """A shape module: its type class (type_def), the key alias and `_asdict()` TypedDict that use, in the
+    canonical order."""
+    fields = canonical(fields)
     out = TYPED_PRELUDE + covariant_defs(len(fields)) + f"type {key_alias(fields)} = str\n"
     return out + ("" if is_open else dict_def(fields)) + type_def(fields, is_open)
+
+
+def order_args(fields: tuple[str, ...], args: list[str]) -> str:
+    """`args`, given in the order of `fields`, put in the canonical order: the canonical class's arguments."""
+    by_field = dict(zip(fields, args))
+    return ", ".join(by_field[f] for f in canonical(fields))
+
+
+def order_alias(fields: tuple[str, ...], is_open: bool) -> str:
+    """Checker: a written order that isn't the canonical one, as a generic alias of the canonical class with
+    its arguments reordered: `type _typ_sku__qty[T0, T1] = _typ_qty__sku[T1, T0]`. Type positions name it
+    as before; an alias is transparent, so it's the one class."""
+    params = [f"T{i}" for i in range(len(fields))]
+    target = type_class(canonical(fields), is_open)
+    return f"type {type_class(fields, is_open)}[{', '.join(params)}] = {target}[{order_args(fields, params)}]\n"
 
 
 def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
@@ -491,7 +517,8 @@ def site_def(fields: tuple[str, ...], is_open: bool, n: int | str, literal: bool
         return f"if _t.TYPE_CHECKING:\n    def {site_class(record_class(fields), n)}(**_: object) -> _opn_: ...\n"
     params = covariant(len(fields))
     typ = site_class(type_class(fields, is_open), n)
-    out = f"class {typ}({type_class(fields, is_open)}[{params}], _PR[{params}]):  # pyright: ignore[reportInvalidTypeVarUse]\n"
+    base = f"{type_class(canonical(fields), is_open)}[{order_args(fields, params.split(', '))}]"  # not an alias
+    out = f"class {typ}({base}, _PR[{params}]):  # pyright: ignore[reportInvalidTypeVarUse]\n"
     out += "".join(f"    {f}: _Fi[_byname_T{i}]  # pyright: ignore\n" for i, f in enumerate(fields))
     if not is_open:
         out += f"    def _replace(self, *{''.join(f', {f}: _byname_T{i} = ...' for i, f in enumerate(fields))}) -> _S: ...  # pyright: ignore[reportGeneralTypeIssues]\n"
@@ -1901,9 +1928,10 @@ def transform(
             types = {**types, **dict.fromkeys((f, False) for f in records)}
         # types first: a record's checker function returns its type, and before Python 3.14 an annotation
         # naming a class defined further down is an undefined name (every record would be Unknown)
-        if checker and not portable:  # one class per shape for the project (SHAPES)
-            shapes = list(types)
+        if checker and not portable:  # one class per field set for the project (SHAPES, canonical)
+            shapes = list(dict.fromkeys((canonical(f), o) for f, o in types))
             prelude += "".join(f"from {SHAPES}.{shape_module(f, o)} import {type_class(f, o)}\n" for f, o in shapes)
+            prelude += "".join(order_alias(f, o) for f, o in types if f != canonical(f))
         else:
             if not portable:
                 prelude += "".join(f"type {key_alias(f)} = str\n" for f in dict.fromkeys(f for f, _ in types))

@@ -131,6 +131,14 @@ Probed = dict[tuple[str, int], Known]
 # before it translates (tools.probe), so every Translation of that text reads the same types
 PROBED: dict[Path, tuple[str, Probed]] = {}
 
+# a record type or literal written in the body, `_typ_sku__qty[` or `_rec_sku__qty___3(`: its fields' order
+WRITTEN_SHAPE_RE = re.compile(r"\b_(?:rec|typ|opn)_(\w+?)(?=[\[(])")
+# a field set -> an order some file of the project writes it in (the first translated): for a field set a file
+# shows but doesn't write itself, a record another module returns (lsp.pretty, probed_from)
+PROJECT_ORDERS: dict[frozenset[str], tuple[str, ...]] = {}
+# `name = <literal>` on a line of its own: the name shows that literal's order (lsp.hover)
+BOUND_RE = re.compile(r"^[ \t]*(\w+) = _rec_(\w+?)\(", re.M)
+
 # the checker's mirrors (tools.mirror_dir adds each): every Translation writes the shape modules its prelude
 # imports into each (write_shapes), so they're there before its text reaches a checker
 SHAPE_ROOTS: set[Path] = set()
@@ -211,7 +219,10 @@ def probed_from(found: list[tuple[int, int, str]], tr: "Translation", waiting: s
             if waiting is not None:
                 waiting.add(key)
         elif key in asked:
-            got = Known(class_fields(m[3]), is_open=m[2] == "_opn_")
+            # the checker names every order of a field set by one class (transform.canonical): the order written
+            fields = class_fields(m[3])
+            fields = tr.orders.get(frozenset(fields)) or PROJECT_ORDERS.get(frozenset(fields)) or fields
+            got = Known(fields, is_open=m[2] == "_opn_")
             out[key] = got if out.get(key, got) == got else None  # two answers on a line that disagree
     return {k: v for k, v in out.items() if v is not None}
 
@@ -245,6 +256,9 @@ class Translation:
         self.reads: list[tuple[int, int, str]] = []  # see Result.declared_reads
         self.unknown_rests: list[tuple[int, int]] = []  # see Result.unknown_rests
         self.labels: set[int] = set()  # where a walrus labelling a returned tuple starts (see Result.labels)
+        # a field set -> the order first written in the file; a name bound from a literal -> its order (display_orders)
+        self.orders: dict[frozenset[str], tuple[str, ...]] = {}
+        self.bound: dict[str, tuple[str, ...]] = {}
         try:
             r = transform(source, tolerant=True, checker=True, probed=probed, probe=probe, sites=sites)
             body, prelude, edits = r.body, r.prelude, r.edits
@@ -256,6 +270,11 @@ class Translation:
             self.unseen = r.unseen
             self.labels = {s for s, _ in r.labels}
             write_shapes(r.shapes)
+            for m in WRITTEN_SHAPE_RE.finditer(body):  # in the source's order: the body keeps it
+                self.orders.setdefault(frozenset(f := class_fields(m[1])), f)
+            for k, v in self.orders.items():
+                PROJECT_ORDERS.setdefault(k, v)
+            self.bound = {m[1]: class_fields(m[2]) for m in BOUND_RE.finditer(body)}
         except Exception as e:  # mid-edit code: send it raw; the checker reports the syntax error
             self.error = e
             body, prelude, edits = source, "", []

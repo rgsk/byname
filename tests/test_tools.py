@@ -103,7 +103,9 @@ def test_explicit_record_types_ignore_order_but_not_field_set(project):
         or 'types.pyn:6:8 - error: "(name: str, age: int)" is not iterable' in out
     )
     assert "types.pyn:7" not in out
-    assert 'types.pyn:8:8 - error: "(age: int, name: str)" is not iterable' in out
+    # one class per field set (transform.canonical): a literal bound to no name shows the order the file first
+    # writes its fields in, User's
+    assert 'types.pyn:8:8 - error: "(name: str, age: int)" is not iterable' in out
     assert 'types.pyn:9:13 - information: Type of "name" is "str"' in out
     assert "types.pyn:12:9 - error" in out and "types.pyn:12:1 " not in out
 
@@ -172,7 +174,8 @@ def test_spread_mistakes_are_named(project):
     assert 'spread.pyn:5:1 - error: Argument missing for parameter "surname"' in out
     assert out.count("missing field: surname") == 3 and "extra field: x" in out
     assert "spread.pyn:11" not in out and "spread.pyn:12:6" in out and "spread.pyn:14" not in out
-    assert 'spread.pyn:13:8 - error: Argument of type "(age: int, name: str, sex: str, surname: int)"' in out
+    # shown in the order the file first writes these fields in, Person's (transform.canonical)
+    assert 'spread.pyn:13:8 - error: Argument of type "(name: str, age: int, sex: str, surname: int)"' in out
     assert "_byname" not in out and "_dct_" not in out
 
 

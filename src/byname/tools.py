@@ -19,7 +19,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-from .lsp import LOAD_EXT_RE, explain_fields, pretty
+from .lsp import LOAD_EXT_RE, ORDERS, explain_fields, pretty
 from .srcmap import PROBE_ROUNDS, PROBED, SHAPE_ROOTS, Translation, generated, probed_from, unknown_rest
 from .transform import SHAPES
 
@@ -359,6 +359,12 @@ def probe(root: Path, out: Path, checker: str, pyns: set[Path] | None = None) ->
 def remap(line: str, root: Path, out: Path, cache: dict) -> tuple[str | None, bool]:
     """(line to print, None to drop it as generated code or "" as a quiet walrus label, whether it was a
     location line)."""
+    if (m := LOCATION.match(line)) and (p := Path(m["path"])).is_relative_to(out):
+        pyn = root / p.relative_to(out).with_suffix(".pyn")
+        if pyn.exists():  # its message's lines show record types in the orders written there (lsp.ORDERS)
+            if pyn not in cache:
+                cache[pyn] = Translation(pyn.read_text(encoding="utf-8"), pyn)
+            ORDERS.set(cache[pyn].orders)
     line = pretty(line)
     if NB_LOCATION.match(line) or NB_HEADER.match(line):
         return remap_notebook(line, root, out, cache)
