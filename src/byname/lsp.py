@@ -851,11 +851,11 @@ RECORD_OPEN_RE = re.compile(r"\((?=\s*(?:\.\.\.|\w+\s*:))")  # a record type's `
 NOT_A_TYPE_RE = re.compile(r"^\s*(?:\((?:function|method)\)|def |class |async def )")
 
 
-def layout_records(text: str) -> str:
-    """Each record type at the top of a hover's type laid out a field per line (record_lines), as TypeScript
-    shows an object type: `(variable) u: (name: str)`, `list[(name: str)]`. A record in another's field stays
-    on that field's line. A function's signature is left: its `(a: int)` is a parameter list."""
-    if NOT_A_TYPE_RE.match(text):
+def layout_records(text: str, level: int = 0) -> str:
+    """Each record type in a hover's type laid out a field per line (record_lines), as TypeScript shows an
+    object type: `(variable) u: (name: str)`, `list[(name: str)]`, and a record in a field one level deeper.
+    A function's signature is left: its `(a: int)` is a parameter list."""
+    if level == 0 and NOT_A_TYPE_RE.match(text):
         return text
     out, i = [], 0
     while m := RECORD_OPEN_RE.search(text, i):
@@ -865,7 +865,7 @@ def layout_records(text: str) -> str:
             if depth == 0:
                 break
             k += 1
-        out.append(text[i : m.start()] + record_lines(text[m.start() : k + 1]))
+        out.append(text[i : m.start()] + record_lines(text[m.start() : k + 1], level))
         i = k + 1
     return "".join(out) + text[i:]
 
@@ -883,9 +883,10 @@ def layout_hover(result: dict) -> None:
         contents["value"] = layout_records(first) + ("\n" + rest if rest else "")
 
 
-def record_lines(text: str) -> str:
-    """`(id: int, items: list[Item])` as `(\n    id: int,\n    items: list[Item],\n)`: the fields at its top
-    level one per line (a nested record stays on its field's line). Text that isn't one record is as it was."""
+def record_lines(text: str, level: int = 0) -> str:
+    """`(id: int, items: list[Item])` as `(\n    id: int,\n    items: list[Item],\n)`: its fields one per line,
+    indented a step past `level`, a record in a field laid out the same one level deeper (layout_records).
+    Text that isn't one record is as it was."""
     if not text.startswith("("):
         return text
     items, depth, start = [], 0, 1
@@ -902,7 +903,10 @@ def record_lines(text: str) -> str:
             items.append(text[start:k])
             start = k + 1
     fields = [f.strip() for f in items if f.strip()]
-    return "(\n" + "".join(f"    {f},\n" for f in fields) + ")" if fields else text
+    if not fields:
+        return text
+    pad = "    " * (level + 1)
+    return "(\n" + "".join(f"{pad}{layout_records(f, level + 1)},\n" for f in fields) + "    " * level + ")"
 
 
 def literal_fields(src: str, start: int) -> tuple[list[tuple[str, int]], int]:

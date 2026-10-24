@@ -193,7 +193,8 @@ def hover_text(c, uri, p, laid_out: bool = False) -> str:
     text = h["contents"]["value"] if h else ""
     if laid_out:
         return text
-    return text.replace("(\n    ", "(").replace(",\n    ", ", ").replace(",\n)", ")")
+    text = re.sub(r",\n\s*\)", ")", text)  # a record's closing line first: `,\n` before it isn't between fields
+    return re.sub(r",\n\s+", ", ", re.sub(r"\(\n\s+", "(", text))
 
 
 def test_spread_of_an_imported_record_type_follows_its_module(lsp):
@@ -348,20 +349,17 @@ def test_hover_on_a_record_type_alias_shows_it_as_written(lsp):
 
 def test_a_record_type_in_a_hover_has_a_field_a_line(lsp):
     # as TypeScript shows an object type (lsp.layout_records): a variable's, a list's item's, a literal's on its
-    # `(`; a record in another's field stays on that field's line, and a function's parameters are left
+    # `(`; a record in a field one level deeper; a function's parameters are left
     c, root, _ = lsp
     src = "u = (name='r', home=(city='p'))\nus = [u]\n\n\ndef f(a: int) -> int:\n    return a\n"
     path = root / "layout.pyn"
     path.write_text(src)
     uri = c.open(path)
     c.wait_diags(uri)
-    want = "(variable) u: (\n    name: str,\n    home: (city: str),\n)"
-    assert hover_text(c, uri, pos(src, "u ="), laid_out=True) == want
-    assert (
-        hover_text(c, uri, pos(src, "us ="), laid_out=True)
-        == "(variable) us: list[(\n    name: str,\n    home: (city: str),\n)]"
-    )
-    assert hover_text(c, uri, pos(src, "(name"), laid_out=True) == "(\n    name: str,\n    home: (city: str),\n)"
+    record = "(\n    name: str,\n    home: (\n        city: str,\n    ),\n)"
+    assert hover_text(c, uri, pos(src, "u ="), laid_out=True) == f"(variable) u: {record}"
+    assert hover_text(c, uri, pos(src, "us ="), laid_out=True) == f"(variable) us: list[{record}]"
+    assert hover_text(c, uri, pos(src, "(name"), laid_out=True) == record
     assert "(\n" not in hover_text(c, uri, pos(src, "f(a"), laid_out=True)
 
 
