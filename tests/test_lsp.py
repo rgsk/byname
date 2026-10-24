@@ -318,6 +318,28 @@ def test_hover_on_a_record_s_brackets_shows_the_record(lsp):
     assert hover_text(c, uri, pos(src, "name=")) == "(constant) name: str"
 
 
+def test_hover_on_a_record_type_alias_shows_it_as_written(lsp):
+    # the checker expands every alias inside an alias's hover (`items: list[(sku: str, qty: int)]`); shown as the
+    # declaration is written instead, `items: list[Item]` (Proxy.alias_hover), from its own file or another, closed
+    c, root, _ = lsp
+    (root / "alias_types.pyn").write_text(
+        "type Item = (sku: str, qty: int)\ntype Order = (\n    id: int,\n    items: list[Item],\n)\n"
+    )
+    made = [{"uri": (root / "alias_types.pyn").as_uri(), "type": 1}]
+    c.send({"method": "workspace/didChangeWatchedFiles", "params": {"changes": made}})
+    src = "from alias_types import Order\n\norder: Order = (id=1, items=[])\n"
+    path = root / "alias_uses.pyn"
+    path.write_text(src)
+    uri = c.open(path)
+    c.wait_diags(uri)
+    want = "(type) Order = (id: int, items: list[Item])"
+    assert hover_text(c, uri, pos(src, "Order\n")) == want
+    assert hover_text(c, uri, pos(src, "Order =")) == want
+    types = c.open(root / "alias_types.pyn")  # and on its own declaration
+    c.wait_diags(types)
+    assert hover_text(c, types, {"line": 1, "character": 6}) == want
+
+
 def test_hover_renamed_local(lsp):
     c, root, uri = lsp
     assert "years: int" in hover_text(c, uri, pos(MAIN, "years", nth=0))

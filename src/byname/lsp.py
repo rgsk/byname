@@ -820,6 +820,32 @@ def type_field_at(hidden: str, pos: dict) -> tuple[str, str] | None:
     return None
 
 
+ALIAS_HOVER_RE = re.compile(r"\(type\) (?!_)(\w+) = ")  # a user's alias, not one of byname's (`_typ_...`)
+RECORD_CLASS_RE = re.compile(r"\b_(?:typ|opn)_")
+
+
+def alias_declaration(src: str, at: int, name: str) -> str | None:
+    """The value of `type <name> = ...` whose name is at `at`, as written: on one line, a trailing comma
+    before a closing bracket dropped (a multi-line one's)."""
+    if src[at : at + len(name)] != name or not re.match(r"\s*=", src[at + len(name) :]):
+        return None
+    j = src.index("=", at + len(name)) + 1
+    depth, k = 0, j
+    while k < len(src):
+        c = src[k]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "\n" and depth <= 0:
+            break
+        elif c == "#" and depth <= 0:
+            break
+        k += 1
+    text = " ".join(src[j:k].split())
+    return re.sub(r",\s*([)\]}])", r"\1", text).replace("( ", "(").replace(" )", ")") or None
+
+
 def literal_fields(src: str, start: int) -> tuple[list[tuple[str, int]], int]:
     """The fields written at the top level of the record literal whose `(` is at `start`, as (name, offset),
     and the offset just past its `)`. Nested brackets are skipped: a nested literal has its own hover."""
@@ -2185,6 +2211,36 @@ class Proxy:
             self.send_server({"jsonrpc": "2.0", "id": sid, "method": "textDocument/hover", "params": params})
         return True
 
+    def alias_hover(self, msg: dict, doc: Doc, pos: dict) -> bool:
+        """`(type) Order = ...` of a record type alias: the checker expands every alias in it, so `items: list[Item]`
+        showed as `items: list[(sku: str, qty: int)]` (plain pyright does the same). Shown as its declaration is
+        written instead, as TypeScript does, found through go to definition (finish_alias_hover): in this file
+        or another, open or not. False: the answer goes as it is."""
+        value = (msg["result"].get("contents") or {}).get("value")
+        if not isinstance(value, str) or not (m := ALIAS_HOVER_RE.search(value)) or not RECORD_CLASS_RE.search(value):
+            return False
+        sid = f"byname-alias-hover-{msg['id']}"
+        self.pending[sid] = ("alias_hover", (msg, m[1]))
+        params = {"textDocument": {"uri": doc.uri}, "position": doc.tr.position_to_hidden(pos)}
+        self.send_server({"jsonrpc": "2.0", "id": sid, "method": "textDocument/definition", "params": params})
+        return True
+
+    def finish_alias_hover(self, answer: dict, asked: dict, name: str) -> None:
+        result = answer.get("result")
+        locs = result if isinstance(result, list) else [result] if isinstance(result, dict) else []
+        for loc in locs:
+            uri, rng = loc.get("uri") or loc.get("targetUri"), loc.get("range") or loc.get("targetSelectionRange")
+            if (target := self.doc_for(uri)) is None or (span := target.tr.range_from_hidden(rng)) is None:
+                continue
+            src = target.tr.source
+            at = target.tr.src_lines.offset(span["start"]["line"], span["start"]["character"])
+            if (text := alias_declaration(src, at, name)) is not None:
+                self.send_hover(asked["id"], f"(type) {name} = {text}", asked["result"].get("range"))
+                return
+        with display_orders(None):  # not found: the checker's own answer
+            result = self.to_editor(asked["result"], None)
+        self.client.send({"jsonrpc": "2.0", "id": asked["id"], "result": None if result is DROP else result})
+
     def record_hover_field(self, answer: dict, got: tuple) -> None:
         """One field's type for record_hover: its hover is the literal's keyword, `(parameter) name: str`."""
         state, k = got
@@ -2593,9 +2649,14 @@ class Proxy:
             method_doc = self.pending.pop(mid, None)
             ask = self.definition_asks.pop(mid, None)
             if (at := self.hover_at.pop(mid, None)) is not None and method_doc and isinstance(msg.get("result"), dict):
-                if method_doc[1] is not None and self.record_hover(msg, method_doc[1], at):
+                if method_doc[1] is not None and (
+                    self.alias_hover(msg, method_doc[1], at) or self.record_hover(msg, method_doc[1], at)
+                ):
                     return
                 field_hover(msg["result"], method_doc[1], at)
+            if method_doc and method_doc[0] == "alias_hover":
+                self.finish_alias_hover(msg, *method_doc[1])
+                return
             if method_doc and method_doc[0] == "record_hover":
                 self.record_hover_field(msg, method_doc[1])
                 return
