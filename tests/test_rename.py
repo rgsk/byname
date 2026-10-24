@@ -104,10 +104,18 @@ def test_renaming_a_record_field_from_the_literal_reaches_its_reads(client):
 
 
 def test_renaming_a_field_of_a_record_type_renames_the_type_written(client):
-    # the record passed was built on its own, `(name=...)`: it doesn't follow, the checker flags it instead
+    # the literal passed is written where the type is expected, so it's that type's (transform's `typed`)
     src = "def show(q: (name: str)) -> str:\n    return q.name\n\n\nshow((name='rahul'))\n"
     got = rename(client, "typed.pyn", src, pos(src, "q.name", delta=2), "who")
-    assert got == "def show(q: (who: str)) -> str:\n    return q.who\n\n\nshow((name='rahul'))\n"
+    assert got == "def show(q: (who: str)) -> str:\n    return q.who\n\n\nshow((who='rahul'))\n"
+
+
+def test_a_record_built_on_its_own_and_passed_later_stays_its_own(client):
+    # `u` was built where nothing was expected: it fits the type now, but nothing ties it to it; the
+    # checker flags `show(u)` after the rename
+    src = "def show(q: (name: str)) -> str:\n    return q.name\n\n\nu = (name='rahul')\nshow(u)\n"
+    got = rename(client, "own.pyn", src, pos(src, "q.name", delta=2), "who")
+    assert got == src.replace("(name: str)", "(who: str)").replace("q.name", "q.who")
 
 
 def test_a_record_of_the_same_shape_elsewhere_is_left_alone(client):
@@ -121,17 +129,20 @@ def test_a_record_of_the_same_shape_elsewhere_is_left_alone(client):
     assert got == src.replace("(label='x')", "(who='x')").replace("r.label", "r.who")
 
 
-def test_a_record_typed_by_a_written_type_renames_the_type_not_the_literal(client):
-    # the annotation is the promise: it changes, and the literal that no longer keeps it is the checker's to flag
+def test_a_record_typed_by_a_written_type_renames_the_type_and_the_literal_returned(client):
     src = "def make() -> (label: str):\n    return (label='x')\n\n\nr = make()\nprint(r.label)\n"
     got = rename(client, "annotated.pyn", src, pos(src, "r.label", delta=2), "who")
-    assert got == "def make() -> (who: str):\n    return (label='x')\n\n\nr = make()\nprint(r.who)\n"
+    assert got == src.replace("label", "who")
 
 
-def test_renaming_a_literals_field_leaves_the_type_it_is_checked_against(client):
-    src = "user: (name: str, age: int) = (name='rahul', age=26)\nprint(user.name)\n"
-    got = rename(client, "declared.pyn", src, pos(src, "name='"), "named")
-    assert got == src.replace("(name='", "(named='")
+def test_renaming_a_literals_field_renames_the_type_it_is_written_against(client):
+    # as in TypeScript: from the literal or from the type, it's one field; a shorthand keeps its local
+    src = "type User = (name: str, age: int)\nname = 'r'\nuser: User = (name=, age=26)\nxs: list[User] = [(name='a', age=1)]\nprint(user.name)\n"
+    got = rename(client, "declared.pyn", src, pos(src, "name=,"), "named")
+    assert got == (
+        "type User = (named: str, age: int)\nname = 'r'\nuser: User = (named=name, age=26)\n"
+        "xs: list[User] = [(named='a', age=1)]\nprint(user.named)\n"
+    )
 
 
 def test_renaming_a_field_of_an_open_spread_record_reaches_where_it_is_written(client):
@@ -169,7 +180,7 @@ def test_a_rename_gives_the_checker_back_the_real_translation(client):
 def test_renaming_a_field_from_the_type_written_reaches_its_reads(client):
     # the checker has no text at `label` in `(label: str)` (it's the type's class); the proxy answers
     # prepareRename and starts the rename at the class's field (Proxy.written_field). Another record of
-    # that shape (make's) is left alone, and so is the literal passed, as from a read
+    # that shape (make's) is left alone; the literal passed is written against the type, so it follows
     c, root = client
     src = (
         "def make():\n    return (label='x')\n\n\n"
@@ -185,7 +196,7 @@ def test_renaming_a_field_from_the_type_written_reaches_its_reads(client):
     assert got == {"range": {"start": at, "end": {**at, "character": at["character"] + 5}}, "placeholder": "label"}
     assert rename(client, "fromtype.pyn", src, at, "who") == src.replace("(label: str)", "(who: str)").replace(
         "q.label", "q.who"
-    )
+    ).replace("(label='y')", "(who='y')")
 
 
 def test_renaming_a_field_of_a_type_alias_reaches_everything_typed_by_it(client):

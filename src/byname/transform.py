@@ -25,6 +25,7 @@ import ast
 import io
 import keyword
 import linecache
+import re
 import tokenize
 import types
 from collections.abc import Callable
@@ -611,6 +612,51 @@ def untyped_builds(body: str) -> set[tuple[int, int]]:
     return out
 
 
+LITERAL_SITE_RE = re.compile(r"_rec_\w*?___(\d+)$")
+
+
+def typed_literals(body: str) -> set[int]:
+    """Rename translation, first pass: the sites (site_class numbers) of the record literals written where a
+    type is expected: the value of `x: T = ...`, of a `return` under `-> T` (not in a generator), a call's
+    argument (not a field of another literal: a record's stub takes any type), and an item of a list, set,
+    tuple or dict display in one of those. There the type is the literal's own too, so a rename of either
+    reaches the other, as in TypeScript (see `typed` in transform); elsewhere `_byname_ctx` would have nothing to solve from."""
+    tree = parse_around_errors(body)
+    if tree is None:
+        return set()
+    parent: dict[int, ast.AST] = {}
+    for n in ast.walk(tree):
+        for c in ast.iter_child_nodes(n):
+            parent[id(c)] = n
+
+    def typed_at(n: ast.AST) -> bool:
+        p = parent.get(id(n))
+        if isinstance(p, ast.AnnAssign):
+            return p.value is n
+        if isinstance(p, ast.Return):
+            f = p
+            while f is not None and not isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                f = parent.get(id(f))
+            if not isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)) or f.returns is None:
+                return False
+            return not any(isinstance(x, (ast.Yield, ast.YieldFrom)) for x in ast.walk(f))
+        if isinstance(p, ast.keyword):
+            p, n = parent.get(id(p)), p.value
+        if isinstance(p, ast.Call):
+            generated = isinstance(p.func, ast.Name) and p.func.id.startswith(("_rec_", "_byname_"))
+            return not generated and (n in p.args or any(k.value is n for k in p.keywords))
+        if isinstance(p, (ast.List, ast.Set, ast.Tuple)) or (isinstance(p, ast.Dict) and n in p.values):
+            return typed_at(p)
+        return False
+
+    out = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and (m := LITERAL_SITE_RE.match(n.func.id)):
+            if typed_at(n):
+                out.add(int(m[1]))
+    return out
+
+
 def known_fields(body: str, probed: dict[tuple[str, int], Known] | None = None) -> dict[tuple[str, int], Known]:
     """The record fields of names read in the translation, by (name, line), where a binding in the file shows
     them: a record literal, a spread record of such names, the rest of such a name (`**rest`), an annotation
@@ -850,6 +896,7 @@ def transform(
     probed: dict[tuple[str, int], Known] | None = None,
     probe: bool = False,
     sites: bool = False,
+    typed: set[int] | None = None,
 ) -> Result:
     """tolerant (editor only): a half-typed pattern item like `na` in `(name=, na) = r` becomes
     `_ds.na` instead of an error, so the checker can complete field names there.
@@ -859,7 +906,9 @@ def transform(
     probed: the checker's types of what the file doesn't show (Result.unseen), for known_fields.
     probe: wrap each unseen source in `reveal_type(...)`, so the checker prints its type (srcmap.probed_from).
     sites (checker): each record literal and written record type gets its own class (site_class), for a
-    rename only; without, records of one shape share their class, so `list[Item]` takes a list of literals."""
+    rename only; without, records of one shape share their class, so `list[Item]` takes a list of literals.
+    typed (with sites): source offsets of the literals written where a type is expected (typed_literals);
+    set by a second pass. Each is wrapped so its fields are also reads of that type's fields."""
     toks = [
         t for t in tokenize.generate_tokens(io.StringIO(src).readline) if t.type not in (tokenize.COMMENT, tokenize.NL)
     ]
@@ -926,6 +975,8 @@ def transform(
     field_spans: list[tuple[int, int]] = []  # every record field name: in records, patterns and record types
     shorthand_spans: list[tuple[int, int]] = []  # every bare `x=`, see Result.shorthands
     site_list: list[tuple[tuple[str, ...], bool, bool]] = []  # checker: (fields, is_open, is_literal), see site_class
+    literal_at: dict[int, int] = {}  # sites: a literal's site -> the source offset of its `(` (typed_literals)
+    ctx_used = False  # a literal was wrapped in _byname_ctx (typed)
     spread_marks: dict[int, str] = {}  # checker: site -> SPREAD's marker (open_build)
     unseen: list[tuple[str, int]] = []  # checker: Result.unseen
     type_fields: list[tuple[str, str, int, int]] = []  # see Result.type_fields
@@ -1687,7 +1738,24 @@ def transform(
         records[fields] = None
         field_spans.extend(span(it[0]) for it in its)
         at = off(t.start)
+        if typed is not None and at in typed:
+            # typed_literals: `_byname_ctx(lambda _byname_t: (_byname_t.name, ..., <literal>)[-1])`. `_byname_t` is
+            # the type expected here, so `_byname_t.name` is a read of its field, marked on the `name` written:
+            # a rename of the type's field reaches the literal, and one from the literal reaches the type
+            head, marks = "_byname_ctx(lambda _byname_t: (", []
+            for it in its:
+                a, b = span(it[0])
+                head += "_byname_t."
+                marks.append(Mark(len(head), len(head) + b - a, a, b))
+                head += toks[it[0]].string + ", "
+            edits.append(Edit(at, at, head, (at, at + 1), marks))
+            ctx_used = True
         edits.append(Edit(at, at, literal_class(fields), (at, at + 1)))
+        if sites and checker and not portable:
+            literal_at[len(site_list) - 1] = at
+        if typed is not None and at in typed:
+            end = off(toks[close].end)
+            edits.append(Edit(end, end, ")[-1])", (at, at + 1)))
         standins.append((at, at, PAT))
         expand_shorthand(its)
 
@@ -1741,7 +1809,11 @@ def transform(
     if checker and known is None and (builds or omit_used):
         k, u = known_fields(body, probed), untyped_builds(body)
         if k or u or probe or probed:
-            return transform(src, path, tolerant, portable, checker, k, u, probed, probe, sites)
+            return transform(src, path, tolerant, portable, checker, k, u, probed, probe, sites, typed)
+    if checker and sites and typed is None and literal_at:
+        at_site = typed_literals(body)
+        if found := {literal_at[n] for n in at_site if n in literal_at}:
+            return transform(src, path, tolerant, portable, checker, known, untyped, probed, probe, sites, found)
 
     def base_prelude() -> str:
         # the checker's translation never runs, so it doesn't read the project's config
@@ -1768,7 +1840,7 @@ def transform(
         prelude += "".join(record_def(f, portable) for f in records)
         for n, (f, is_open, literal) in enumerate(site_list):
             prelude += site_def(f, is_open, f"{n}{spread_marks.get(n, '')}", literal)
-    if builds or kw_used or omit_used:
+    if builds or kw_used or omit_used or ctx_used:
         if not prelude:
             prelude = base_prelude()
         if not portable:
@@ -1777,6 +1849,8 @@ def transform(
         if rec and not portable:
             prelude += BUILD_PRELUDE + (BUILD_REC_TYPED if checker else "")
             prelude += CTX_PRELUDE if checker and builds else ""
+        elif ctx_used and not portable:  # a rename's typed literals (`typed`): CTX_PRELUDE needs BUILD_PRELUDE's names
+            prelude += BUILD_PRELUDE + CTX_PRELUDE
         if omit_used and not checker:
             sig = (
                 "def _byname_omit(r, taken):"

@@ -74,7 +74,8 @@ def test_renaming_one_half_of_a_shorthand_splits_it():
     # from `r.name`, the literal `r` was built from changes too (a shorthand keeps its local: `(who=name)`),
     # or the type `r` was declared with, `(who: str)`; another record that only has a `name` doesn't. It
     # starts from the type too: renaming `name` in `(name: str)` or `type User = (name: str)` renames
-    # every read of a record typed by it (end to end in test_rename.py).
+    # every read of a record typed by it, and every literal written where it's expected (`u: User = (...)`,
+    # an argument, a `return`), both ways as in TypeScript (end to end in test_rename.py).
     def hello(*, who: str) -> str:
         return f"hello {who}"
 
