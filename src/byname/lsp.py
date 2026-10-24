@@ -824,6 +824,23 @@ def workspace_edits(edit) -> list[tuple[str, dict]]:
     return out
 
 
+def is_output(uri: str) -> bool:
+    """An output file, `sol.pyn.py` (output.output_path): generated from its .pyn on save. The mirror leaves
+    it out (tools.mirrored), but one open in the editor reaches the checker as itself."""
+    return uri.startswith("file:") and uri.endswith(".pyn.py")
+
+
+def drop_outputs(edit: dict) -> None:
+    """A rename doesn't edit output files: the next save writes them again from the .pyn (is_output)."""
+    if changes := edit.get("changes"):
+        for u in [u for u in changes if is_output(u)]:
+            del changes[u]
+    if "documentChanges" in edit:
+        edit["documentChanges"] = [
+            dc for dc in edit["documentChanges"] if not is_output(dc.get("textDocument", {}).get("uri", ""))
+        ]
+
+
 def drop_generated(edit: dict, doc_for) -> None:
     """A rename's edits that fall on generated text only (Translation.only_generated) are removed: the
     checker renamed a field byname reads for the user, and the source has nothing there to rename."""
@@ -1359,6 +1376,9 @@ class Proxy:
             rng = {"start": doc.tr.src_lines.position(at[2]), "end": doc.tr.src_lines.position(at[3])}
             self.client.send({"jsonrpc": "2.0", "id": mid, "result": {"range": rng, "placeholder": at[1]}})
             return
+        if method == "textDocument/references" and mid is not None:
+            self.references_in_sites(msg, key, doc)
+            return
         if method == "textDocument/rename" and mid is not None:
             self.rename_to[mid] = params.get("newName")
             doc = self.start_rename(key, doc, word_at(doc.tr.source, doc.tr.src_lines, params["position"]))
@@ -1864,6 +1884,76 @@ class Proxy:
                 pass
         return out
 
+    def references_in_sites(self, msg: dict, key: Path | str, doc: Doc) -> None:
+        """Find All References in the rename translation (start_rename, closed files opened too), as a rename
+        finds its edits: a literal written against a type reads that type's fields, and a written type has its
+        own class, so a field's references are its type's, its reads and the literals written against it, as in
+        TypeScript. On a field written in a type it starts at that class's field (written_field), as the
+        checker has no text there. A field's other declarations are asked too (more_references)."""
+        params = msg["params"]
+        site = self.start_rename(key, doc, word_at(doc.tr.source, doc.tr.src_lines, params["position"]))
+        at = written_field(site, params["position"])
+        hidden = (at and type_field_declaration(site.tr.hidden, at[0], at[1])) or site.tr.position_to_hidden(
+            params["position"]
+        )
+        state = {"msg": msg, "site": site, "found": [], "asked": set(), "left": 0}
+        self.ask_references(state, self.editor_uri(key), hidden)
+
+    def ask_references(self, state: dict, uri: str, position: dict) -> None:
+        state["asked"].add((uri, position["line"], position["character"]))
+        state["left"] += 1
+        sid = f"byname-references-{state['msg']['id']}-{len(state['asked'])}"
+        self.pending[sid] = ("references_site", state)
+        context = state["msg"]["params"].get("context", {"includeDeclaration": True})
+        params = {"textDocument": {"uri": uri}, "position": position, "context": context}
+        self.send_server({"jsonrpc": "2.0", "id": sid, "method": "textDocument/references", "params": params})
+
+    def more_references(self, answer: dict, state: dict) -> None:
+        """One answer of references_in_sites: a location on one of a field's declarations (field_declarations)
+        asks the others too, as `r.name` and `(name=)` are two symbols to the checker; when every answer is
+        in, they're mapped (finish_references)."""
+        state["left"] -= 1
+        for loc in answer.get("result") or []:
+            state["found"].append(loc)
+            if (target := self.doc_for(loc["uri"])) is None:
+                continue
+            for p in field_declarations(target.tr.hidden, loc["range"]["start"]):
+                if (self.editor_uri_of(loc["uri"]), p["line"], p["character"]) not in state["asked"]:
+                    self.ask_references(state, self.editor_uri_of(loc["uri"]), p)
+        if not state["left"]:
+            self.finish_references(state)
+
+    def editor_uri_of(self, uri: str) -> str:
+        target = self.doc_for(uri)
+        return target.uri if target is not None else uri
+
+    def finish_references(self, state: dict) -> None:
+        """Each location once, in the source: a written type's field is the name written (Result.type_fields);
+        one on generated text that isn't a copy of the user's (Translation.only_generated) is dropped."""
+        out, seen = [], set()
+        for loc in state["found"]:
+            if is_output(loc["uri"]):
+                continue
+            target = self.doc_for(loc["uri"])
+            if target is not None and (at := type_field_at(target.tr.hidden, loc["range"]["start"])):
+                lines = target.tr.src_lines
+                got = [
+                    {"uri": target.uri, "range": {"start": lines.position(a), "end": lines.position(b)}}
+                    for name, f, a, b in target.tr.type_fields
+                    if (name, f) == at
+                ]
+            elif target is not None and target.tr.only_generated(loc["range"]):
+                got = []
+            else:
+                mapped = self.to_editor(loc, state["site"])
+                got = [] if mapped is DROP else [mapped]
+            for g in got:
+                if (k := json.dumps(g, sort_keys=True)) not in seen:
+                    seen.add(k)
+                    out.append(g)
+        self.end_rename()
+        self.client.send({"jsonrpc": "2.0", "id": state["msg"]["id"], "result": out})
+
     def definition_in_sites(self, msg: dict, ask: tuple) -> bool:
         """Go to definition on a record field the checker answers with generated code only (a literal's field,
         its stub's keyword; a read, the class of its shape): asked again in the rename translation
@@ -1968,6 +2058,7 @@ class Proxy:
                     if (name, f) == at
                 ]
         drop_generated(edit, self.doc_for)
+        drop_outputs(edit)
         result = self.to_editor(edit, doc)
         if result is not DROP:
             for u, e in written:
@@ -2242,6 +2333,9 @@ class Proxy:
             method_doc = self.pending.pop(mid, None)
             ask = self.definition_asks.pop(mid, None)
             if ask is not None and self.definition_in_sites(msg, ask):
+                return
+            if method_doc and method_doc[0] == "references_site":
+                self.more_references(msg, method_doc[1])
                 return
             if method_doc and method_doc[0] == "definition_site":
                 self.finish_definition(msg, *method_doc[1])

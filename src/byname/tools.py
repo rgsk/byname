@@ -155,6 +155,10 @@ def mirrored(root: Path, src: Path) -> Path | None:
         return None  # an excluded folder is one link in the mirror (see mirror)
     if src.suffix == ".pyn":
         return rel.with_suffix(".py")
+    # an output file (output.output_path): generated from its .pyn, for judges; a module name can't hold its
+    # dot, so nothing imports it, and in the checker it was a second copy of the code (references, renames)
+    if src.name.endswith(".pyn.py"):
+        return None
     if src.suffix in (".py", ".pyi", ".ipynb") or (src.name in CONFIGS and len(rel.parts) == 1):
         return rel
     return None

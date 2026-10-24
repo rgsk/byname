@@ -298,3 +298,68 @@ def test_go_to_definition_reaches_a_type_in_a_closed_file(client):
     c.wait_diags(uri)
     types = (root / "goto_types.pyn").as_uri()
     assert definition(client, uri, pos(src, "sku='a'")) == [(types, {"line": 0, "character": 13})]
+
+
+def references(client, uri: str, at: dict) -> list:
+    c, _ = client
+    params = {"textDocument": {"uri": uri}, "position": at, "context": {"includeDeclaration": True}}
+    got = c.request("textDocument/references", params)
+    return sorted((g["uri"], g["range"]["start"]["line"], g["range"]["start"]["character"]) for g in got)
+
+
+def test_find_all_references_on_a_record_field_lists_the_type_its_reads_and_its_literals(client):
+    # the same places a rename edits: from the type, a literal written against it or a read, as in TypeScript;
+    # make's record has a `sku` too and isn't listed
+    c, root = client
+    src = (
+        "type Item = (sku: str)\n"
+        "it: Item = (sku='a')\n"
+        "xs: list[Item] = [(sku='b')]\n"
+        "print(it.sku)\n"
+        "def make():\n    return (sku='c')\n"
+    )
+    path = root / "refs.pyn"
+    path.write_text(src)
+    uri = c.open(path)
+    c.wait_diags(uri)
+    want = [(uri, 0, 13), (uri, 1, 12), (uri, 2, 19), (uri, 3, 9)]
+    assert references(client, uri, pos(src, "sku: str")) == want
+    assert references(client, uri, pos(src, "sku='a'")) == want
+    assert references(client, uri, pos(src, "it.sku", delta=3)) == want
+
+
+def test_find_all_references_links_a_record_built_on_its_own_to_its_reads(client):
+    # `r.n` and `(n=1)` are two symbols to the checker (its class's field, its stub's keyword)
+    c, root = client
+    src = "r = (n=1)\nprint(r.n)\n"
+    path = root / "refs_own.pyn"
+    path.write_text(src)
+    uri = c.open(path)
+    c.wait_diags(uri)
+    assert references(client, uri, pos(src, "r.n", delta=2)) == [(uri, 0, 5), (uri, 1, 8)]
+    assert references(client, uri, pos(src, "n=1")) == [(uri, 0, 5), (uri, 1, 8)]
+
+
+def test_an_open_output_file_is_left_out_of_references_and_renames(client):
+    # out_uses.pyn.py is out_uses.pyn's output: the mirror leaves it out, but one open in the editor reaches
+    # the checker as itself, and it imports the module like its .pyn does
+    c, root = client
+    (root / "out_uses.pyn").write_text("from out_mod import total\n\nprint(total)\n")
+    (root / "out_uses.pyn.py").write_text("from out_mod import total\n\nprint(total)\n")
+    src = "total = 1\n"
+    path = root / "out_mod.pyn"
+    path.write_text(src)
+    made = [{"uri": (root / n).as_uri(), "type": 1} for n in ("out_uses.pyn", "out_mod.pyn")]
+    c.send({"method": "workspace/didChangeWatchedFiles", "params": {"changes": made}})
+    c.open(root / "out_uses.pyn.py")
+    uri = c.open(path)
+    c.wait_diags(uri)
+    files = {u.rsplit("/", 1)[1] for u, _, _ in references(client, uri, pos(src, "total"))}
+    assert files == {"out_mod.pyn", "out_uses.pyn"}
+    edit = c.request(
+        "textDocument/rename", {"textDocument": {"uri": uri}, "position": pos(src, "total"), "newName": "n"}
+    )
+    assert {dc["textDocument"]["uri"].rsplit("/", 1)[1] for dc in edit["documentChanges"]} == {
+        "out_mod.pyn",
+        "out_uses.pyn",
+    }

@@ -474,6 +474,24 @@ def test_py_errors_show_the_projects_path(project):
     assert ".cache" not in out
 
 
+def test_output_files_are_left_out_of_the_mirror(tmp_path, monkeypatch):
+    # sol.pyn.py is generated from sol.pyn for judges: in the checker it was a second copy of the code, its
+    # names listed by Find All References and edited by a rename; an old copy goes at the next sync
+    from byname.tools import mirror, mirrored
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "sol.pyn").write_text("x = 1\n")
+    (root / "sol.pyn.py").write_text("x = 1\n")
+    (root / "plain.py").write_text("y = 2\n")
+    out = mirror(root)
+    (out / "sol.pyn.py").write_text("x = 1\n")  # as an older byname left it
+    out = mirror(root)
+    assert mirrored(root, root / "sol.pyn.py") is None
+    assert sorted(p.name for p in out.glob("*.py")) == ["plain.py", "sol.py"]
+
+
 def test_a_folder_the_checker_excludes_is_one_link_in_the_mirror(tmp_path, monkeypatch):
     # a project's cloned third-party code (envs/, 63k files in one) isn't walked on every sync: the mirror
     # links the folder whole, so imports into it still resolve and the checker, excluding it, checks nothing there
