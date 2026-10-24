@@ -235,6 +235,9 @@ class Mark:
     os: int  # span in the source; os == oe means "insert here" (e.g. a shorthand target)
     oe: int
     display: tuple[int, int] | None = None  # where to show diagnostics, if not (os, oe)
+    # body -> source only: a source position stays where the source's own text is (a typed literal's read of
+    # its type's field, see `typed` in transform; Translation.typed_read finds it)
+    back: bool = False
 
 
 @dataclass
@@ -1840,7 +1843,7 @@ def transform(
             # a rename of the type's field reaches the literal, and one from the literal reaches the type
             head, marks = "_byname_ctx(lambda _byname_t: (", []
             for path, (a, b) in field_reads(its, "_byname_t"):
-                marks.append(Mark(len(head) + len(path) - (b - a), len(head) + len(path), a, b))
+                marks.append(Mark(len(head) + len(path) - (b - a), len(head) + len(path), a, b, back=True))
                 head += path + ", "
             edits.append(Edit(at, at, head, (at, at + 1), marks))
             ctx_used = True

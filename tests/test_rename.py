@@ -363,3 +363,15 @@ def test_an_open_output_file_is_left_out_of_references_and_renames(client):
         "out_mod.pyn",
         "out_uses.pyn",
     }
+
+
+def test_a_literal_passed_where_no_record_is_expected_renames_as_its_own(client):
+    # print's parameter is `object`, show's untyped: no record type to follow (Translation.typed_read finds
+    # nothing there), so the literal's own field is renamed, as before literals followed their types; and
+    # go to definition doesn't land in builtins.pyi, where `object` would send it
+    c, root = client
+    src = 'def show(r):\n    return r\n\n\nprint((qty=1, sku="a"))\nshow((qty=2, sku="b"))\n'
+    assert rename(client, "own_arg.pyn", src, pos(src, "qty=1"), "n") == src.replace("qty=1", "n=1")
+    assert rename(client, "own_arg.pyn", src, pos(src, "qty=2"), "n") == src.replace("qty=2", "n=2")
+    uri = (root / "own_arg.pyn").as_uri()
+    assert definition(client, uri, pos(src, "qty=1")) == []

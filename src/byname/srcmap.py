@@ -40,7 +40,7 @@ class SourceMap:
             self.gstart.append(e.start + delta)
             delta += len(e.text) - (e.end - e.start)
         # marks that cover real source text (zero-width ones only map body -> source)
-        self.marks = [(m, i) for i, e in enumerate(edits) for m in e.marks if m.oe > m.os]
+        self.marks = [(m, i) for i, e in enumerate(edits) for m in e.marks if m.oe > m.os and not m.back]
 
     def to_body(self, o: int, end: bool = False, touch: bool = False) -> int:
         """touch: a cursor right after a marked word still counts as on it (completion at `na|`)."""
@@ -358,6 +358,19 @@ class Translation:
             "start": self.hid_lines.position(self._to_hidden(s, False)),
             "end": self.hid_lines.position(self._to_hidden(e, e > s)),
         }
+
+    def typed_read(self, pos: dict) -> dict | None:
+        """On a field name of a literal written against a type (a rename's translation, transform's `typed`):
+        the hidden position of its read of that type's field, `_byname_t.name`, else None. A rename,
+        references and go to definition ask there too, so they reach the type; the position itself stays on
+        the literal's own field, which is all there is when the type expected isn't a record (`print(...)`)."""
+        off = self.src_lines.offset(pos["line"], pos["character"])
+        for e, gs in zip(self.map.edits, self.map.gstart):
+            for m in e.marks:
+                if m.back and m.os <= off <= m.oe:
+                    g = gs + m.ts + min(off - m.os, m.te - m.ts)
+                    return self.hid_lines.position(g + self.plen if g >= self.at and self.plen else g)
+        return None
 
     def value_position(self, pos: dict) -> dict | None:
         """On the `x` of a shorthand `x=`: the hidden position of its implicit value `x`, else None.

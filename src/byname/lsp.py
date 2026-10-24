@@ -899,6 +899,25 @@ def workspace_edits(edit) -> list[tuple[str, dict]]:
     return out
 
 
+def dedupe_edits(edit: dict) -> None:
+    """Each source edit once: a typed literal's field is renamed through its own keyword and through its read of
+    its type's field (Translation.typed_read), two places in the checker's text over one in the source."""
+
+    def once(es: list) -> list:
+        seen, out = set(), []
+        for e in es:
+            if (k := json.dumps(e, sort_keys=True)) not in seen:
+                seen.add(k)
+                out.append(e)
+        return out
+
+    for u, es in (edit.get("changes") or {}).items():
+        edit["changes"][u] = once(es)
+    for dc in edit.get("documentChanges") or []:
+        if "edits" in dc:
+            dc["edits"] = once(dc["edits"])
+
+
 def is_output(uri: str) -> bool:
     """An output file, `sol.pyn.py` (output.output_path): generated from its .pyn on save. The mirror leaves
     it out (tools.mirrored), but one open in the editor reaches the checker as itself."""
@@ -1065,6 +1084,7 @@ class Proxy:
         self.pending: dict = {}  # editor request id -> (method, Doc)
         self.own_actions: dict = {}  # codeAction request id -> byname's quick fixes, added to the checker's
         self.rename_to: dict = {}  # rename request id -> its newName, for rename_fields
+        self.rename_extra: dict = {}  # rename request id -> (checker uri, a typed literal's read), for rename_fields
         # while a rename runs: each open document as the checker holds it then, with site classes (start_rename)
         self.site_docs: dict[Path | str, Doc] = {}
         self.site_opened: list[Path] = []  # closed .pyn files opened in the checker for a rename (start_rename)
@@ -1501,6 +1521,8 @@ class Proxy:
             self.rename_to[mid] = params.get("newName")
             doc = self.start_rename(key, doc, word_at(doc.tr.source, doc.tr.src_lines, params["position"]))
             self.pending[mid] = (method, doc)
+            if (read := doc.tr.typed_read(params["position"])) is not None:  # the type it's written against
+                self.rename_extra[mid] = (self.uri_to_checker(self.editor_uri(key)), read)
         mapped = self.to_checker(params, doc)
         if method == "textDocument/rename" and (at := written_field(doc, params["position"])):
             mapped["position"] = type_field_declaration(doc.tr.hidden, at[0], at[1]) or mapped["position"]
@@ -2016,6 +2038,8 @@ class Proxy:
         )
         state = {"msg": msg, "site": site, "found": [], "asked": set(), "left": 0}
         self.ask_references(state, self.editor_uri(key), hidden)
+        if not at and (read := site.tr.typed_read(params["position"])) is not None:  # its type's too
+            self.ask_references(state, self.editor_uri(key), read)
 
     def ask_references(self, state: dict, uri: str, position: dict) -> None:
         state["asked"].add((uri, position["line"], position["character"]))
@@ -2086,7 +2110,9 @@ class Proxy:
         site = self.start_rename(key, doc, word_at(doc.tr.source, doc.tr.src_lines, params["position"]))
         sid = f"byname-definition-{msg['id']}"
         self.pending[sid] = ("definition_site", (msg, site))
-        mapped = {**params, "position": site.tr.position_to_hidden(params["position"])}
+        # a literal's field: its type's (Translation.typed_read), else its own
+        hidden = site.tr.typed_read(params["position"]) or site.tr.position_to_hidden(params["position"])
+        mapped = {**params, "position": hidden}
         self.send_server({"jsonrpc": "2.0", "id": sid, "method": "textDocument/definition", "params": mapped})
         return True
 
@@ -2105,8 +2131,8 @@ class Proxy:
                     for name, f, a, b in target.tr.type_fields
                     if (name, f) == at
                 ]
-            elif (mapped := self.to_editor(loc, site)) is not DROP:
-                out.append(mapped)
+            elif target is not None and (mapped := self.to_editor(loc, site)) is not DROP:
+                out.append(mapped)  # only the user's files: a field read off `object` lands in builtins.pyi
         self.end_rename()
         self.client.send({"jsonrpc": "2.0", "id": asked["id"], "result": out})
 
@@ -2128,6 +2154,7 @@ class Proxy:
         declarations too, so a read and the literal it reads go together: `r.name` and `(name=)` are two
         symbols to the checker. Each other declaration is a rename request of its own, answered in
         finish_rename. False: not a WorkspaceEdit, the answer goes as it is."""
+        extra = self.rename_extra.pop(msg["id"], None)
         if not isinstance(msg["result"], dict):
             return False
         new = self.rename_to.pop(msg["id"], None)
@@ -2136,6 +2163,8 @@ class Proxy:
             for u, e in workspace_edits(msg["result"])
         }
         asks = []
+        if extra is not None and new is not None:  # a literal's field: its type's too (Translation.typed_read)
+            asks.append({"textDocument": {"uri": extra[0]}, "position": extra[1], "newName": new})
         for u, e in workspace_edits(msg["result"]):
             if new is None or (target := self.doc_for(u)) is None:
                 continue
@@ -2181,6 +2210,7 @@ class Proxy:
         if result is not DROP:
             for u, e in written:
                 add_workspace_edit(result, u, e)
+            dedupe_edits(result)
         self.end_rename()
         self.client.send({**msg, "result": None if result is DROP else result})
 
