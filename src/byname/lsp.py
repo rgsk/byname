@@ -29,8 +29,8 @@ from urllib.parse import quote, urlparse
 from urllib.request import url2pathname
 
 from .output import output_path, render
-from .srcmap import PROBE_MARK, PROBE_ROUNDS, PROBED, LineIndex, Probed, Translation, probed_from
-from .transform import DS, FIELDSET, ORDER, REPR, BynameError, pattern_slot
+from .srcmap import NEW_SHAPES, PROBE_MARK, PROBE_ROUNDS, PROBED, LineIndex, Probed, Translation, probed_from
+from .transform import DS, FIELDSET, ORDER, REPR, SHAPES, BynameError, pattern_slot
 
 DEFAULT_CHECKER = ["basedpyright-langserver", "--stdio"]
 DROP = object()  # a result element whose position fell inside generated-only code
@@ -1037,6 +1037,8 @@ class Proxy:
         self.last_completion: Doc | None = None
         self.counter = 0  # checker-side document versions
         self.temp_versions: set[int] = set()  # versions holding a completion-only temporary text
+        self.checker_up = False  # initialize answered: the checker takes notifications (shapes_made)
+        NEW_SHAPES.append(self.shapes_made)
         self.own_triggers: set[str] = set()
         self.field_type: int | None = None  # semantic token type for record field names ("property")
         self.final_field: tuple[int, int] | None = None  # (readonly, static) modifier bits
@@ -1125,6 +1127,18 @@ class Proxy:
             return key
         return self.docs[key][-1].uri if self.docs.get(key) else key.as_uri()
 
+    def shapes_made(self, paths: list[Path]) -> None:
+        """Shape modules just written (srcmap.write_shapes): the checker hears of the ones in its mirror before
+        the text importing them, as it sees a new file only from such an event. Before it's up, its own scan
+        of the mirror finds them."""
+        if not self.checker_up or self.mirror is None:
+            return
+        made = [{"uri": p.as_uri(), "type": 1} for p in paths if p.is_relative_to(self.mirror)]
+        if made:
+            self.server.send(
+                {"jsonrpc": "2.0", "method": "workspace/didChangeWatchedFiles", "params": {"changes": made}}
+            )
+
     def doc_for(self, uri: str, version=None) -> Doc | None:
         """The .pyn or byname cell a checker uri holds the translation of, at that checker version."""
         uri = self.uri_to_editor(uri)
@@ -1151,12 +1165,13 @@ class Proxy:
 
     # the mirror on disk -------------------------------------------------
 
-    def sync(self, changes: list | None = None) -> None:
-        """Bring the whole mirror up to date (0.04s on a 2000-file project: walking, translating each .pyn)."""
+    def sync(self, changes: list | None = None, prune_shapes: bool = False) -> None:
+        """Bring the whole mirror up to date (0.04s on a 2000-file project: walking, translating each .pyn).
+        prune_shapes: at start only, when no open document imports a shape module the files don't."""
         from .tools import mirror
 
         assert self.root is not None
-        mirror(self.root, "lsp", default_config=False, changes=changes)
+        mirror(self.root, "lsp", default_config=False, changes=changes, prune_shapes=prune_shapes)
 
     def place(self, path: Path) -> None:
         """One file's copy in the mirror up to date (a .pyn from outside the project too)."""
@@ -1235,6 +1250,8 @@ class Proxy:
         outer = doc
         if uri_key or (isinstance(td, dict) and "uri" in td):
             uri = obj[uri_key] if uri_key else td["uri"]
+            if f"/{SHAPES}/" in uri:
+                return DROP  # a record type's class, generated (transform.SHAPES): as the prelude's were
             target = self.doc_for(uri)
             editor = target.uri if target is not None else self.uri_to_editor(uri)
             if uri_key:
@@ -1290,7 +1307,7 @@ class Proxy:
             from .tools import mirror_dir
 
             self.mirror = mirror_dir(self.root, "lsp")
-            self.sync()
+            self.sync(prune_shapes=True)
             caps = params.get("capabilities", {})
             self.token_refresh = bool(caps.get("workspace", {}).get("semanticTokens", {}).get("refreshSupport"))
             formats = caps.get("textDocument", {}).get("hover", {}).get("contentFormat") or []
@@ -1667,7 +1684,7 @@ class Proxy:
                 out = mirror_dir(self.root, "lsp-probe")
                 if full:
                     found: set[Path] = set()
-                    mirror(self.root, "lsp-probe", sources=found)
+                    mirror(self.root, "lsp-probe", sources=found, prune_shapes=True)  # files only, no editor
                     self.probe_pyns = {p for p in found if p.suffix == ".pyn"}
                 for path in changed if not full else ():
                     place(self.root, out, path)
@@ -2431,6 +2448,7 @@ class Proxy:
             if method_doc and "result" in msg and msg["result"] is not None:
                 req, doc = method_doc
                 if req == "initialize":
+                    self.checker_up = True
                     caps = msg["result"].setdefault("capabilities", {})
                     caps["textDocumentSync"] = {"openClose": True, "change": 1, "save": {"includeText": False}}
                     caps["declarationProvider"] = True  # served as definition on the keyword half of `x=`

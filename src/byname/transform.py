@@ -22,6 +22,7 @@ The body keeps the input's line count; record classes go in a separate prelude.
 """
 
 import ast
+import hashlib
 import io
 import keyword
 import linecache
@@ -271,6 +272,8 @@ class Result:
     # checker: (name, line) of each bare-name spread source and each rest's `_ds` whose fields the file doesn't
     # show; a probe translation wraps each in `reveal_type(...)`, to ask the checker (srcmap.probed_from)
     unseen: list[tuple[str, int]] = field(default_factory=list)
+    # checker: (fields, is_open) of each shape module the prelude imports (SHAPES); srcmap.write_shapes writes them
+    shapes: list[tuple[tuple[str, ...], bool]] = field(default_factory=list)
 
 
 def field_error(name: str) -> str:
@@ -425,6 +428,26 @@ def type_def(fields: tuple[str, ...], is_open: bool, portable: bool = False) -> 
         f"    def _replace(self{kw}) -> _S: ...  # pyright: ignore[reportGeneralTypeIssues]\n"  # covariant
         f"    def _asdict(self) -> {asdict}: ...\n"
     )
+
+
+# checker: the package of shape modules at the root of the checker's mirror (srcmap.write_shapes). A record
+# type's class is one per shape for the whole project, not per file: pyright takes two classes as the same
+# type argument of an invariant list/dict/set only when they're one class, so a list of records built in one
+# file didn't fit another's `list[Item]`. A module per shape, named by it, never changes once written, so a
+# new shape (one per keystroke while a literal is typed) adds a file and re-checks nothing.
+SHAPES = "_byname_shapes"
+
+
+def shape_module(fields: tuple[str, ...], is_open: bool) -> str:
+    """The module of a shape's classes, by a hash of it: field names can be long, a file name can't."""
+    key = ("..., " if is_open else "") + ", ".join(fields)
+    return "_s_" + hashlib.sha1(key.encode()).hexdigest()[:16]
+
+
+def shape_source(fields: tuple[str, ...], is_open: bool) -> str:
+    """A shape module: its type class (type_def), the key alias and `_asdict()` TypedDict that use."""
+    out = TYPED_PRELUDE + covariant_defs(len(fields)) + f"type {key_alias(fields)} = str\n"
+    return out + ("" if is_open else dict_def(fields)) + type_def(fields, is_open)
 
 
 def record_def(fields: tuple[str, ...], portable: bool = False) -> str:
@@ -1013,6 +1036,7 @@ def transform(
         return any(item[i] in pair and item[i] < item[j] < pair[item[i]] for i in range(j))
 
     edits: list[Edit] = []
+    shapes: list[tuple[tuple[str, ...], bool]] = []  # checker: the shape modules the prelude imports (SHAPES)
     records: dict[tuple[str, ...], None] = {}  # ordered set
     types: dict[tuple[tuple[str, ...], bool], None] = {}  # explicit record types: (fields, is_open)
     problems: list[tuple[int, int, str]] = []
@@ -1872,14 +1896,18 @@ def transform(
             dicts = dict.fromkeys([*records, *(f for f, o in types if not o)])
             arity = max(len(f) for f in [*records, *(f for f, _ in types), *(s[0] for s in site_list)])
             prelude += CHECKER_DIRECTIVE + TYPED_PRELUDE + covariant_defs(arity)
-            prelude += "".join(dict_def(f) for f in dicts)
+            prelude += "" if checker else "".join(dict_def(f) for f in dicts)
         if not portable:  # in the checker, each record is its exact type (see record_def)
             types = {**types, **dict.fromkeys((f, False) for f in records)}
         # types first: a record's checker function returns its type, and before Python 3.14 an annotation
         # naming a class defined further down is an undefined name (every record would be Unknown)
-        if not portable:
-            prelude += "".join(f"type {key_alias(f)} = str\n" for f in dict.fromkeys(f for f, _ in types))
-        prelude += "".join(type_def(f, o, portable) for f, o in types)
+        if checker and not portable:  # one class per shape for the project (SHAPES)
+            shapes = list(types)
+            prelude += "".join(f"from {SHAPES}.{shape_module(f, o)} import {type_class(f, o)}\n" for f, o in shapes)
+        else:
+            if not portable:
+                prelude += "".join(f"type {key_alias(f)} = str\n" for f in dict.fromkeys(f for f, _ in types))
+            prelude += "".join(type_def(f, o, portable) for f, o in types)
         prelude += "".join(record_def(f, portable) for f in records)
         for n, (f, is_open, literal) in enumerate(site_list):
             prelude += site_def(f, is_open, f"{n}{spread_marks.get(n, '')}", literal)
@@ -2018,6 +2046,7 @@ def transform(
         declared_reads() if checker and tolerant else [],
         unknown_rests,
         unseen,
+        shapes,
     )
 
 

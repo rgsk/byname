@@ -261,6 +261,26 @@ def test_hover_on_a_record_field_reads_the_same_everywhere(lsp):
     assert hover_text(c, uri, pos(src, "it.sku", delta=3)) == "(constant) sku: str"
 
 
+def test_a_shape_first_typed_in_the_editor_is_typed(lsp):
+    # a record type's class is in its shape's module (transform.SHAPES), written when the shape first appears:
+    # the checker hears of the new file before the text importing it (Proxy.shapes_made), else the import
+    # wouldn't resolve and the record would be Unknown, with no error at all
+    c, root, _ = lsp
+    path = root / "new_shape.pyn"
+    uri = c.open(path, "x = 1\n")
+    c.wait_diags(uri)
+    new = "r = (zqx_field=1)\ns: str = r.zqx_field\n"
+    c.diags.pop(uri)
+    td = {"uri": uri, "version": 2}
+    c.send({"method": "textDocument/didChange", "params": {"textDocument": td, "contentChanges": [{"text": new}]}})
+    for _ in range(50):
+        if any("not assignable" in d["message"] for d in c.wait_diags(uri)):
+            break
+        c.diags.pop(uri, None)
+        time.sleep(0.1)
+    assert any('"int" is not assignable to declared type "str"' in d["message"] for d in c.diags[uri])
+
+
 def test_hover_renamed_local(lsp):
     c, root, uri = lsp
     assert "years: int" in hover_text(c, uri, pos(MAIN, "years", nth=0))

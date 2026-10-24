@@ -8,12 +8,25 @@ Three coordinate systems:
 LSP positions are (line, UTF-16 column), so LineIndex converts to and from offsets.
 """
 
+import os
 import re
+import threading
 from bisect import bisect_right
 from functools import cached_property
 from pathlib import Path
 
-from .transform import SPREAD, Edit, Known, Mark, class_fields, prelude_offset, transform
+from .transform import (
+    SHAPES,
+    SPREAD,
+    Edit,
+    Known,
+    Mark,
+    class_fields,
+    prelude_offset,
+    shape_module,
+    shape_source,
+    transform,
+)
 
 Hit = tuple[Edit, Mark | None] | None  # what generated text a body offset landed on
 
@@ -117,6 +130,38 @@ Probed = dict[tuple[str, int], Known]
 # the checker's answers for a file, by path: (the source they're for, what it said), set by `byname tool`
 # before it translates (tools.probe), so every Translation of that text reads the same types
 PROBED: dict[Path, tuple[str, Probed]] = {}
+
+# the checker's mirrors (tools.mirror_dir adds each): every Translation writes the shape modules its prelude
+# imports into each (write_shapes), so they're there before its text reaches a checker
+SHAPE_ROOTS: set[Path] = set()
+# told of each file write_shapes makes: the editor's checker hears of a new file only from such an event
+NEW_SHAPES: list = []
+_shapes_lock = threading.Lock()
+
+
+def write_shapes(shapes: list[tuple[tuple[str, ...], bool]]) -> None:
+    """The modules of `shapes` (transform.SHAPES) in every mirror that lacks them. A module never changes
+    once written: its text is its shape's."""
+    made: list[Path] = []
+    with _shapes_lock:
+        for root in list(SHAPE_ROOTS):
+            pkg = root / SHAPES
+            for f, o in shapes:
+                path = pkg / f"{shape_module(f, o)}.py"
+                if path.exists():
+                    continue
+                pkg.mkdir(parents=True, exist_ok=True)
+                if not (init := pkg / "__init__.py").exists():
+                    init.write_text("", encoding="utf-8")
+                    made.append(init)
+                tmp = path.with_suffix(f".{os.getpid()}.tmp")
+                tmp.write_text(shape_source(f, o), encoding="utf-8")
+                os.replace(tmp, path)  # whole: a checker reading it mid-write would see half a class
+                made.append(path)
+    for tell in NEW_SHAPES if made else ():
+        tell(made)
+
+
 # a probe's answer: `Type of "u" is "_typ_name__age___0[str, int]"`; an open record `_opn_...`
 # a probe translation's last line, `reveal_type('_byname_probe')`: the checker answers it whatever else it
 # can't (an unanalysed function's body), so a publish with its answer is of the probe (lsp.Proxy.probed)
@@ -210,6 +255,7 @@ class Translation:
             self.unknown_rests = r.unknown_rests
             self.unseen = r.unseen
             self.labels = {s for s, _ in r.labels}
+            write_shapes(r.shapes)
         except Exception as e:  # mid-edit code: send it raw; the checker reports the syntax error
             self.error = e
             body, prelude, edits = source, "", []

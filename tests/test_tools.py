@@ -474,6 +474,29 @@ def test_py_errors_show_the_projects_path(project):
     assert ".cache" not in out
 
 
+def test_shape_modules_are_shared_and_the_unused_ones_pruned(tmp_path, monkeypatch):
+    # every Translation writes the shape modules it imports (transform.SHAPES); a full sync with nothing open
+    # drops the ones no mirrored file imports, as a half-typed literal leaves one behind
+    from byname.srcmap import Translation
+    from byname.tools import mirror, mirror_dir
+    from byname.transform import SHAPES, shape_module
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "a.pyn").write_text("r = (sku=1)\n")
+    (root / "b.pyn").write_text("s = (sku=2)\n")
+    out = mirror_dir(root, "tools")
+    Translation("t = (half=1)\n")  # typed in the editor, never saved
+    pkg = out / SHAPES
+    assert (pkg / f"{shape_module(('half',), False)}.py").is_file()
+    mirror(root, prune_shapes=True)
+    assert sorted(p.name for p in pkg.glob("_s_*.py")) == [f"{shape_module(('sku',), False)}.py"]  # a and b share it
+    mirror(root)  # not pruned: the editor's open text may import more
+    Translation("t = (half=1)\n")
+    assert (pkg / f"{shape_module(('half',), False)}.py").is_file()
+
+
 def test_output_files_are_left_out_of_the_mirror(tmp_path, monkeypatch):
     # sol.pyn.py is generated from sol.pyn for judges: in the checker it was a second copy of the code, its
     # names listed by Find All References and edited by a rename; an old copy goes at the next sync

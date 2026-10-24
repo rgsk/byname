@@ -686,6 +686,24 @@ def test_records_of_one_shape_are_one_type_inside_a_list(tmp_path):
     assert "missing field: qty" in verdicts[14]
 
 
+def test_records_of_one_shape_are_one_type_inside_a_list_across_files(tmp_path):
+    # a shape's class is one for the project, not per file (transform.SHAPES): a list built here fits the
+    # list[Item] of another module's function; the wrong field type is still an error
+    (tmp_path / "shop.pyn").write_text("type Item = (sku: str, qty: int)\n\n\ndef total(items: list[Item]) -> int:\n    return len(items)\n")
+    verdicts = checker(
+        """\
+        from shop import total
+        xs = [(sku="pen", qty=3)]
+        total(xs)
+        ys = [(sku=1, qty=3)]
+        total(ys)
+        """,
+        tmp_path,
+    )
+    assert sorted(verdicts) == [5]  # line 3 is fine
+    assert "list" in verdicts[5]
+
+
 def test_an_open_type_takes_at_least_its_fields(tmp_path):
     verdicts = checker(
         """\

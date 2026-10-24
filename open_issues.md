@@ -77,9 +77,9 @@ orders are two classes, and pyright never takes two classes as the same type arg
 structure; inside an invariant container it's a special case, and writing the type's order fixes it. Measured,
 so don't re-try: one class per field set with a generic `type` alias per written order fixes the list, but
 pyright drops a generic alias's name once specialized (`reveal_type` of `c: Item = ...` showed the shared
-class), so hover would show one order per field set instead of each definition's. Same cause, also left: a
-list of records built in another file (`[(sku=, qty=)]` passed to `ma.total(items: list[Item])`), as each file
-generates its own classes.
+class), so hover would show one order per field set instead of each definition's. (A list of records built in
+another file, `[(sku=, qty=)]` passed to `ma.total(items: list[Item])`, had the same cause and is fixed:
+DEVELOPMENT.md, "One class per shape for the project".)
 
 ## A function returning records in two orders reports positional reads twice
 

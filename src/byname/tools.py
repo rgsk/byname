@@ -20,12 +20,13 @@ import tomllib
 from pathlib import Path
 
 from .lsp import LOAD_EXT_RE, explain_fields, pretty
-from .srcmap import PROBE_ROUNDS, PROBED, Translation, generated, probed_from, unknown_rest
+from .srcmap import PROBE_ROUNDS, PROBED, SHAPE_ROOTS, Translation, generated, probed_from, unknown_rest
+from .transform import SHAPES
 
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 CONFIGS = {"pyproject.toml", "setup.cfg", "ruff.toml", ".ruff.toml", "pyrightconfig.json"}
 # tool caches survive between runs; so do the editor's .pyn from outside the project
-KEEP_IN_MIRROR = {".ruff_cache", "_abs"}
+KEEP_IN_MIRROR = {".ruff_cache", "_abs", SHAPES}  # SHAPES: written by every Translation (srcmap.write_shapes)
 LOCATION = re.compile(r"^(?P<pre>\s*)(?P<path>[^\s:]+\.py):(?P<line>\d+)(?::(?P<col>\d+))?(?P<rest>.*)$")
 # a notebook cell: ruff `nb.ipynb:cell 3:1:5` (counting every cell), basedpyright `nb.ipynb:3:1:5` (code cells)
 NB_LOCATION = re.compile(
@@ -142,7 +143,9 @@ def write_if_changed(dst: Path, text: str) -> bool:
 def mirror_dir(root: Path, kind: str) -> Path:
     key = hashlib.sha1(str(root).encode()).hexdigest()[:12]
     cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    return cache / "byname" / f"{key}-{kind}"
+    out = cache / "byname" / f"{key}-{kind}"
+    SHAPE_ROOTS.add(out)  # its translations import shape modules: every Translation writes them there
+    return out
 
 
 def mirrored(root: Path, src: Path) -> Path | None:
@@ -206,13 +209,15 @@ def mirror(
     default_config: bool = True,
     changes: list | None = None,
     sources: set[Path] | None = None,
+    prune_shapes: bool = False,
 ) -> Path:
     """Sync root into its mirror; returns the mirror root. Unchanged files keep their mtime (tool caches).
     A folder the checker excludes is one link to it, not walked: its files stay importable, as the checker
     still resolves imports into an excluded folder, and it doesn't check them there either.
     default_config: a project that doesn't configure the checker gets the editor's default, "standard".
     changes: collects (mirror path, FileChangeType) for what this sync changed. sources: collects the
-    project files mirrored."""
+    project files mirrored. prune_shapes: drop the shape modules no mirrored file imports (prune_shapes),
+    only where no editor holds text the mirror doesn't."""
     out = mirror_dir(root, kind)
     wanted: set[Path] = set()
     linked: set[Path] = set()
@@ -253,7 +258,31 @@ def mirror(
                     if changes is not None:
                         changes.append((p, 3))
     out.mkdir(parents=True, exist_ok=True)
+    if prune_shapes:
+        drop_unused_shapes(out)
     return out
+
+
+SHAPE_IMPORT = re.compile(rf"from {SHAPES}\.(_s_\w+) import")
+
+
+def drop_unused_shapes(out: Path) -> None:
+    """Shape modules (transform.SHAPES) are written as shapes appear, one per keystroke while a literal is
+    typed, and never change: the ones no file in the mirror imports (notebooks too) are deleted."""
+    if not (pkg := out / SHAPES).is_dir():
+        return
+    used: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(out):  # not into links: an excluded folder is the project's
+        dirnames[:] = [d for d in dirnames if d != SHAPES]
+        for f in filenames:
+            if f.endswith((".py", ".ipynb")):
+                try:
+                    used.update(SHAPE_IMPORT.findall(Path(dirpath, f).read_text(encoding="utf-8")))
+                except (OSError, UnicodeDecodeError):
+                    pass
+    for m in pkg.glob("_s_*.py"):
+        if m.stem not in used:
+            m.unlink(missing_ok=True)
 
 
 def link_folder(src: Path, dst: Path) -> Path:
@@ -490,7 +519,7 @@ def main(argv: list[str]) -> int:
     if not argv:
         sys.exit("usage: byname tool <ruff|basedpyright|...> [args...] FILE.pyn")
     root = Path.cwd()
-    out = mirror(root)
+    out = mirror(root, prune_shapes=True)
     cmd, args = argv[0], []
     for a in argv[1:]:
         p = Path(a)
