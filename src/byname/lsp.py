@@ -15,6 +15,7 @@ as the kernel runs it, under its URI in the mirror, where the checker chains cel
 
 import ast
 import contextlib
+import io
 import contextvars
 import copy
 import json
@@ -25,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import tokenize
 from collections import Counter
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -816,6 +818,49 @@ def type_field_at(hidden: str, pos: dict) -> tuple[str, str] | None:
         if not lines[k].startswith("    "):
             return None
     return None
+
+
+def literal_fields(src: str, start: int) -> tuple[list[tuple[str, int]], int]:
+    """The fields written at the top level of the record literal whose `(` is at `start`, as (name, offset),
+    and the offset just past its `)`. Nested brackets are skipped: a nested literal has its own hover."""
+    fields: list[tuple[str, int]] = []
+    line_starts = [0]
+    for line in src.splitlines(keepends=True):
+        line_starts.append(line_starts[-1] + len(line))
+    toks = []
+    try:
+        for t in tokenize.generate_tokens(io.StringIO(src[start:]).readline):
+            if t.type in (tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT):
+                continue
+            toks.append(t)
+            if (
+                t.type == tokenize.OP
+                and t.string == ")"
+                and sum((x.string in "([{") - (x.string in ")]}") for x in toks if x.type == tokenize.OP) == 0
+            ):
+                break
+    except (tokenize.TokenError, IndentationError):
+        pass
+    base = line_starts[src.count("\n", 0, start)] if start else 0
+    first_col = start - base
+
+    def off(t) -> int:  # a token's offset in src: tokenize counts from the `(`'s line, its first column from it
+        line = src.count("\n", 0, start) + t.start[0] - 1
+        return line_starts[line] + t.start[1] + (first_col if t.start[0] == 1 else 0)
+
+    depth, end = 0, start + 1
+    for i, t in enumerate(toks):
+        if t.type == tokenize.OP and t.string in "([{":
+            depth += 1
+        elif t.type == tokenize.OP and t.string in ")]}":
+            depth -= 1
+            if depth == 0:
+                end = off(t) + 1
+                break
+        elif depth == 1 and t.type == tokenize.NAME and i + 1 < len(toks) and toks[i + 1].string == "=":
+            if i == 0 or toks[i - 1].string in ("(", ","):
+                fields.append((t.string, off(t)))
+    return fields, end
 
 
 def field_annotation(src: str, end: int) -> str | None:
@@ -2096,6 +2141,69 @@ class Proxy:
         self.end_rename()
         self.client.send({"jsonrpc": "2.0", "id": state["msg"]["id"], "result": out})
 
+    def record_hover(self, msg: dict, doc: Doc) -> bool:
+        """A hover the checker answers with what a record literal or a record type written is to it: a
+        generic `_rec_` function (anywhere in a literal's brackets: its blank lines too) or the `_typ_` alias
+        of a type's written order. Shown as the record instead: a type as written; a literal as its fields'
+        types, in its own order, asked of the checker field by field (record_hover_field), as hovering each
+        field shows it. False: the answer goes as it is."""
+        result = msg["result"]
+        contents = result.get("contents")
+        value = contents.get("value") if isinstance(contents, dict) else None
+        if not isinstance(value, str) or "range" not in result:
+            return False
+        span = doc.tr.range_from_hidden(result["range"], display=True)
+        if span is None:
+            return False
+        lines, src = doc.tr.src_lines, doc.tr.source
+        start = lines.offset(span["start"]["line"], span["start"]["character"])
+        if re.search(r"(?:\(type\)|\(class\)|\bclass) _(?:typ|opn)_", value):  # a written type: its alias or class
+            end = lines.offset(span["end"]["line"], span["end"]["character"])
+            self.send_hover(msg["id"], f"(type) {' '.join(src[start:end].split())}", span)
+            return True
+        if not ("(function)" in value and re.search(r"\b_rec_\w+", value)) or src[start : start + 1] != "(":
+            return False
+        fields, close = literal_fields(src, start)
+        if not fields:
+            return False
+        state = {
+            "id": msg["id"],
+            "doc": doc,
+            "types": [None] * len(fields),
+            "names": [f for f, _ in fields],
+            "left": len(fields),
+            "range": {"start": lines.position(start), "end": lines.position(close)},
+        }
+        for k, (_, at) in enumerate(fields):
+            sid = f"byname-record-hover-{msg['id']}-{k}"
+            self.pending[sid] = ("record_hover", (state, k))
+            params = {"textDocument": {"uri": doc.uri}, "position": doc.tr.position_to_hidden(lines.position(at))}
+            self.send_server({"jsonrpc": "2.0", "id": sid, "method": "textDocument/hover", "params": params})
+        return True
+
+    def record_hover_field(self, answer: dict, got: tuple) -> None:
+        """One field's type for record_hover: its hover is the literal's keyword, `(parameter) name: str`."""
+        state, k = got
+        result = answer.get("result")
+        contents = result.get("contents") if isinstance(result, dict) else None
+        value = contents.get("value") if isinstance(contents, dict) else ""
+        name = re.escape(state["names"][k])
+        m = re.search(rf"\(\w+\) {name}: (.*?)(?:\n```|$)", value or "", re.S)
+        state["types"][k] = m[1].strip() if m else "?"
+        state["left"] -= 1
+        if state["left"]:
+            return
+        with display_orders(state["doc"].tr.orders):
+            fields = ", ".join(f"{f}: {pretty(t)}" for f, t in zip(state["names"], state["types"]))
+        self.send_hover(state["id"], f"({fields})", state["range"])
+
+    def send_hover(self, mid, text: str, rng: dict) -> None:
+        value = f"```python\n{text}\n```" if self.hover_markdown else text
+        kind = "markdown" if self.hover_markdown else "plaintext"
+        self.client.send(
+            {"jsonrpc": "2.0", "id": mid, "result": {"contents": {"kind": kind, "value": value}, "range": rng}}
+        )
+
     def definition_in_sites(self, msg: dict, ask: tuple) -> bool:
         """Go to definition on a record field the checker answers with generated code only (a literal's field,
         its stub's keyword; a read, the class of its shape): asked again in the rename translation
@@ -2481,7 +2589,12 @@ class Proxy:
             method_doc = self.pending.pop(mid, None)
             ask = self.definition_asks.pop(mid, None)
             if (at := self.hover_at.pop(mid, None)) is not None and method_doc and isinstance(msg.get("result"), dict):
+                if method_doc[1] is not None and self.record_hover(msg, method_doc[1]):
+                    return
                 field_hover(msg["result"], method_doc[1], at)
+            if method_doc and method_doc[0] == "record_hover":
+                self.record_hover_field(msg, method_doc[1])
+                return
             if ask is not None and self.definition_in_sites(msg, ask):
                 return
             if method_doc and method_doc[0] == "references_site":
