@@ -976,6 +976,7 @@ class Proxy:
         # while a rename runs: each open document as the checker holds it then, with site classes (start_rename)
         self.site_docs: dict[Path | str, Doc] = {}
         self.site_opened: list[Path] = []  # closed .pyn files opened in the checker for a rename (start_rename)
+        self.definition_asks: dict = {}  # definition request id -> (key, params, doc), for definition_in_sites
         self.server_requests: dict = {}  # checker request id -> configuration items
         self.last_completion: Doc | None = None
         self.counter = 0  # checker-side document versions
@@ -1370,6 +1371,8 @@ class Proxy:
             mapped["position"] = vp
         elif method == "textDocument/declaration":
             msg = {**msg, "method": "textDocument/definition"}
+        if method in ("textDocument/definition", "textDocument/declaration") and mid is not None:
+            self.definition_asks[mid] = (key, params, doc)
         self.send_server({**msg, "params": mapped})
 
     def on_pyn_sync(self, msg: dict, path: Path) -> bool:
@@ -1861,6 +1864,44 @@ class Proxy:
                 pass
         return out
 
+    def definition_in_sites(self, msg: dict, ask: tuple) -> bool:
+        """Go to definition on a record field the checker answers with generated code only (a literal's field,
+        its stub's keyword; a read, the class of its shape): asked again in the rename translation
+        (start_rename), where a literal written against a type reads that type's fields and a written type
+        has its own class, so it lands on the field written in the type, as in TypeScript (finish_definition).
+        False: the answer goes as it is."""
+        result = msg.get("result")
+        locations = result if isinstance(result, list) else [result] if isinstance(result, dict) else []
+        if not locations or self.to_editor(locations, ask[2]):
+            return False
+        key, params, doc = ask
+        site = self.start_rename(key, doc, word_at(doc.tr.source, doc.tr.src_lines, params["position"]))
+        sid = f"byname-definition-{msg['id']}"
+        self.pending[sid] = ("definition_site", (msg, site))
+        mapped = {**params, "position": site.tr.position_to_hidden(params["position"])}
+        self.send_server({"jsonrpc": "2.0", "id": sid, "method": "textDocument/definition", "params": mapped})
+        return True
+
+    def finish_definition(self, answer: dict, asked: dict, site: Doc) -> None:
+        """The editor's definition request answered from the rename translation (definition_in_sites): a
+        written type's field is the name written (Result.type_fields); the rest maps as usual."""
+        result = answer.get("result")
+        out = []
+        for loc in result if isinstance(result, list) else [result] if isinstance(result, dict) else []:
+            uri, rng = loc.get("uri") or loc.get("targetUri"), loc.get("range") or loc.get("targetSelectionRange")
+            target = self.doc_for(uri) if uri else None
+            if target is not None and rng and (at := type_field_at(target.tr.hidden, rng["start"])):
+                lines = target.tr.src_lines
+                out += [
+                    {"uri": target.uri, "range": {"start": lines.position(a), "end": lines.position(b)}}
+                    for name, f, a, b in target.tr.type_fields
+                    if (name, f) == at
+                ]
+            elif (mapped := self.to_editor(loc, site)) is not DROP:
+                out.append(mapped)
+        self.end_rename()
+        self.client.send({"jsonrpc": "2.0", "id": asked["id"], "result": out})
+
     def end_rename(self) -> None:
         """The real translations back to the checker (start_rename): open documents get theirs again, and
         the files opened for the rename are closed, so the checker reads the mirror's copy again."""
@@ -2199,6 +2240,12 @@ class Proxy:
 
         if method is None:  # response to an editor request
             method_doc = self.pending.pop(mid, None)
+            ask = self.definition_asks.pop(mid, None)
+            if ask is not None and self.definition_in_sites(msg, ask):
+                return
+            if method_doc and method_doc[0] == "definition_site":
+                self.finish_definition(msg, *method_doc[1])
+                return
             if method_doc and method_doc[0] == "slot":
                 key, doc, rng, listed = method_doc[1]
                 self.client.send({**msg, "result": self.finish_slot(msg.get("result"), key, doc, rng, listed)})

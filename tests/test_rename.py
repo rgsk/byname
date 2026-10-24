@@ -263,3 +263,38 @@ def test_a_closed_file_s_literals_rename_with_another_file_s_type(client):
     uses = (root / "uses.pyn").as_uri()
     got = apply((root / "uses.pyn").read_text(), uses, edit)
     assert got == "from types_mod import Item\n\nit: Item = (code='a')\nlater = [(sku='b')]\nprint(it.code)\n"
+
+
+def definition(client, uri: str, at: dict):
+    c, _ = client
+    got = c.request("textDocument/definition", {"textDocument": {"uri": uri}, "position": at})
+    return [
+        (loc.get("uri") or loc["targetUri"], (loc.get("range") or loc["targetSelectionRange"])["start"]) for loc in got
+    ]
+
+
+def test_go_to_definition_on_a_record_field_lands_on_the_type_written(client):
+    # as in TypeScript: a literal's field written against a type, and a read, go to that type's field
+    c, root = client
+    src = "type Item = (sku: str)\n\nit: Item = (sku='a')\nprint(it.sku)\n"
+    path = root / "goto.pyn"
+    path.write_text(src)
+    uri = c.open(path)
+    c.wait_diags(uri)
+    field = (uri, pos(src, "sku: str"))
+    assert definition(client, uri, pos(src, "sku='a'")) == [field]
+    assert definition(client, uri, pos(src, "it.sku", delta=3)) == [field]
+
+
+def test_go_to_definition_reaches_a_type_in_a_closed_file(client):
+    c, root = client
+    (root / "goto_types.pyn").write_text("type Item = (sku: str)\n")
+    src = "from goto_types import Item\n\nit: Item = (sku='a')\n"
+    path = root / "goto_uses.pyn"
+    path.write_text(src)
+    made = [{"uri": (root / n).as_uri(), "type": 1} for n in ("goto_types.pyn", "goto_uses.pyn")]
+    c.send({"method": "workspace/didChangeWatchedFiles", "params": {"changes": made}})
+    uri = c.open(path)
+    c.wait_diags(uri)
+    types = (root / "goto_types.pyn").as_uri()
+    assert definition(client, uri, pos(src, "sku='a'")) == [(types, {"line": 0, "character": 13})]
