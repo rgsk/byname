@@ -174,11 +174,18 @@ def probed_from(found: list[tuple[int, int, str]], tr: "Translation", waiting: s
 class Translation:
     """A .pyn source and its hidden Python, with LSP position mapping both ways."""
 
-    def __init__(self, source: str, path: Path | None = None, probe: bool = False, probed: Probed | None = None):
+    def __init__(
+        self,
+        source: str,
+        path: Path | None = None,
+        probe: bool = False,
+        probed: Probed | None = None,
+        sites: bool = False,
+    ):
         """path: the file, whose answers `byname tool` keeps (PROBED).
         probe: wrap each unseen spread source and rest in `reveal_type(...)` (transform's probe); probed: the
         checker's answers (probed_from), which make them known. Without, those `byname tool` has for this
-        text (PROBED)."""
+        text (PROBED). sites: each record literal and record type has its own class (transform's), for a rename."""
         if probed is None and path is not None and (got := PROBED.get(path)) is not None and got[0] == source:
             probed = got[1]
         self.source = source
@@ -194,7 +201,7 @@ class Translation:
         self.unknown_rests: list[tuple[int, int]] = []  # see Result.unknown_rests
         self.labels: set[int] = set()  # where a walrus labelling a returned tuple starts (see Result.labels)
         try:
-            r = transform(source, tolerant=True, checker=True, probed=probed, probe=probe)
+            r = transform(source, tolerant=True, checker=True, probed=probed, probe=probe, sites=sites)
             body, prelude, edits = r.body, r.prelude, r.edits
             self.fields = r.fields
             self.shorthands = r.shorthands

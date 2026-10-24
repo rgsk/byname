@@ -61,6 +61,26 @@ Protocols (the NamedTuple version failed the same way), so not a regression. Lik
 parameters (old-style `TypeVar(..., covariant=True)`, silencing the "covariant in a parameter" complaint
 on `_replace`), since records are immutable; check that `_replace`'s field checking survives it.
 
+## The same fields in another order aren't the same type inside a list
+
+```python
+type Item = (sku: str, qty: int)
+def again(items: list[(qty: int, sku: str)]) -> int: ...
+typed: list[Item] = []
+again(typed)   # error: list is invariant, "Item" is not the same as "(qty: int, sku: str)"
+```
+
+The checker's classes are named by the fields in written order (`_typ_sku__qty`, `_typ_qty__sku`), so two
+orders are two classes, and pyright never takes two classes as the same type argument of an invariant
+`list`/`dict`/`set` (outside one they match by structure, so `f(x)` is fine). Older than site classes.
+**Not fixing (2026-10-24, the user's call):** order already doesn't matter where records are matched by
+structure; inside an invariant container it's a special case, and writing the type's order fixes it. Measured,
+so don't re-try: one class per field set with a generic `type` alias per written order fixes the list, but
+pyright drops a generic alias's name once specialized (`reveal_type` of `c: Item = ...` showed the shared
+class), so hover would show one order per field set instead of each definition's. Same cause, also left: a
+list of records built in another file (`[(sku=, qty=)]` passed to `ma.total(items: list[Item])`), as each file
+generates its own classes.
+
 ## A function returning records in two orders reports positional reads twice
 
 ```python

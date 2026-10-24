@@ -14,6 +14,7 @@ as the kernel runs it, under its URI in the mirror, where the checker chains cel
 """
 
 import ast
+import copy
 import json
 import keyword
 import os
@@ -924,6 +925,8 @@ class Proxy:
         self.pending: dict = {}  # editor request id -> (method, Doc)
         self.own_actions: dict = {}  # codeAction request id -> byname's quick fixes, added to the checker's
         self.rename_to: dict = {}  # rename request id -> its newName, for rename_fields
+        # while a rename runs: each open document as the checker holds it then, with site classes (start_rename)
+        self.site_docs: dict[Path | str, Doc] = {}
         self.server_requests: dict = {}  # checker request id -> configuration items
         self.last_completion: Doc | None = None
         self.counter = 0  # checker-side document versions
@@ -1020,10 +1023,12 @@ class Proxy:
         """The .pyn or byname cell a checker uri holds the translation of, at that checker version."""
         uri = self.uri_to_editor(uri)
         if isinstance(uri, str) and uri in self.docs:  # a byname notebook's cell
-            return self.pick(self.docs[uri], version)
+            return self.site_docs.get(uri) or self.pick(self.docs[uri], version)
         if not self.is_pyn(uri):
             return None
         pyn = uri_to_path(uri)
+        if site := self.site_docs.get(pyn):
+            return site
         if versions := self.docs.get(pyn):
             return self.pick(versions, version)
         try:
@@ -1297,6 +1302,8 @@ class Proxy:
             self.own_actions[mid] = actions
         if method == "textDocument/rename" and mid is not None:
             self.rename_to[mid] = params.get("newName")
+            doc = self.start_rename(key, doc)
+            self.pending[mid] = (method, doc)
         mapped = self.to_checker(params, doc)
         # on shorthand `x=`: definition -> the local x (value half); declaration -> the parameter/field
         if method == "textDocument/definition" and (vp := doc.tr.value_position(params["position"])):
@@ -1745,6 +1752,28 @@ class Proxy:
         self.send_text(key, latest.tr.hidden, latest)  # restore the real text
         self.complete_plainly(msg, doc)
 
+    def start_rename(self, key: Path | str, doc: Doc) -> Doc:
+        """The checker gets every open document translated with site classes (transform's `sites`) until the
+        rename is answered (end_rename), so renaming `r.name` reaches only the literal or type `r` came from.
+        The real translation shares one class per shape: with a class per site, a list of literals wouldn't
+        fit `list[Item]` (list is invariant). Returns the document the request is mapped through."""
+        with self.text_lock:
+            for k, versions in self.docs.items():
+                d = versions[-1]
+                site = copy.copy(d)
+                site.tr = Translation(d.tr.source, d.path, probed=d.tr.probed, sites=True)
+                self.site_docs[k] = site
+                self.send_text(k, site.tr.hidden, None)
+        return self.site_docs.get(key, doc)
+
+    def end_rename(self) -> None:
+        """The real translations back to the checker (start_rename)."""
+        with self.text_lock:
+            for k in self.site_docs:
+                if versions := self.docs.get(k):
+                    self.send_text(k, versions[-1].tr.hidden, versions[-1])
+            self.site_docs.clear()
+
     def rename_fields(self, msg: dict, doc: Doc | None) -> bool:
         """A rename that reaches a record field's declaration (field_declarations) renames its other
         declarations too, so a read and the literal it reads go together: `r.name` and `(name=)` are two
@@ -1801,6 +1830,7 @@ class Proxy:
         if result is not DROP:
             for u, e in written:
                 add_workspace_edit(result, u, e)
+        self.end_rename()
         self.client.send({**msg, "result": None if result is DROP else result})
 
     def complete_plainly(self, msg: dict, doc: Doc) -> None:
@@ -2093,6 +2123,8 @@ class Proxy:
                 doc, cursor = method_doc[1]
                 self.client.send({**msg, "result": self.finish_after_comma(msg.get("result"), doc, cursor)})
                 return
+            if method_doc and method_doc[0] == "textDocument/rename" and not isinstance(msg.get("result"), dict):
+                self.end_rename()  # no edits (or an error): nothing to map through the site translation
             if (own := self.own_actions.pop(mid, None)) and "result" in msg:
                 result = self.to_editor(msg["result"], method_doc[1]) if msg["result"] else []
                 # ours first: they keep the code readable, where the checker offers an ignore comment

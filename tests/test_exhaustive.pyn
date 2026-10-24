@@ -655,6 +655,34 @@ def test_a_field_takes_a_narrower_type_as_a_tuple_does(tmp_path):
     assert "list" in verdicts[12]
 
 
+def test_records_of_one_shape_are_one_type_inside_a_list(tmp_path):
+    # list and dict are invariant: their items must be the same type, not one that fits. Records of one
+    # shape are, wherever they were written: a list of literals is a list[Item], and Item's list is a
+    # list of the same type written inline. The wrong shape is still an error. (Not yet: the same fields
+    # in another order, see open_issues.md)
+    verdicts = checker(
+        """\
+        type Item = (sku: str, qty: int)
+        type Order = (id: int, customer: (name: str), items: list[Item])
+        def total(items: list[Item]) -> int: ...
+        def again(items: list[(sku: str, qty: int)]) -> int: ...
+        def by_sku(d: dict[str, (sku: str, qty: int)]) -> None: ...
+        def bill(order: Order) -> None: ...
+        xs = [(sku="pen", qty=3)]
+        total(xs)
+        typed: list[Item] = xs
+        again(typed)
+        by_sku({"pen": xs[0]})
+        one = (id=5, customer=(name="dev"), items=[(sku="cap", qty=1)])
+        bill(one)
+        total([(sku="pen")])
+        """,
+        tmp_path,
+    )
+    assert sorted(verdicts) == [14]  # lines 8-13 are fine
+    assert "missing field: qty" in verdicts[14]
+
+
 def test_an_open_type_takes_at_least_its_fields(tmp_path):
     verdicts = checker(
         """\

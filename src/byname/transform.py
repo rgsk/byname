@@ -316,6 +316,9 @@ def site_class(name: str, n: int | str) -> str:
     `_typ_name___3`. Records match by shape, so sites with the same fields are still the same type; but each
     has its own fields, so a rename reaches only the records that came from that site: renaming `r.name`
     renames the literal `r` was made from, not another record that happens to have a `name` field.
+    Literals and written types get one only in a rename's translation (transform's `sites`): to pyright two
+    classes are never the same type argument of an invariant `list`/`dict`/`set`, so `xs = [(sku="a")]` didn't
+    fit `list[Item]`. An open build (open_build) always has its own: its class carries SPREAD's marker.
     n may carry SPREAD's marker, `3_spread__u`: the error on a field it lacks says where it came from."""
     return f"{name}___{n}"
 
@@ -846,6 +849,7 @@ def transform(
     untyped: set[tuple[int, int]] | None = None,
     probed: dict[tuple[str, int], Known] | None = None,
     probe: bool = False,
+    sites: bool = False,
 ) -> Result:
     """tolerant (editor only): a half-typed pattern item like `na` in `(name=, na) = r` becomes
     `_ds.na` instead of an error, so the checker can complete field names there.
@@ -853,7 +857,9 @@ def transform(
     known: fields of names read in the file, by (name, line) (known_fields); set by the checker translation's second pass.
     untyped: spread records built where no type is expected (untyped_builds); set by that second pass too.
     probed: the checker's types of what the file doesn't show (Result.unseen), for known_fields.
-    probe: wrap each unseen source in `reveal_type(...)`, so the checker prints its type (srcmap.probed_from)."""
+    probe: wrap each unseen source in `reveal_type(...)`, so the checker prints its type (srcmap.probed_from).
+    sites (checker): each record literal and written record type gets its own class (site_class), for a
+    rename only; without, records of one shape share their class, so `list[Item]` takes a list of literals."""
     toks = [
         t for t in tokenize.generate_tokens(io.StringIO(src).readline) if t.type not in (tokenize.COMMENT, tokenize.NL)
     ]
@@ -919,16 +925,16 @@ def transform(
     standins: list[tuple[int, int, str]] = []
     field_spans: list[tuple[int, int]] = []  # every record field name: in records, patterns and record types
     shorthand_spans: list[tuple[int, int]] = []  # every bare `x=`, see Result.shorthands
-    sites: list[tuple[tuple[str, ...], bool, bool]] = []  # checker: (fields, is_open, is_literal), see site_class
+    site_list: list[tuple[tuple[str, ...], bool, bool]] = []  # checker: (fields, is_open, is_literal), see site_class
     spread_marks: dict[int, str] = {}  # checker: site -> SPREAD's marker (open_build)
     unseen: list[tuple[str, int]] = []  # checker: Result.unseen
     type_fields: list[tuple[str, str, int, int]] = []  # see Result.type_fields
 
     def literal_class(fields: tuple[str, ...]) -> str:
-        if not checker or portable:
+        if not checker or portable or not sites:
             return record_class(fields)
-        sites.append((fields, False, True))
-        return site_class(record_class(fields), len(sites) - 1)
+        site_list.append((fields, False, True))
+        return site_class(record_class(fields), len(site_list) - 1)
 
     label_spans: list[tuple[int, int]] = []  # `x` in `return (x := ..., ...)`: bound to name a position, never read
 
@@ -1090,14 +1096,14 @@ def transform(
             return got is not None and got.is_open
 
         types[(fields, True)] = None
-        sites.append((fields, True, True))
+        site_list.append((fields, True, True))
         # the sources whose fields byname can't see: not an open record it knows, which is open by design
         unseen_its = [it for it in its if toks[it[0]].string == "**" and not is_open_known(it)]
         if unseen_its:
             bare = [toks[it[1]].string for it in unseen_its if len(it) == 2 and is_name(toks[it[1]])]
-            spread_marks[len(sites) - 1] = SPREAD + "".join(f"__{x}" for x in bare)
+            spread_marks[len(site_list) - 1] = SPREAD + "".join(f"__{x}" for x in bare)
         g0 = span(i)[0]
-        site = f"{len(sites) - 1}{spread_marks.get(len(sites) - 1, '')}"
+        site = f"{len(site_list) - 1}{spread_marks.get(len(site_list) - 1, '')}"
         edits.append(Edit(g0, g0, site_class(record_class(fields), site), (g0, g0 + 1)))
         for it in its:
             if toks[it[0]].string == "**":
@@ -1548,9 +1554,9 @@ def transform(
                 edits.append(Edit(*group, type_class(fields, is_open), group))
                 continue
             name = type_class(fields, is_open)
-            if checker and not portable:
-                sites.append((fields, is_open, False))
-                name = site_class(name, len(sites) - 1)
+            if checker and not portable and sites:
+                site_list.append((fields, is_open, False))
+                name = site_class(name, len(site_list) - 1)
                 type_fields.extend((name, toks[it[0]].string, *span(it[0])) for it in named)
             edits.append(Edit(group[0], group[0] + 1, name + "[", group))
             edits.append(Edit(group[1] - 1, group[1], "]", group))
@@ -1735,7 +1741,7 @@ def transform(
     if checker and known is None and (builds or omit_used):
         k, u = known_fields(body, probed), untyped_builds(body)
         if k or u or probe or probed:
-            return transform(src, path, tolerant, portable, checker, k, u, probed, probe)
+            return transform(src, path, tolerant, portable, checker, k, u, probed, probe, sites)
 
     def base_prelude() -> str:
         # the checker's translation never runs, so it doesn't read the project's config
@@ -1749,7 +1755,7 @@ def transform(
         prelude = base_prelude()
         if not portable:
             dicts = dict.fromkeys([*records, *(f for f, o in types if not o)])
-            arity = max(len(f) for f in [*records, *(f for f, _ in types), *(s[0] for s in sites)])
+            arity = max(len(f) for f in [*records, *(f for f, _ in types), *(s[0] for s in site_list)])
             prelude += CHECKER_DIRECTIVE + TYPED_PRELUDE + covariant_defs(arity)
             prelude += "".join(dict_def(f) for f in dicts)
         if not portable:  # in the checker, each record is its exact type (see record_def)
@@ -1760,7 +1766,7 @@ def transform(
             prelude += "".join(f"type {key_alias(f)} = str\n" for f in dict.fromkeys(f for f, _ in types))
         prelude += "".join(type_def(f, o, portable) for f, o in types)
         prelude += "".join(record_def(f, portable) for f in records)
-        for n, (f, is_open, literal) in enumerate(sites):
+        for n, (f, is_open, literal) in enumerate(site_list):
             prelude += site_def(f, is_open, f"{n}{spread_marks.get(n, '')}", literal)
     if builds or kw_used or omit_used:
         if not prelude:

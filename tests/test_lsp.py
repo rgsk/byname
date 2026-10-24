@@ -1767,12 +1767,12 @@ def test_a_save_updates_its_own_copy_without_walking_the_project(tmp_path, monke
     (root / "a.pyn").write_text("x = (a=1, b=2)\n")
     saved = [{"uri": (root / "a.pyn").as_uri(), "type": 2}]
     assert proxy.watched(saved) == [{"uri": (proxy.mirror / "a.py").as_uri(), "type": 2}]
-    assert "_rec_a__b___" in (proxy.mirror / "a.py").read_text()
+    assert "x = _rec_a__b(" in (proxy.mirror / "a.py").read_text()
     (root / "c.pyn").write_text("y = 1\n")
     proxy.probe_changed = {root / "a.pyn", root / "c.pyn"}
     proxy.run_probe()
     assert walks == ["lsp-probe"] and asked[-1] == ["a.pyn", "b.pyn", "c.pyn"]
-    assert "_rec_a__b___" in (tools.mirror_dir(root, "lsp-probe") / "a.py").read_text()
+    assert "x = _rec_a__b(" in (tools.mirror_dir(root, "lsp-probe") / "a.py").read_text()
 
     # made, removed, many at once (git, a script): synced whole, as anything may have changed
     (root / "b.pyn").unlink()
@@ -1807,7 +1807,7 @@ def test_a_probe_s_answer_is_a_publish_that_has_one(tmp_path):
     proxy.probed(doc, path, [stale, answer, mark])
     final = proxy.docs[path][-1]
     assert final is not doc and not final.probing
-    assert "moved = _rec_name__zip___" in final.tr.hidden and "reveal_type" not in final.tr.hidden
+    assert "moved = _rec_name__zip(" in final.tr.hidden and "reveal_type" not in final.tr.hidden
     unreachable = Doc(path.as_uri(), text, 1, probe=True)
     proxy.docs[path] = [unreachable]
     assert proxy.probed(unreachable, path, [stale]) and proxy.probed(unreachable, path, [stale])
@@ -1832,7 +1832,7 @@ def test_a_probe_s_answer_is_a_publish_that_has_one(tmp_path):
     proxy.docs[path] = [retyped]
     other = {**same, "message": 'Type of "u" is "_typ_name__age___0[str, int]"'}
     assert proxy.probed(retyped, path, [other, mark])
-    assert "_rec_name__age__zip___" in proxy.docs[path][-1].tr.hidden
+    assert "moved = _rec_name__age__zip(" in proxy.docs[path][-1].tr.hidden
     proxy.proc.kill()
 
 

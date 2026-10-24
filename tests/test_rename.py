@@ -146,3 +146,21 @@ def test_renaming_a_field_of_a_spread_record_of_known_names_reaches_where_it_is_
     src = "u = (a=1)\nr = (**u, b=2)\nprint(r.b)\n"
     got = rename(client, "known.pyn", src, pos(src, "r.b", delta=2), "c")
     assert got == "u = (a=1)\nr = (**u, c=2)\nprint(r.c)\n"
+
+
+def test_a_rename_gives_the_checker_back_the_real_translation(client):
+    # the rename runs on a translation with a class per site (Proxy.start_rename), where a list of literals
+    # isn't a list[Item] (list is invariant); after it, the file's diagnostics are the real translation's
+    c, root = client
+    src = "type Item = (sku: str)\n\n\ndef f(xs: list[Item]) -> int:\n    return len(xs)\n\n\nxs = [(sku='a')]\nprint(f(xs), xs[0].sku)\n"
+    path = root / "invariant.pyn"
+    path.write_text(src)
+    uri = c.open(path)
+    assert c.wait_diags(uri) == []
+    c.diags.pop(uri)
+    edit = c.request(
+        "textDocument/rename",
+        {"textDocument": {"uri": uri}, "position": pos(src, "xs[0].sku", delta=6), "newName": "code"},
+    )
+    assert apply(src, uri, edit) == src.replace("(sku='a')", "(code='a')").replace(".sku", ".code")
+    assert c.wait_diags(uri) == []
