@@ -618,8 +618,8 @@ LITERAL_SITE_RE = re.compile(r"_rec_\w*?___(\d+)$")
 def typed_literals(body: str) -> set[int]:
     """Rename translation, first pass: the sites (site_class numbers) of the record literals written where a
     type is expected: the value of `x: T = ...`, of a `return` under `-> T` (not in a generator), a call's
-    argument (not a field of another literal: a record's stub takes any type), and an item of a list, set,
-    tuple or dict display in one of those. There the type is the literal's own too, so a rename of either
+    argument (not a field of another literal: a record's stub takes any type; the outer literal reads
+    those, field_reads), and an item of a list, set, tuple or dict display in one of those. There the type is the literal's own too, so a rename of either
     reaches the other, as in TypeScript (see `typed` in transform); elsewhere `_byname_ctx` would have nothing to solve from."""
     tree = parse_around_errors(body)
     if tree is None:
@@ -966,6 +966,51 @@ def transform(
 
     def is_short(item: list[int]) -> bool:
         return len(item) == 2 and is_kw(item)
+
+    def literal_items(item: list[int]) -> list[list[int]] | None:
+        """The items of a record literal that is the whole of `item`, `(name=..., ...)`; else None."""
+        if not item or item[0] not in pair or pair[item[0]] != item[-1] or toks[item[0]].string != "(":
+            return None
+        inner = items(item[0])
+        return inner if inner and all(is_kw(x) for x in inner) else None
+
+    def field_reads(its: list[list[int]], path: str) -> list[tuple[str, tuple[int, int]]]:
+        """For a literal written against a type (`typed`): a read off `path` for each field written, and for
+        the fields of the literals nested in its values (value_reads). Each with the source span of the
+        field name it stands for."""
+        out = []
+        for it in its:
+            if is_kw(it):
+                read = f"{path}.{toks[it[0]].string}"
+                out.append((read, span(it[0])))
+                out += value_reads(it[2:], read)
+        return out
+
+    def value_reads(value: list[int], path: str) -> list[tuple[str, tuple[int, int]]]:
+        """The field reads of the record literals in a value read as `path`: the value itself, or an item of
+        a list or tuple (`path[0]`), a dict (`path[<key as written>]`) or a set (`next(iter(path))`) display,
+        nested to any depth: `_byname_t.c.name_op`, `_byname_t.by_code["pen"].sku`."""
+        if (inner := literal_items(value)) is not None:
+            return field_reads(inner, path)
+        if not value or value[0] not in pair or pair[value[0]] != value[-1]:
+            return []
+        out, kind = [], toks[value[0]].string
+        for k, x in enumerate(items(value[0])):
+            if not x or toks[x[0]].string in ("*", "**"):
+                continue
+            colon = next((j for j, t in enumerate(x) if toks[t].string == ":" and not depth_in(x, j)), None)
+            if kind == "{" and colon is not None:  # a dict: the key copied, the value read
+                key = src[off(toks[x[0]].start) : off(toks[x[colon - 1]].end)]
+                out += value_reads(x[colon + 1 :], f"{path}[{key}]")
+            elif kind == "{":
+                out += value_reads(x, f"next(iter({path}))")
+            else:
+                out += value_reads(x, f"{path}[{k}]")
+        return out
+
+    def depth_in(item: list[int], j: int) -> bool:
+        """Is item[j] inside a bracket nested in the item?"""
+        return any(item[i] in pair and item[i] < item[j] < pair[item[i]] for i in range(j))
 
     edits: list[Edit] = []
     records: dict[tuple[str, ...], None] = {}  # ordered set
@@ -1743,11 +1788,9 @@ def transform(
             # the type expected here, so `_byname_t.name` is a read of its field, marked on the `name` written:
             # a rename of the type's field reaches the literal, and one from the literal reaches the type
             head, marks = "_byname_ctx(lambda _byname_t: (", []
-            for it in its:
-                a, b = span(it[0])
-                head += "_byname_t."
-                marks.append(Mark(len(head), len(head) + b - a, a, b))
-                head += toks[it[0]].string + ", "
+            for path, (a, b) in field_reads(its, "_byname_t"):
+                marks.append(Mark(len(head) + len(path) - (b - a), len(head) + len(path), a, b))
+                head += path + ", "
             edits.append(Edit(at, at, head, (at, at + 1), marks))
             ctx_used = True
         edits.append(Edit(at, at, literal_class(fields), (at, at + 1)))

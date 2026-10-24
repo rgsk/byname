@@ -212,3 +212,30 @@ def test_a_spread_of_a_renamed_record_stays_as_written(client):
     got = rename(client, "spread.pyn", src, pos(src, "name: str"), "who")
     assert got.splitlines()[3] == "    moved = (**u, sex='m')"
     assert got.splitlines()[0] == "type User = (who: str, age: int)"
+
+
+def test_a_literal_nested_in_a_typed_literal_renames_with_its_type(client):
+    # inside `o: Order = (...)` the nested literals are Order's fields' types: `_byname_t.c.name_op` and
+    # `_byname_t.items[0].sku` read them (transform's field_reads)
+    src = (
+        "type Customer = (name_op: str)\ntype Item = (sku: str)\n"
+        "type Order = (id: int, c: Customer, items: list[Item])\n"
+        "o: Order = (id=1, c=(name_op='s'), items=[(sku='a'), (sku='b')])\n"
+    )
+    got = rename(client, "nested.pyn", src, pos(src, "name_op: str"), "name")
+    assert got == src.replace("name_op", "name")
+    got = rename(client, "nested.pyn", src, pos(src, "name_op='"), "name")
+    assert got == src.replace("name_op", "name")
+    got = rename(client, "nested.pyn", src, pos(src, "sku='b'"), "code")
+    assert got == src.replace("sku", "code")
+
+
+def test_a_literal_nested_in_any_display_renames_with_its_type(client):
+    # in a dict (read with its key as written), a set (`next(iter(...))`), a tuple, and nested displays
+    src = (
+        "type Item = (sku: str)\n"
+        "type Order = (by_code: dict[str, Item], tags: set[Item], pair: tuple[Item, Item], deep: list[dict[str, Item]])\n"
+        "o: Order = (by_code={'pen': (sku='a')}, tags={(sku='b')}, pair=((sku='c'), (sku='d')), deep=[{'x': (sku='e')}])\n"
+    )
+    assert rename(client, "displays.pyn", src, pos(src, "sku: str"), "code") == src.replace("sku", "code")
+    assert rename(client, "displays.pyn", src, pos(src, "sku='a'"), "code") == src.replace("sku", "code")
