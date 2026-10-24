@@ -2141,12 +2141,13 @@ class Proxy:
         self.end_rename()
         self.client.send({"jsonrpc": "2.0", "id": state["msg"]["id"], "result": out})
 
-    def record_hover(self, msg: dict, doc: Doc) -> bool:
+    def record_hover(self, msg: dict, doc: Doc, pos: dict) -> bool:
         """A hover the checker answers with what a record literal or a record type written is to it: a
-        generic `_rec_` function (anywhere in a literal's brackets: its blank lines too) or the `_typ_` alias
-        of a type's written order. Shown as the record instead: a type as written; a literal as its fields'
-        types, in its own order, asked of the checker field by field (record_hover_field), as hovering each
-        field shows it. False: the answer goes as it is."""
+        generic `_rec_` function or the `_typ_` alias of a type's written order. On the `(`, shown as the
+        record instead: a type as written; a literal as its fields' types, in its own order, asked of the
+        checker field by field (record_hover_field), as hovering each field shows it. Elsewhere between a
+        literal's brackets (a multi-line one's blank lines) the checker answers the same: nothing is shown
+        there, the bracket being where to ask. False: the answer goes as it is."""
         result = msg["result"]
         contents = result.get("contents")
         value = contents.get("value") if isinstance(contents, dict) else None
@@ -2163,6 +2164,9 @@ class Proxy:
             return True
         if not ("(function)" in value and re.search(r"\b_rec_\w+", value)) or src[start : start + 1] != "(":
             return False
+        if lines.offset(pos["line"], pos["character"]) != start:  # inside, not on its `(`: no hover
+            self.client.send({"jsonrpc": "2.0", "id": msg["id"], "result": None})
+            return True
         fields, close = literal_fields(src, start)
         if not fields:
             return False
@@ -2589,7 +2593,7 @@ class Proxy:
             method_doc = self.pending.pop(mid, None)
             ask = self.definition_asks.pop(mid, None)
             if (at := self.hover_at.pop(mid, None)) is not None and method_doc and isinstance(msg.get("result"), dict):
-                if method_doc[1] is not None and self.record_hover(msg, method_doc[1]):
+                if method_doc[1] is not None and self.record_hover(msg, method_doc[1], at):
                     return
                 field_hover(msg["result"], method_doc[1], at)
             if method_doc and method_doc[0] == "record_hover":

@@ -297,9 +297,9 @@ def test_hover_shows_each_record_in_the_order_it_was_written(lsp):
 
 
 def test_hover_on_a_record_s_brackets_shows_the_record(lsp):
-    # the checker answers with what byname made of it: a literal's generic `_rec_` function (on its `(`, or
-    # anywhere between its brackets), a written type's `_typ_` alias or class. Shown as the record: a literal
-    # as its fields' types in its own order (Proxy.record_hover), a type as written
+    # the checker answers with what byname made of it: a literal's generic `_rec_` function, a written type's
+    # `_typ_` alias or class. On the `(`, shown as the record: a literal as its fields' types in its own order
+    # (Proxy.record_hover), a type as written; on a blank between a literal's brackets, nothing
     c, root, _ = lsp
     src = (
         "def total(items: list[(sku: str, qty: int)], b: (age: int, n: str)) -> int:\n    return 0\n\n\n"
@@ -310,7 +310,7 @@ def test_hover_on_a_record_s_brackets_shows_the_record(lsp):
     uri = c.open(path)
     c.wait_diags(uri)
     assert hover_text(c, uri, pos(src, "(\n        name")) == "(name: str, age: (n: int))"
-    assert hover_text(c, uri, {"line": 6, "character": 2}) == "(name: str, age: (n: int))"  # a blank inside it
+    assert hover_text(c, uri, {"line": 6, "character": 2}) == ""  # a blank inside it: nothing, the `(` is where
     assert hover_text(c, uri, pos(src, "(n=1)")) == "(n: int)"
     assert hover_text(c, uri, pos(src, "(qty=1")) == "(qty: int, sku: str)"  # its own order
     assert hover_text(c, uri, pos(src, "(sku: str")) == "(type) (sku: str, qty: int)"
