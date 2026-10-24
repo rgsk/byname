@@ -780,6 +780,28 @@ def type_field_at(hidden: str, pos: dict) -> tuple[str, str] | None:
     return None
 
 
+def written_field(doc: "Doc", pos: dict) -> tuple[str, str, int, int] | None:
+    """If `pos` (source) is on a field name written in a record type, `label` in `(label: str)`: its
+    (class, field, start, end) in the site translation (Result.type_fields). The checker has no text there
+    (the type becomes `_typ_label___3[str]`), so a rename from it starts at its class's declaration."""
+    tr = doc.tr if doc.tr.type_fields else Translation(doc.tr.source, doc.path, probed=doc.tr.probed, sites=True)
+    off = tr.src_lines.offset(pos["line"], pos["character"])
+    return next((f for f in tr.type_fields if f[2] <= off <= f[3]), None)
+
+
+def type_field_declaration(hidden: str, cls: str, field: str) -> dict | None:
+    """Where `field` is declared in the record type class `cls` (hidden), `    label: _Fi[...]`."""
+    lines = hidden.split("\n")
+    for k, text in enumerate(lines):
+        if text.startswith(f"class {cls}("):
+            for j in range(k + 1, len(lines)):
+                if not lines[j].startswith("    "):
+                    return None
+                if lines[j].startswith(f"    {field}: _Fi["):
+                    return {"line": j, "character": 4}
+    return None
+
+
 def workspace_edits(edit) -> list[tuple[str, dict]]:
     """(uri, TextEdit) for every text edit of a WorkspaceEdit, `changes` or `documentChanges`."""
     if not isinstance(edit, dict):
@@ -789,6 +811,21 @@ def workspace_edits(edit) -> list[tuple[str, dict]]:
         if "edits" in dc:
             out += [(dc["textDocument"]["uri"], e) for e in dc["edits"]]
     return out
+
+
+def drop_generated(edit: dict, doc_for) -> None:
+    """A rename's edits that fall on generated text only (Translation.only_generated) are removed: the
+    checker renamed a field byname reads for the user, and the source has nothing there to rename."""
+
+    def keep(uri: str, e: dict) -> bool:
+        target = doc_for(uri)
+        return target is None or not target.tr.only_generated(e["range"])
+
+    for u, es in (edit.get("changes") or {}).items():
+        es[:] = [e for e in es if keep(u, e)]
+    for dc in edit.get("documentChanges") or []:
+        if "edits" in dc:
+            dc["edits"] = [e for e in dc["edits"] if keep(dc["textDocument"]["uri"], e)]
 
 
 def add_workspace_edit(edit: dict, uri: str, e: dict) -> None:
@@ -1300,11 +1337,22 @@ class Proxy:
             return
         if method == "textDocument/codeAction" and mid is not None and (actions := self.by_name_actions(params, doc)):
             self.own_actions[mid] = actions
+        if (
+            method == "textDocument/prepareRename"
+            and mid is not None
+            and (at := written_field(doc, params["position"]))
+        ):
+            self.pending.pop(mid, None)
+            rng = {"start": doc.tr.src_lines.position(at[2]), "end": doc.tr.src_lines.position(at[3])}
+            self.client.send({"jsonrpc": "2.0", "id": mid, "result": {"range": rng, "placeholder": at[1]}})
+            return
         if method == "textDocument/rename" and mid is not None:
             self.rename_to[mid] = params.get("newName")
             doc = self.start_rename(key, doc)
             self.pending[mid] = (method, doc)
         mapped = self.to_checker(params, doc)
+        if method == "textDocument/rename" and (at := written_field(doc, params["position"])):
+            mapped["position"] = type_field_declaration(doc.tr.hidden, at[0], at[1]) or mapped["position"]
         # on shorthand `x=`: definition -> the local x (value half); declaration -> the parameter/field
         if method == "textDocument/definition" and (vp := doc.tr.value_position(params["position"])):
             mapped["position"] = vp
@@ -1826,6 +1874,7 @@ class Proxy:
                     for name, f, a, b in target.tr.type_fields
                     if (name, f) == at
                 ]
+        drop_generated(edit, self.doc_for)
         result = self.to_editor(edit, doc)
         if result is not DROP:
             for u, e in written:

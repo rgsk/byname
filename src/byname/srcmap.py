@@ -377,6 +377,17 @@ class Translation:
             return None
         return {"start": self.src_lines.position(a[0]), "end": self.src_lines.position(b[0] + 1)}
 
+    def only_generated(self, r: dict) -> bool:
+        """The range is on text byname wrote that isn't a copy of what the user wrote there: `.name` in the
+        reads a spread `(**u, x=1)` becomes (shown on `u`). A copy is the user's: a field written next to a
+        spread, generated over its own name, and a shorthand's value half `x` (an insertion after `x=`)."""
+        hs = self.hid_lines.offset(r["start"]["line"], r["start"]["character"])
+        he = self.hid_lines.offset(r["end"]["line"], r["end"]["character"])
+        a = self._from_hidden(hs, False)
+        if a is None or (span := generated(a[1])) is None or (a[1] is not None and a[1][0].kind == "shorthand"):
+            return False
+        return self.source[span[0] : span[1]] != self.hidden[hs:he]
+
     def range_from_hidden(self, r: dict, display: bool = False) -> dict | None:
         """display=True (diagnostics): a range on generated text widens to the source it came from.
         display=False (edits, locations): it collapses to the insertion point, so a rename of `x`

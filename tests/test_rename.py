@@ -164,3 +164,40 @@ def test_a_rename_gives_the_checker_back_the_real_translation(client):
     )
     assert apply(src, uri, edit) == src.replace("(sku='a')", "(code='a')").replace(".sku", ".code")
     assert c.wait_diags(uri) == []
+
+
+def test_renaming_a_field_from_the_type_written_reaches_its_reads(client):
+    # the checker has no text at `label` in `(label: str)` (it's the type's class); the proxy answers
+    # prepareRename and starts the rename at the class's field (Proxy.written_field). Another record of
+    # that shape (make's) is left alone, and so is the literal passed, as from a read
+    c, root = client
+    src = (
+        "def make():\n    return (label='x')\n\n\n"
+        "def show(q: (label: str)) -> str:\n    return q.label\n\n\n"
+        "show((label='y'))\n"
+    )
+    at = pos(src, "label: str")
+    path = root / "fromtype.pyn"
+    path.write_text(src)
+    uri = c.open(path)
+    c.wait_diags(uri)
+    got = c.request("textDocument/prepareRename", {"textDocument": {"uri": uri}, "position": at})
+    assert got == {"range": {"start": at, "end": {**at, "character": at["character"] + 5}}, "placeholder": "label"}
+    assert rename(client, "fromtype.pyn", src, at, "who") == src.replace("(label: str)", "(who: str)").replace(
+        "q.label", "q.who"
+    )
+
+
+def test_renaming_a_field_of_a_type_alias_reaches_everything_typed_by_it(client):
+    src = "type Item = (sku: str, qty: int)\n\n\ndef code(it: Item) -> str:\n    (sku=) = it\n    return sku + it.sku\n"
+    got = rename(client, "alias.pyn", src, pos(src, "sku: str"), "code")
+    assert got == src.replace("(sku: str", "(code: str").replace("(sku=)", "(code=sku)").replace("it.sku", "it.code")
+
+
+def test_a_spread_of_a_renamed_record_stays_as_written(client):
+    # `(**user, sex=...)` is `name=(_byname_v0 := user).name, ...` to the checker: the field it reads is
+    # generated, so the rename has nothing to write there
+    src = "type User = (name: str, age: int)\nuser: User = (name='r', age=1)\nfor u in [user]:\n    moved = (**u, sex='m')\n    print(moved.name)\n"
+    got = rename(client, "spread.pyn", src, pos(src, "name: str"), "who")
+    assert got.splitlines()[3] == "    moved = (**u, sex='m')"
+    assert got.splitlines()[0] == "type User = (who: str, age: int)"
