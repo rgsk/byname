@@ -186,9 +186,14 @@ def lsp(tmp_path_factory):
     c.close()
 
 
-def hover_text(c, uri, p) -> str:
+def hover_text(c, uri, p, laid_out: bool = False) -> str:
+    """A hover's text; a record laid out a field per line (lsp.layout_records) joined back onto one line, as
+    most tests are about what a hover says, not its layout (laid_out: as sent)."""
     h = c.request("textDocument/hover", {"textDocument": {"uri": uri}, "position": p})
-    return h["contents"]["value"] if h else ""
+    text = h["contents"]["value"] if h else ""
+    if laid_out:
+        return text
+    return text.replace("(\n    ", "(").replace(",\n    ", ", ").replace(",\n)", ")")
 
 
 def test_spread_of_an_imported_record_type_follows_its_module(lsp):
@@ -241,7 +246,7 @@ def test_hover_in_a_record_call_shows_the_record_type_and_the_function(lsp):
     path.write_text(RECORD_CALL)
     rec_uri = c.open(path)
     want = "Config = (\n    n_layer: int,\n    dropout: float,\n)"  # as declared, a field a line (Proxy.alias_hover)
-    assert want in hover_text(c, rec_uri, pos(RECORD_CALL, "Config,"))
+    assert want in hover_text(c, rec_uri, pos(RECORD_CALL, "Config,"), laid_out=True)
     assert "def record(" in hover_text(c, rec_uri, pos(RECORD_CALL, "record(C"))
     assert "cfg: Config" in hover_text(c, rec_uri, pos(RECORD_CALL, "cfg ="))  # named by its alias, as with cast
 
@@ -334,11 +339,30 @@ def test_hover_on_a_record_type_alias_shows_it_as_written(lsp):
     uri = c.open(path)
     c.wait_diags(uri)
     want = "(type) Order = (\n    id: int,\n    items: list[Item],\n)"  # a field a line, as TypeScript shows it
-    assert hover_text(c, uri, pos(src, "Order\n")) == want
-    assert hover_text(c, uri, pos(src, "Order =")) == want
+    assert hover_text(c, uri, pos(src, "Order\n"), laid_out=True) == want
+    assert hover_text(c, uri, pos(src, "Order ="), laid_out=True) == want
     types = c.open(root / "alias_types.pyn")  # and on its own declaration
     c.wait_diags(types)
-    assert hover_text(c, types, {"line": 1, "character": 6}) == want
+    assert hover_text(c, types, {"line": 1, "character": 6}, laid_out=True) == want
+
+
+def test_a_record_type_in_a_hover_has_a_field_a_line(lsp):
+    # as TypeScript shows an object type (lsp.layout_records): a variable's, a list's item's, a literal's on its
+    # `(`; a record in another's field stays on that field's line, and a function's parameters are left
+    c, root, _ = lsp
+    src = "u = (name='r', home=(city='p'))\nus = [u]\n\n\ndef f(a: int) -> int:\n    return a\n"
+    path = root / "layout.pyn"
+    path.write_text(src)
+    uri = c.open(path)
+    c.wait_diags(uri)
+    want = "(variable) u: (\n    name: str,\n    home: (city: str),\n)"
+    assert hover_text(c, uri, pos(src, "u ="), laid_out=True) == want
+    assert (
+        hover_text(c, uri, pos(src, "us ="), laid_out=True)
+        == "(variable) us: list[(\n    name: str,\n    home: (city: str),\n)]"
+    )
+    assert hover_text(c, uri, pos(src, "(name"), laid_out=True) == "(\n    name: str,\n    home: (city: str),\n)"
+    assert "(\n" not in hover_text(c, uri, pos(src, "f(a"), laid_out=True)
 
 
 def test_hover_renamed_local(lsp):

@@ -847,6 +847,42 @@ def alias_declaration(src: str, at: int, name: str) -> str | None:
     return record_lines(text) if text else None
 
 
+RECORD_OPEN_RE = re.compile(r"\((?=\s*(?:\.\.\.|\w+\s*:))")  # a record type's `(`: `(name: ...` or `(..., ...`
+NOT_A_TYPE_RE = re.compile(r"^\s*(?:\((?:function|method)\)|def |class |async def )")
+
+
+def layout_records(text: str) -> str:
+    """Each record type at the top of a hover's type laid out a field per line (record_lines), as TypeScript
+    shows an object type: `(variable) u: (name: str)`, `list[(name: str)]`. A record in another's field stays
+    on that field's line. A function's signature is left: its `(a: int)` is a parameter list."""
+    if NOT_A_TYPE_RE.match(text):
+        return text
+    out, i = [], 0
+    while m := RECORD_OPEN_RE.search(text, i):
+        depth, k = 0, m.start()
+        while k < len(text):
+            depth += (text[k] in "([{") - (text[k] in ")]}")
+            if depth == 0:
+                break
+            k += 1
+        out.append(text[i : m.start()] + record_lines(text[m.start() : k + 1]))
+        i = k + 1
+    return "".join(out) + text[i:]
+
+
+def layout_hover(result: dict) -> None:
+    """The checker's hover with its record types laid out (layout_records): the first code block of a markdown
+    one, the first line of a plain one."""
+    contents = result.get("contents")
+    if not isinstance(contents, dict) or not isinstance(value := contents.get("value"), str):
+        return
+    if m := re.search(r"```python\n(.*?)\n```", value, re.S):
+        contents["value"] = value[: m.start(1)] + layout_records(m[1]) + value[m.end(1) :]
+    else:
+        first, _, rest = value.partition("\n")
+        contents["value"] = layout_records(first) + ("\n" + rest if rest else "")
+
+
 def record_lines(text: str) -> str:
     """`(id: int, items: list[Item])` as `(\n    id: int,\n    items: list[Item],\n)`: the fields at its top
     level one per line (a nested record stays on its field's line). Text that isn't one record is as it was."""
@@ -2281,6 +2317,7 @@ class Proxy:
         self.send_hover(state["id"], f"({fields})", state["range"])
 
     def send_hover(self, mid, text: str, rng: dict) -> None:
+        text = layout_records(text)
         value = f"```python\n{text}\n```" if self.hover_markdown else text
         kind = "markdown" if self.hover_markdown else "plaintext"
         self.client.send(
@@ -2774,6 +2811,8 @@ class Proxy:
                 else:
                     with display_orders(self.hover_orders.pop(mid, None)):  # a name bound from a literal
                         result = self.to_editor(msg["result"], doc)
+                    if req == "textDocument/hover" and isinstance(result, dict):
+                        layout_hover(result)
                     msg = {**msg, "result": None if result is DROP else result}
                     if req == "textDocument/completion":
                         self.last_completion = doc
