@@ -277,6 +277,10 @@ class Result:
     unseen: list[tuple[str, int]] = field(default_factory=list)
     # checker: (fields, is_open) of each shape module the prelude imports (SHAPES); srcmap.write_shapes writes them
     shapes: list[tuple[tuple[str, ...], bool]] = field(default_factory=list)
+    # checker, sites: (class, field, start, end) for each field name written in a record literal, `name` in
+    # `(name='R')`: its site class's field, so go to definition on a read of a literal bound to no type lands
+    # on the literal, as in TypeScript (lsp.finish_definition)
+    literal_fields: list[tuple[str, str, int, int]] = field(default_factory=list)
 
 
 def field_error(name: str) -> str:
@@ -1079,11 +1083,15 @@ def transform(
     spread_marks: dict[int, str] = {}  # checker: site -> SPREAD's marker (open_build)
     unseen: list[tuple[str, int]] = []  # checker: Result.unseen
     type_fields: list[tuple[str, str, int, int]] = []  # see Result.type_fields
+    literal_fields: list[tuple[str, str, int, int]] = []  # see Result.literal_fields
 
-    def literal_class(fields: tuple[str, ...]) -> str:
+    def literal_class(fields: tuple[str, ...], named: list[int] | None = None) -> str:
+        """`named`: the tokens of the field names written, for literal_fields."""
         if not checker or portable or not sites:
             return record_class(fields)
         site_list.append((fields, False, True))
+        typ = site_class(type_class(fields, False), len(site_list) - 1)
+        literal_fields.extend((typ, toks[k].string, *span(k)) for k in named or [])
         return site_class(record_class(fields), len(site_list) - 1)
 
     label_spans: list[tuple[int, int]] = []  # `x` in `return (x := ..., ...)`: bound to name a position, never read
@@ -1191,7 +1199,7 @@ def transform(
         fields = tuple(order)
         records[fields] = None
         g0 = span(i)[0]
-        edits.append(Edit(g0, g0, literal_class(fields), (g0, g0 + 1)))
+        edits.append(Edit(g0, g0, literal_class(fields, [it[0] for it in its if is_kw(it)]), (g0, g0 + 1)))
         for it in its:
             if toks[it[0]].string == "**":
                 # `**u` -> `name=u.name, age=u.age`: the user's `u` stays real text (hover, colour, rename).
@@ -1847,7 +1855,7 @@ def transform(
                 head += path + ", "
             edits.append(Edit(at, at, head, (at, at + 1), marks))
             ctx_used = True
-        edits.append(Edit(at, at, literal_class(fields), (at, at + 1)))
+        edits.append(Edit(at, at, literal_class(fields, [it[0] for it in its]), (at, at + 1)))
         if sites and checker and not portable:
             literal_at[len(site_list) - 1] = at
         if typed is not None and at in typed:
@@ -2078,6 +2086,7 @@ def transform(
         unknown_rests,
         unseen,
         shapes,
+        literal_fields,
     )
 
 

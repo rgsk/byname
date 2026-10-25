@@ -435,6 +435,15 @@ def test_one_field_can_go_into_two_locals():
     assert name == alias == "rahul"
 
 
+def test_a_field_can_be_taken_whole_and_destructured_too():
+    # like TypeScript's `const { details: personalDetails, details: { sex } } = user`. Ctrl+click on `sex`
+    # (here or in `user.details.sex`) goes to `sex=` in the literal, as TypeScript does for an object bound to
+    # no type; with `user: User = ...` it goes to the type's field (end to end in test_rename.py)
+    user = (name="rahul", age=27, details=(sex="male"))
+    (details=personal_details, details=(sex=)) = user
+    assert (personal_details, sex) == ((sex="male"), "male")
+
+
 def test_targets_can_be_attributes_and_subscripts():
     class Box:
         label = ""

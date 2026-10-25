@@ -256,6 +256,7 @@ class Translation:
         self.fields: list[tuple[int, int]] = []  # source spans of record field names
         self.shorthands: list[tuple[int, int]] = []  # every bare `x=` (see Result.shorthands)
         self.type_fields: list[tuple[str, str, int, int]] = []  # see Result.type_fields
+        self.literal_fields: list[tuple[str, str, int, int]] = []  # see Result.literal_fields
         self.reads: list[tuple[int, int, str]] = []  # see Result.declared_reads
         self.unknown_rests: list[tuple[int, int]] = []  # see Result.unknown_rests
         self.labels: set[int] = set()  # where a walrus labelling a returned tuple starts (see Result.labels)
@@ -268,6 +269,7 @@ class Translation:
             self.fields = r.fields
             self.shorthands = r.shorthands
             self.type_fields = r.type_fields
+            self.literal_fields = r.literal_fields
             self.reads = r.declared_reads
             self.unknown_rests = r.unknown_rests
             self.unseen = r.unseen

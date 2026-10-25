@@ -2402,7 +2402,9 @@ class Proxy:
 
     def finish_definition(self, answer: dict, asked: dict, site: Doc) -> None:
         """The editor's definition request answered from the rename translation (definition_in_sites): a
-        written type's field is the name written (Result.type_fields); the rest maps as usual."""
+        written type's field is the name written (Result.type_fields), a literal's the name written in it
+        (Result.literal_fields: a read of a literal bound to no type, as TypeScript goes to the literal); the
+        rest maps as usual."""
         result = answer.get("result")
         out = []
         for loc in result if isinstance(result, list) else [result] if isinstance(result, dict) else []:
@@ -2412,7 +2414,7 @@ class Proxy:
                 lines = target.tr.src_lines
                 out += [
                     {"uri": target.uri, "range": {"start": lines.position(a), "end": lines.position(b)}}
-                    for name, f, a, b in target.tr.type_fields
+                    for name, f, a, b in target.tr.type_fields + target.tr.literal_fields
                     if (name, f) == at
                 ]
             elif target is not None and (mapped := self.to_editor(loc, site)) is not DROP:

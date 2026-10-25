@@ -286,6 +286,25 @@ def test_go_to_definition_on_a_record_field_lands_on_the_type_written(client):
     assert definition(client, uri, pos(src, "it.sku", delta=3)) == [field]
 
 
+def test_go_to_definition_on_a_field_of_a_literal_bound_to_no_type_lands_on_the_literal(client):
+    # as TypeScript goes to `sex: "male"` in `const user = {...}`: from a read, a pattern, a nested one
+    c, root = client
+    src = (
+        "user = (name='rahul', details=(sex='male'))\n"
+        "(details=personal, details=(sex=)) = user\n"
+        "print(user.details.sex, user.name)\n"
+    )
+    path = root / "goto_literal.pyn"
+    path.write_text(src)
+    uri = c.open(path)
+    c.wait_diags(uri)
+    sex, details = (uri, pos(src, "sex='male'")), (uri, pos(src, "details=(sex='"))
+    assert definition(client, uri, pos(src, "sex=)")) == [sex]
+    assert definition(client, uri, pos(src, "details=personal")) == [details]
+    assert definition(client, uri, pos(src, "details.sex", delta=8)) == [sex]
+    assert definition(client, uri, pos(src, "name)")) == [(uri, pos(src, "name='rahul'"))]
+
+
 def test_go_to_definition_reaches_a_type_in_a_closed_file(client):
     c, root = client
     (root / "goto_types.pyn").write_text("type Item = (sku: str)\n")
