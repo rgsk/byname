@@ -69,6 +69,7 @@ class Client:
         self.next_id = 0
         self.diags: dict[str, list] = {}
         self.asked: list[str] = []  # the methods of the server's requests, in order
+        self.shown: list[str] = []  # window/showMessage texts
         self.settings = settings or {}  # the editor's, by section: what workspace/configuration gets
         threading.Thread(target=self.pump, daemon=True).start()
 
@@ -93,6 +94,8 @@ class Client:
                 self.send({"id": msg["id"], "result": None})
         elif msg.get("method") == "textDocument/publishDiagnostics":
             self.diags[msg["params"]["uri"]] = msg["params"]["diagnostics"]
+        elif msg.get("method") == "window/showMessage":
+            self.shown.append(msg["params"]["message"])
         elif "id" in msg:
             return msg
         return None
@@ -2216,3 +2219,64 @@ def test_fix_all_right_after_an_edit_reads_declared_fields_checked(lsp):
         {"textDocument": {"uri": uri}, "range": rng, "context": {"diagnostics": [], "only": ["source.fixAll"]}},
     )
     assert "print(p.msg)" in actions[0]["edit"]["changes"][uri][0]["newText"]
+
+
+ONLY_ANY = """\
+import ast
+
+
+def only_any(*, path, source, tree, diagnostics):
+    # reportAny's findings only, as warnings, naming the file; the AST has the file's own lines: `x` is
+    # found by line in a .pyn as in a .py
+    lines = {n.lineno for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == "x"}
+    return [
+        {**d, "severity": 2, "message": f"{path.name}:{d['range']['start']['line'] + 1 in lines} {d['message']}"}
+        for d in diagnostics
+        if d.get("code") == "reportAny"
+    ]
+"""
+
+
+def test_checker_rules_and_a_diagnostics_filter(tmp_path):
+    # byname.checkerRules turns reportAny on in the editor's checker; byname.diagnosticsFilter, a function in
+    # the project's environment, gets each document's diagnostics (its own positions) with its text and AST,
+    # and returns what shows: here reportAny's alone, so the assignment error goes
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "flt.py").write_text(ONLY_ANY)  # importable: the server runs in the project (cwd on sys.path)
+    text = 'import json\n\n(name=) = (name=1)\nx = json.loads("1")\ny: int = "a"\n'
+    (root / "main.pyn").write_text(text)
+    c = Client(root, tmp_path / "cache")
+    caps = {"workspace": {"configuration": True, "workspaceFolders": True}}
+    c.initialize(root, caps, checkerRules={"reportAny": "warning"}, diagnosticsFilter="flt:only_any")
+    pyn = c.open(root / "main.pyn")
+    got = c.wait_diags(pyn)
+    assert [(d["message"], d["severity"]) for d in got] == [('main.pyn:True Type of "x" is Any', 2)]
+    py = (root / "plain.py").as_uri()  # a .py the same way
+    c.send(
+        {
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": py,
+                    "languageId": "python",
+                    "version": 1,
+                    "text": 'import json\n\nx = json.loads("1")\n',
+                }
+            },
+        }
+    )
+    end = time.time() + 30
+    while not c.diags.get(py) and time.time() < end:  # the first publish can be the empty one before analysis
+        c.diags.pop(py, None)
+        c.wait_diags(py, timeout=5)
+    assert [d["message"] for d in c.diags[py]] == ['plain.py:True Type of "x" is Any']
+    assert c.shown == []
+    c.close()
+
+
+def test_a_filter_that_cannot_load_is_said_and_lets_everything_through(tmp_path):
+    c, root, uri = start(tmp_path, diagnosticsFilter="nowhere:fn")
+    c.wait_diags(uri)
+    assert len(c.shown) == 1 and "byname.diagnosticsFilter can't load nowhere:fn" in c.shown[0]
+    c.close()

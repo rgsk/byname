@@ -2,7 +2,7 @@
   "name": "byname",
   "displayName": "byname (.pyn)",
   "description": "Language support for .pyn files, and .py files and Jupyter notebooks alongside them: bind-by-name Python, type-checked through basedpyright.",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "publisher": "rgsk",
   "private": true,
   "license": "MIT",
@@ -78,6 +78,16 @@
           "type": "boolean",
           "default": true,
           "description": "Show the checker's errors and warnings for .py files and plain notebooks. Off: they still get hover, completion and go to definition, plus syntax errors and faded unused code; check them with `byname tool basedpyright`. .pyn files and byname notebooks always show everything."
+        },
+        "byname.checkerRules": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Checker rules turned on in the editor, over the project's own config, e.g. `{\"reportAny\": \"warning\"}`. Usually with `byname.diagnosticsFilter`, which keeps the findings worth showing. `byname tool` doesn't get them."
+        },
+        "byname.diagnosticsFilter": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "`module:function` in the project's environment, called with `path`, `source`, `tree` (the file's AST, its own line numbers) and `diagnostics` (LSP, the file's own positions) for every document; what it returns is shown. Runs before `byname.diagnosticsOnSave` holds any back."
         }
       }
     },

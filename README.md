@@ -475,6 +475,27 @@ without byname) it stays off.
 | `byname.outputStripMain` | `false` | leave the `if __name__ == "__main__":` block out of `<name>.pyn.py` |
 | `byname.diagnosticsOnSave` | `false` | new errors appear on save, not while typing; fixed ones disappear at once |
 | `byname.pythonDiagnostics` | `true` | `false`: `.py` files and plain notebooks show no errors or warnings, only syntax errors and faded unused code (check them with `byname tool basedpyright`); `.pyn` always shows all |
+| `byname.checkerRules` | `{}` | checker rules turned on in the editor, over the project's own config, e.g. `{"reportAny": "warning"}` |
+| `byname.diagnosticsFilter` | `""` | `module:function` that decides which diagnostics show (see below) |
+
+**Your own checks, live.** `checkerRules` turns on rules your project's config leaves off, in the editor only
+(`byname tool` doesn't get them); they're usually too noisy as they come, so `diagnosticsFilter` names a
+function in your project's environment that keeps what's worth showing. It's called for every document (`.pyn`,
+`.py`, notebook cells) each time the checker reports, as `fn(path=, source=, tree=, diagnostics=)`: `tree` is the
+file's AST with its own line numbers (a `.pyn`'s translation; a line that doesn't parse yet is read as `pass`),
+`diagnostics` are LSP diagnostics in the file's own positions. It returns the ones to show, changed if it likes
+(severity, message), and must pass on the ones it doesn't handle. It runs before `diagnosticsOnSave` holds any
+back, so a fix that clears what it shows clears it while you type. If it can't be imported or raises, byname says
+so once and shows everything.
+
+```python
+import ast
+
+
+def only_unannotated_any(*, path, source, tree, diagnostics):
+    annotated = {n.target.id for n in ast.walk(tree) if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)}
+    return [d for d in diagnostics if d.get("code") != "reportAny" or d["message"].split('"')[1] not in annotated]
+```
 
 The command **"byname: Write Python Output"** writes `<name>.pyn.py` on demand.
 

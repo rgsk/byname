@@ -547,3 +547,45 @@ def test_a_folder_the_checker_excludes_is_one_link_in_the_mirror(tmp_path, monke
     (root / "pyproject.toml").write_text('[tool.basedpyright]\nexclude = ["**/sim"]\n')
     out = mirror(root)
     assert (out / "envs" / "sim").is_symlink() and not (out / "envs" / "sim" / "rough.py").is_symlink()
+
+
+def test_checker_rules_extend_the_projects_own_config(tmp_path, monkeypatch):
+    # byname.checkerRules: the editor's mirror gets a pyrightconfig.json that turns rules on over the project's
+    # own config; a project's pyrightconfig.json, whose name that takes, is mirrored beside it and extended
+    from byname.tools import BASE_CONFIG, CHECKER_RULES, mirror, mirror_dir
+
+    bindir = Path(sys.executable).parent
+    if not (bindir / "basedpyright").exists():
+        pytest.skip("basedpyright not installed (uv sync)")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "main.pyn").write_text('import json\n\nx = json.loads("1")\ny: int = "a"\n')
+    (root / "pyrightconfig.json").write_text('{"reportAssignmentType": "none"}\n')
+    out = mirror_dir(root, "lsp")
+    monkeypatch.setitem(CHECKER_RULES, out, {"reportAny": "warning"})
+    mirror(root, "lsp", default_config=False)
+    assert json.loads((out / "pyrightconfig.json").read_text()) == {"extends": BASE_CONFIG, "reportAny": "warning"}
+    assert (out / BASE_CONFIG).readlink() == root / "pyrightconfig.json"
+    run = subprocess.run([str(bindir / "basedpyright")], cwd=out, capture_output=True, text=True, check=False)
+    assert 'Type of "x" is Any (reportAny)' in run.stdout  # the rule, on
+    assert "reportAssignmentType" not in run.stdout  # the project's own config, still applied
+
+    # configured in pyproject.toml, or not at all (the editor's default)
+    (root / "pyrightconfig.json").unlink()
+    (root / "pyproject.toml").write_text("[tool.basedpyright]\n")
+    mirror(root, "lsp", default_config=False)
+    assert json.loads((out / "pyrightconfig.json").read_text()) == {"extends": "pyproject.toml", "reportAny": "warning"}
+    assert not (out / BASE_CONFIG).exists()
+    (root / "pyproject.toml").unlink()
+    mirror(root, "lsp", default_config=False)
+    assert json.loads((out / "pyrightconfig.json").read_text()) == {
+        "typeCheckingMode": "standard",
+        "reportAny": "warning",
+    }
+
+    # no rules: the project's own file is the mirror's again
+    (root / "pyrightconfig.json").write_text("{}\n")
+    monkeypatch.setitem(CHECKER_RULES, out, {})
+    mirror(root, "lsp", default_config=False)
+    assert (out / "pyrightconfig.json").readlink() == root / "pyrightconfig.json"

@@ -50,6 +50,8 @@ async function start() {
         outputStripMain: cfg.get("outputStripMain"),
         diagnosticsOnSave: cfg.get("diagnosticsOnSave"),
         pythonDiagnostics: cfg.get("pythonDiagnostics"),
+        checkerRules: cfg.get("checkerRules"),
+        diagnosticsFilter: cfg.get("diagnosticsFilter"),
       },
     }
   );

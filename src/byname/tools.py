@@ -39,6 +39,11 @@ GENERATED_STYLE = re.compile(r"\bE70[123]\b")
 HELPER = re.compile(r"`_byname_\w*`")
 TOO_LONG = re.compile(r"\bE501 Line too long \(\d+ > (\d+)\)")  # measured on the translation's longer line
 UNSORTED = re.compile(r"\bI001\b")  # import block un-sorted or un-formatted
+# byname.checkerRules, per mirror (the editor's only): checker rules on over the project's own config, in a
+# pyrightconfig.json the mirror generates (rules_config). The project's own pyrightconfig.json, which that
+# name would hide, is mirrored as BASE_CONFIG and extended
+CHECKER_RULES: dict[Path, dict] = {}
+BASE_CONFIG = "_byname_base_pyrightconfig.json"
 
 
 def has_pyright_config(root: Path) -> bool:
@@ -140,6 +145,27 @@ def write_if_changed(dst: Path, text: str) -> bool:
     return True
 
 
+def rules_config(root: Path, out: Path, changes: list | None = None) -> Path | None:
+    """The mirror's pyrightconfig.json when its checker has extra rules (CHECKER_RULES): extending the
+    project's config (its pyrightconfig.json, mirrored as BASE_CONFIG, else its pyproject.toml), or the
+    editor's default, "standard", for a project that configures nothing. A config file, not editor settings:
+    a project's config decides over the editor's analysis settings. Relative paths in the extended config
+    resolve in the mirror, where it's linked. None: no rules."""
+    if not (rules := CHECKER_RULES.get(out)):
+        return None
+    if (root / "pyrightconfig.json").is_file():
+        base: dict = {"extends": BASE_CONFIG}
+    elif has_pyright_config(root):
+        base = {"extends": "pyproject.toml"}
+    else:
+        base = {"typeCheckingMode": "standard"}
+    cfg = out / "pyrightconfig.json"
+    existed = cfg.exists()
+    if write_if_changed(cfg, json.dumps({**base, **rules}, indent=1) + "\n") and changes is not None:
+        changes.append((cfg, 2 if existed else 1))
+    return cfg
+
+
 def mirror_dir(root: Path, kind: str) -> Path:
     key = hashlib.sha1(str(root).encode()).hexdigest()[:12]
     cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
@@ -175,6 +201,8 @@ def place(root: Path, out: Path, src: Path) -> tuple[Path, int | None] | None:
     if rel is None:
         return None
     dst = out / rel
+    if rel == Path("pyrightconfig.json") and CHECKER_RULES.get(out):
+        dst = out / BASE_CONFIG  # the mirror's own extends it (rules_config)
     for up in reversed(dst.parents[: len(rel.parts) - 1]):  # an excluded folder's link, no longer excluded:
         if up.is_symlink():  # written through, the copy would land in the project
             up.unlink()
@@ -244,6 +272,8 @@ def mirror(
         if not cfg.is_file():
             cfg.parent.mkdir(parents=True, exist_ok=True)
             cfg.write_text('{"typeCheckingMode": "standard"}\n')
+        wanted.add(cfg)
+    if (cfg := rules_config(root, out, changes)) is not None:
         wanted.add(cfg)
     if out.exists():  # drop files whose source is gone
         for dirpath, dirnames, filenames in os.walk(out, topdown=True):

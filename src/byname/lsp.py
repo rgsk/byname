@@ -18,6 +18,7 @@ import contextlib
 import io
 import contextvars
 import copy
+import importlib
 import json
 import keyword
 import os
@@ -28,6 +29,7 @@ import sys
 import threading
 import tokenize
 from collections import Counter
+from functools import cached_property
 from pathlib import Path
 from urllib.parse import quote, urlparse
 from urllib.request import url2pathname
@@ -44,7 +46,7 @@ from .srcmap import (
     Translation,
     probed_from,
 )
-from .transform import DS, FIELDSET, ORDER, REPR, SHAPES, BynameError, pattern_slot
+from .transform import DS, FIELDSET, ORDER, REPR, SHAPES, BynameError, parse_around_errors, pattern_slot
 
 DEFAULT_CHECKER = ["basedpyright-langserver", "--stdio"]
 DROP = object()  # a result element whose position fell inside generated-only code
@@ -1172,6 +1174,23 @@ class Doc:
             probed = start
         self.tr = Translation(text, self.path, probed=probed)
 
+    @cached_property
+    def tree(self) -> ast.Module | None:
+        """The text's AST with its own line numbers, for byname.diagnosticsFilter: the translation's body
+        (its lines are the source's), a line that doesn't parse read as `pass` (half-typed code), None if
+        that doesn't help. Built once per version, when a filter first asks."""
+        tr = self.tr
+        body = tr.source if tr.error is not None else tr.hidden[: tr.at] + tr.hidden[tr.at + tr.plen :]
+        return parse_around_errors(body)
+
+
+def load_filter(spec: str | None):
+    """byname.diagnosticsFilter, "module:function", imported from the project's environment; None if unset."""
+    if not spec:
+        return None
+    module, _, name = spec.partition(":")
+    return getattr(importlib.import_module(module), name)
+
 
 class Notebook:
     def __init__(self, uri: str, version: int | None, cells: list[str]):
@@ -1252,6 +1271,10 @@ class Proxy:
         # byname.pythonDiagnostics: the checker's findings on .py files and plain notebooks in the editor.
         # Off: only syntax errors and faded unused code there (Alt+L still checks them); .pyn always shows all
         self.python_diags = True
+        # byname.diagnosticsFilter: fn(path=, source=, tree=, diagnostics=) -> the diagnostics to show
+        self.diags_filter = None
+        self.filter_failed = False  # said once (window/showMessage); diagnostics go through unfiltered
+        self.trees: dict[str, tuple[str, ast.Module | None]] = {}  # a .py's or plain cell's, by uri and text
         self.saved: dict[Path, int | None] = {}  # editor version of the last saved text, per open .pyn
         self.held: dict[Path, dict] = {}  # newest diagnostics not shown yet, per open .pyn
         self.shown: dict[Path, list] = {}  # diagnostics the editor shows now, per open .pyn
@@ -1512,9 +1535,11 @@ class Proxy:
         if method == "initialize":
             root = params.get("rootUri") or next((f["uri"] for f in params.get("workspaceFolders") or []), None)
             self.root = uri_to_path(root) if root else Path.cwd()
-            from .tools import mirror_dir
+            from .tools import CHECKER_RULES, mirror_dir
 
             self.mirror = mirror_dir(self.root, "lsp")
+            # byname.checkerRules: the editor's checker only (rules_config), in place before the first sync
+            CHECKER_RULES[self.mirror] = (params.get("initializationOptions") or {}).get("checkerRules") or {}
             self.sync(prune_shapes=True)
             caps = params.get("capabilities", {})
             self.token_refresh = bool(caps.get("workspace", {}).get("semanticTokens", {}).get("refreshSupport"))
@@ -1537,6 +1562,10 @@ class Proxy:
             self.strip_main = bool(opts.get("outputStripMain"))
             self.diags_on_save = bool(opts.get("diagnosticsOnSave"))
             self.python_diags = opts.get("pythonDiagnostics") is not False
+            try:
+                self.diags_filter = load_filter(opts.get("diagnosticsFilter"))
+            except Exception as e:  # the user's module: whatever it raises is said, not fatal
+                self.filter_failure(f"can't load {opts.get('diagnosticsFilter')}: {e!r}")
             self.pending[mid] = ("initialize", None)
             self.server.send(msg)  # its uris are the mirror's already
             return
@@ -2859,6 +2888,9 @@ class Proxy:
         doc = self.doc_for(params["uri"], params.get("version"))
         if doc is None:  # a .py file or a plain notebook's cell, as the checker saw it
             kept = params.get("diagnostics", [])
+            uri = self.uri_to_editor(params["uri"])
+            if (text := self.py_text.get(uri, self.cell_text.get(uri))) is not None:
+                kept = self.filtered(uri, text, lambda: self.plain_tree(uri, text), kept)
             if not self.python_diags:  # keep syntax errors (no rule) and hints (faded unused code)
                 kept = [d for d in kept if not d.get("code") or d.get("severity", 1) == 4]
             kept = [
@@ -2909,6 +2941,7 @@ class Proxy:
             out.append(d)
         if doc.tr.error is not None:
             out.append(error_diagnostic(doc.tr.error))
+        out = self.filtered(doc.uri, doc.tr.source, lambda: doc.tree, out)
         params = {**params, "uri": doc.uri, "diagnostics": out}
         if doc.version is not None:
             params["version"] = doc.version
@@ -2927,6 +2960,32 @@ class Proxy:
                     self.held.pop(path, None)
                 self.shown[path] = out
         return msg
+
+    def filtered(self, uri: str, source: str, tree, diags: list[dict]) -> list[dict]:
+        """byname.diagnosticsFilter on a document's diagnostics, in its own positions (0-based, UTF-16), before
+        diagnosticsOnSave holds any: a fix that clears what the filter shows clears it at once. tree: built
+        only if a filter is set (Doc.tree). A filter that raises is said once, and lets everything through."""
+        if self.diags_filter is None:
+            return diags
+        path = uri_to_path(uri) if urlparse(uri).scheme in ("file", "vscode-notebook-cell") else None
+        try:
+            return list(self.diags_filter(path=path, source=source, tree=tree(), diagnostics=diags))
+        except Exception as e:  # the user's code: said, never fatal
+            self.filter_failure(f"failed on {path or uri}: {e!r}")
+            return diags
+
+    def filter_failure(self, what: str) -> None:
+        if self.filter_failed:
+            return
+        self.filter_failed = True
+        message = f"byname.diagnosticsFilter {what}. Diagnostics are shown unfiltered."
+        self.client.send({"jsonrpc": "2.0", "method": "window/showMessage", "params": {"type": 1, "message": message}})
+
+    def plain_tree(self, uri: str, text: str) -> ast.Module | None:
+        """A .py's or plain notebook cell's AST for the filter (see Doc.tree), kept while its text is."""
+        if (hit := self.trees.get(uri)) is None or hit[0] != text:
+            hit = self.trees[uri] = (text, parse_around_errors(text))
+        return hit[1]
 
     def release_held(self, path: Path, version: int | None) -> None:
         """On save: show the held diagnostics if they're for the saved text. If the checker hasn't
