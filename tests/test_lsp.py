@@ -2280,3 +2280,42 @@ def test_a_filter_that_cannot_load_is_said_and_lets_everything_through(tmp_path)
     c.wait_diags(uri)
     assert len(c.shown) == 1 and "byname.diagnosticsFilter can't load nowhere:fn" in c.shown[0]
     c.close()
+
+
+REVEALS = """\
+import ast
+
+
+def asks(*, path, source, tree):
+    # for each `name: T = value`: the value's type, then T's, before the statement
+    out = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.AnnAssign) and n.value is not None:
+            out += [(n.lineno, n.col_offset, ast.unparse(n.value), False), (n.lineno, n.col_offset, ast.unparse(n.annotation), True)]
+    return out
+
+
+def answers(*, path, source, tree, diagnostics, reveals):
+    return [*diagnostics, {"range": diagnostics[0]["range"], "message": f"answers {reveals}"}]
+"""
+
+
+def test_reveals_are_asked_in_the_editors_own_check(tmp_path):
+    # byname.diagnosticsReveals: a hook names expressions (and types) whose types the checker reveals, in the
+    # same pass as everything else; the filter gets the answers. The probes' own notes and errors aren't shown,
+    # and the user's code after a probe keeps its positions
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "rv.py").write_text(REVEALS)
+    text = 'r = (name="a")\nx: float = len(r.name); y: int = "a"\n'
+    (root / "main.pyn").write_text(text)
+    c = Client(root, tmp_path / "cache")
+    caps = {"workspace": {"configuration": True, "workspaceFolders": True}}
+    c.initialize(root, caps, diagnosticsReveals="rv:asks", diagnosticsFilter="rv:answers")
+    got = c.wait_diags(c.open(root / "main.pyn"))
+    assert [d["message"] for d in got][-1] == "answers ['int', 'float', \"Literal['a']\", 'int']"
+    (error,) = [d for d in got if d.get("code") == "reportAssignmentType"]
+    assert snippet(text, error["range"]) == '"a"'  # after both probes on its line
+    assert not any("reveal_type" in d["message"] or "Type of" in d["message"] for d in got)
+    assert c.shown == []
+    c.close()

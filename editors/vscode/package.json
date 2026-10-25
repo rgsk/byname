@@ -2,7 +2,7 @@
   "name": "byname",
   "displayName": "byname (.pyn)",
   "description": "Language support for .pyn files, and .py files and Jupyter notebooks alongside them: bind-by-name Python, type-checked through basedpyright.",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "publisher": "rgsk",
   "private": true,
   "license": "MIT",
@@ -88,6 +88,11 @@
           "type": "string",
           "default": "",
           "markdownDescription": "`module:function` in the project's environment, called with `path`, `source`, `tree` (the file's AST, its own line numbers) and `diagnostics` (LSP, the file's own positions) for every document; what it returns is shown. Runs before `byname.diagnosticsOnSave` holds any back."
+        },
+        "byname.diagnosticsReveals": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "`module:function` naming expressions whose types the checker reveals in the editor's own check, for `byname.diagnosticsFilter` (its `reveals` argument). Called with `path`, `source` and `tree`; returns `(line, col, expression, is_type)` for statements in `tree`. `.pyn` files and byname notebooks."
         }
       }
     },

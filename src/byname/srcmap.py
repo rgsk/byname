@@ -174,6 +174,9 @@ def write_shapes(shapes: list[tuple[tuple[str, ...], bool]]) -> None:
 # a probe translation's last line, `reveal_type('_byname_probe')`: the checker answers it whatever else it
 # can't (an unanalysed function's body), so a publish with its answer is of the probe (lsp.Proxy.probed)
 PROBE_MARK = "_byname_probe"
+# byname.diagnosticsReveals: what a probe asks (add_reveals), and the checker's answer to one
+REVEAL_TYPING = "_byname_typing"
+REVEAL_ANSWER = re.compile(r'^Type of ".*" is "(.*)"$', re.DOTALL)
 # a spread of what another asked spread returns is answered a round later (tools.probe, lsp.Proxy.probed)
 PROBE_ROUNDS = 3
 # a comment that hides every diagnostic on its line, a probe's answer too: `# pyright: ignore` with no rules,
@@ -305,10 +308,81 @@ class Translation:
                     lines[line] = lines[line][: m.start()] + " " * (m.end() - m.start()) + lines[line][m.end() :]
                     self.unignored.add(line)
             self.hidden = "\n".join(lines)
+        # byname.diagnosticsReveals (add_reveals): where each asked type's answer lands, by (line, character) in
+        # hidden, and the probes' spans there, whose diagnostics aren't the user's
+        self.asked: dict[tuple[int, int], int] = {}
+        self.reveal_spans: list[tuple[int, int]] = []
         if self.error is None:
             for s, e, msg in r.problems:
                 rng = {"start": self.src_lines.position(s), "end": self.src_lines.position(e)}
                 self.problems.append({"range": rng, "severity": 1, "source": "byname", "message": msg})
+
+    def add_reveals(self, asks: list[tuple[int, int, str, bool]]) -> None:
+        """byname.diagnosticsReveals: each ask (line, col of a statement in the body's AST, 1-based line, col
+        in UTF-8 bytes as ast gives it; an expression; whether it's a type) becomes `reveal_type(expr); `
+        before that statement, generated text the checker answers in the same pass as the rest. A type is
+        asked as `typing.cast(T, None)`, the type it means, with the import in the probe. Each probe is a
+        zero-width Edit, so every position maps as around any generated text; one inside other generated text
+        (a pattern's `_ds = r; a = _ds.a`) isn't asked, as its source position wouldn't say where it is."""
+        if self.error is not None or not asks:
+            return
+        body = self.hidden[: self.at] + self.hidden[self.at + self.plen :]
+        prelude = self.hidden[self.at : self.at + self.plen]
+        lines = body.split("\n")
+        starts = [0]
+        for text in lines:
+            starts.append(starts[-1] + len(text) + 1)
+        groups: dict[int, list[tuple[int, str]]] = {}  # body offset -> (ask, its probe text), in order
+        for i, (line, col, expr, is_type) in enumerate(asks):
+            if not 1 <= line <= len(lines):
+                continue
+            g = starts[line - 1] + len(lines[line - 1].encode()[:col].decode(errors="ignore"))
+            src, _ = self.map.to_source(g)
+            if self.map.to_body(src) != g:
+                continue  # inside generated text
+            arg = f"{REVEAL_TYPING}.cast({expr}, None)" if is_type else expr
+            groups.setdefault(g, []).append(
+                (i, f"import typing as {REVEAL_TYPING}; " * is_type + f"reveal_type({arg}); ")
+            )
+        edits = list(self.map.edits)
+        out, last, shift, at = [], 0, 0, self.at
+        args: list[tuple[int, int]] = []  # (new body offset of an answer's argument, ask)
+        spans: list[tuple[int, int]] = []  # new body spans of the probes
+        for g in sorted(groups):
+            text = "".join(t for _, t in groups[g])
+            out.append(body[last:g])
+            k = g + shift
+            for i, t in groups[g]:
+                args.append((k + t.index("reveal_type(") + len("reveal_type("), i))
+                k += len(t)
+            spans.append((g + shift, g + shift + len(text)))
+            out.append(text)
+            last = g
+            if g < self.at:
+                at += len(text)
+            shift += len(text)
+            src, _ = self.map.to_source(g)
+            edits.append(Edit(src, src, text, (src, src)))
+        out.append(body[last:])
+        body = "".join(out)
+        edits.sort(key=lambda e: (e.start, e.end > e.start))  # an insertion before an edit at its start
+        self.map = SourceMap(edits)
+        self.at = at
+        self.hidden = body[:at] + prelude + body[at:]
+        self.hid_lines = LineIndex(self.hidden)
+
+        def hidden(b: int) -> int:
+            return b + self.plen if self.plen and b >= at else b
+
+        for b, i in args:
+            p = self.hid_lines.position(hidden(b))
+            self.asked[(p["line"], p["character"])] = i
+        self.reveal_spans = [(hidden(a), hidden(b)) for a, b in spans]
+
+    def in_reveal(self, r: dict) -> bool:
+        """A checker range (in hidden) that starts in a probe add_reveals made."""
+        h = self.hid_lines.offset(r["start"]["line"], r["start"]["character"])
+        return any(a <= h < b for a, b in self.reveal_spans)
 
     @cached_property
     def hints(self) -> list[dict]:

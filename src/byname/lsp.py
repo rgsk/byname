@@ -41,6 +41,7 @@ from .srcmap import (
     PROBE_ROUNDS,
     PROBED,
     PROJECT_ORDERS,
+    REVEAL_ANSWER,
     LineIndex,
     Probed,
     Translation,
@@ -1173,6 +1174,11 @@ class Doc:
                 return
             probed = start
         self.tr = Translation(text, self.path, probed=probed)
+        if REVEALS[0] is not None and self.tree is not None:
+            try:
+                self.tr.add_reveals(list(REVEALS[0](path=self.path, source=text, tree=self.tree)))
+            except Exception as e:  # the user's code: said once by the proxy (Proxy.filtered), never fatal
+                REVEALS[1] = e
 
     @cached_property
     def tree(self) -> ast.Module | None:
@@ -1182,6 +1188,10 @@ class Doc:
         tr = self.tr
         body = tr.source if tr.error is not None else tr.hidden[: tr.at] + tr.hidden[tr.at + tr.plen :]
         return parse_around_errors(body)
+
+
+# byname.diagnosticsReveals: [the hook, or None; the last exception it raised, said once by the proxy]
+REVEALS: list = [None, None]
 
 
 def load_filter(spec: str | None):
@@ -1564,6 +1574,7 @@ class Proxy:
             self.python_diags = opts.get("pythonDiagnostics") is not False
             try:
                 self.diags_filter = load_filter(opts.get("diagnosticsFilter"))
+                REVEALS[0] = load_filter(opts.get("diagnosticsReveals"))
             except Exception as e:  # the user's module: whatever it raises is said, not fatal
                 self.filter_failure(f"can't load {opts.get('diagnosticsFilter')}: {e!r}")
             self.pending[mid] = ("initialize", None)
@@ -2919,6 +2930,17 @@ class Proxy:
             params = {**params, "diagnostics": kept}
         out = [*doc.tr.problems, *doc.tr.hints]
         flagged = {(p["range"]["start"]["line"], p["range"]["start"]["character"]) for p in out}
+        # diagnosticsReveals' answers, for the filter, and nothing else of the probes' shown
+        answers: list[str | None] = [None] * (max(doc.tr.asked.values(), default=-1) + 1)
+        if doc.tr.reveal_spans:
+            kept = []
+            for d in params.get("diagnostics", []):
+                at = (d["range"]["start"]["line"], d["range"]["start"]["character"])
+                if (i := doc.tr.asked.get(at)) is not None and (m := REVEAL_ANSWER.match(d.get("message", ""))):
+                    answers[i] = pretty(m[1])
+                elif not doc.tr.in_reveal(d["range"]):
+                    kept.append(d)
+            params = {**params, "diagnostics": kept}
         # a broken byname rule: the checker got the raw .pyn, so all it says is noise (`"(" was not closed`)
         for d in [] if isinstance(doc.tr.error, BynameError) else params.get("diagnostics", []):
             r = doc.tr.range_from_hidden(d["range"], display=True)
@@ -2941,7 +2963,7 @@ class Proxy:
             out.append(d)
         if doc.tr.error is not None:
             out.append(error_diagnostic(doc.tr.error))
-        out = self.filtered(doc.uri, doc.tr.source, lambda: doc.tree, out)
+        out = self.filtered(doc.uri, doc.tr.source, lambda: doc.tree, out, answers if REVEALS[0] else None)
         params = {**params, "uri": doc.uri, "diagnostics": out}
         if doc.version is not None:
             params["version"] = doc.version
@@ -2961,15 +2983,20 @@ class Proxy:
                 self.shown[path] = out
         return msg
 
-    def filtered(self, uri: str, source: str, tree, diags: list[dict]) -> list[dict]:
+    def filtered(self, uri: str, source: str, tree, diags: list[dict], reveals: list | None = None) -> list[dict]:
         """byname.diagnosticsFilter on a document's diagnostics, in its own positions (0-based, UTF-16), before
         diagnosticsOnSave holds any: a fix that clears what the filter shows clears it at once. tree: built
-        only if a filter is set (Doc.tree). A filter that raises is said once, and lets everything through."""
+        only if a filter is set (Doc.tree). reveals: with byname.diagnosticsReveals, the checker's answer to
+        each of its asks for this text, in order (None: not answered, or not asked, as in a .py). A filter or
+        a reveals hook that raises is said once, and lets everything through."""
+        if REVEALS[1] is not None:
+            self.filter_failure(f"(diagnosticsReveals) failed: {REVEALS[1]!r}")
         if self.diags_filter is None:
             return diags
         path = uri_to_path(uri) if urlparse(uri).scheme in ("file", "vscode-notebook-cell") else None
+        extra = {} if REVEALS[0] is None else {"reveals": reveals or []}
         try:
-            return list(self.diags_filter(path=path, source=source, tree=tree(), diagnostics=diags))
+            return list(self.diags_filter(path=path, source=source, tree=tree(), diagnostics=diags, **extra))
         except Exception as e:  # the user's code: said, never fatal
             self.filter_failure(f"failed on {path or uri}: {e!r}")
             return diags

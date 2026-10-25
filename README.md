@@ -477,6 +477,7 @@ without byname) it stays off.
 | `byname.pythonDiagnostics` | `true` | `false`: `.py` files and plain notebooks show no errors or warnings, only syntax errors and faded unused code (check them with `byname tool basedpyright`); `.pyn` always shows all |
 | `byname.checkerRules` | `{}` | checker rules turned on in the editor, over the project's own config, e.g. `{"reportAny": "warning"}` |
 | `byname.diagnosticsFilter` | `""` | `module:function` that decides which diagnostics show (see below) |
+| `byname.diagnosticsReveals` | `""` | `module:function` naming expressions whose types the checker reveals for the filter (see below) |
 
 **Your own checks, live.** `checkerRules` turns on rules your project's config leaves off, in the editor only
 (`byname tool` doesn't get them); they're usually too noisy as they come, so `diagnosticsFilter` names a
@@ -487,6 +488,15 @@ file's AST with its own line numbers (a `.pyn`'s translation; a line that doesn'
 (severity, message), and must pass on the ones it doesn't handle. It runs before `diagnosticsOnSave` holds any
 back, so a fix that clears what it shows clears it while you type. If it can't be imported or raises, byname says
 so once and shows everything.
+
+A filter may need types nothing reports, such as what a value would be without its annotation.
+`diagnosticsReveals` names a function called with `path`, `source` and `tree` that returns what to ask, as
+`(line, col, expression, is_type)` for statements in `tree` (`ast`'s `lineno` and `col_offset`). byname puts
+`reveal_type(expression); ` before each statement in the text the checker checks (for a type,
+`reveal_type(typing.cast(T, None))`, the type it means), so the answers come in the same pass as everything
+else, and passes them to the filter as `reveals`, a list in the order asked (`None` where no answer came, as in
+unreachable code). You never see the probes or anything the checker says about them. `.pyn` files and byname
+notebooks only: plain `.py` files go to the checker as they are.
 
 ```python
 import ast

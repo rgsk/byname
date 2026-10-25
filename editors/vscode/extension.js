@@ -52,6 +52,7 @@ async function start() {
         pythonDiagnostics: cfg.get("pythonDiagnostics"),
         checkerRules: cfg.get("checkerRules"),
         diagnosticsFilter: cfg.get("diagnosticsFilter"),
+        diagnosticsReveals: cfg.get("diagnosticsReveals"),
       },
     }
   );
