@@ -1605,6 +1605,51 @@ def test_destructuring_reads_attributes_so_a_dict_does_not_destructure(tmp_path)
         exec(to_code(src, "x.pyn"), {})  # noqa: S102 -- running the rejected line
 
 
+def test_a_method_does_not_destructure(tmp_path):
+    # `(append=) = users` would bind `users` into `append` out of sight, as TypeScript's `const { push } = arr`
+    # loses `this`: a pattern takes data, so call a method on its object. The checker says so; nothing at runtime
+    verdicts = checker(
+        """\
+        import os
+        from dataclasses import dataclass
+        from typing import Callable
+        @dataclass
+        class User:
+            name: str
+            email: str
+            act: Callable[[int], int]
+            @property
+            def domain(self) -> str: return self.email.split("@")[1]
+            @staticmethod
+            def zero() -> int: return 0
+            def greet(self) -> str: return f"hi {self.name}"
+        u = User("ann", "ann@x.com", abs)
+        (name=, domain=, act=, zero=) = u
+        (join=) = os.path
+        (greet=) = User
+        users = [1, 2]
+        (append=) = users
+        (greet=hi) = u
+        for (upper=) in ["a"]: pass
+        (user=(_replace=)) = (user=(name="ann"))
+        """,
+        tmp_path,
+    )
+    # data, a property, a function in a field, a staticmethod, a module's function: no object bound in. Nor in a
+    # method read off its class: `greet(u)` passes `self` where it's seen
+    appended, renamed, looped, nested = 19, 20, 21, 22
+    assert verdicts == {
+        appended: 'can\'t destructure the method "append": call it on its object, obj.append(...) (reportArgumentType)',
+        renamed: 'can\'t destructure the method "greet": call it on its object, obj.greet(...) (reportArgumentType)',
+        looped: 'can\'t destructure the method "upper": call it on its object, obj.upper(...) (reportArgumentType)',
+        nested: 'can\'t destructure the method "_replace": call it on its object, obj._replace(...) (reportArgumentType)',
+    }
+    users = [1, 2]
+    (append=) = users  # pyright: ignore[reportArgumentType]
+    append(3)
+    assert users == [1, 2, 3]  # Python binds it fine: the rule is about reading, not a crash
+
+
 # ============================================================================
 # 10. ALL TOGETHER, OVERLOADS, AND `*record`
 # ============================================================================

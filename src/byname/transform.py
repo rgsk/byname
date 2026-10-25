@@ -186,6 +186,20 @@ CTX_PRELUDE = (  # checker only: T is the type expected where the record is buil
     "    def keys(self) -> _A: ...\n"
     "def _byname_loose(x: _byname_Keyed, /) -> _Mp[str, object]: ...  # pyright: ignore\n"
 )
+# checker only: a pattern takes data, not a method with its object bound in (`(append=) = users`). Each field it
+# binds is `_byname_field(_ds.f, lambda _byname_m: _byname_no_method(f=_byname_method(_byname_m)))`: the value
+# and its type pass through, and a bound method fails the keyword named after the field (lsp.explain_fields)
+FIELD_PRELUDE = (
+    "from types import MethodType as _byname_MT, BuiltinMethodType as _byname_BMT\n"
+    "from typing import overload as _byname_ov\n"
+    "from collections.abc import Callable as _byname_Cl\n"
+    "class _byname_Method: ...\n"
+    "@_byname_ov\ndef _byname_method(m: _byname_MT | _byname_BMT, /) -> _byname_Method: ...  # pyright: ignore\n"
+    "@_byname_ov\ndef _byname_method(m: object, /) -> None: ...  # pyright: ignore\n"
+    "def _byname_method(m: object, /) -> object: ...  # pyright: ignore\n"
+    "def _byname_no_method(**field: None) -> None: ...  # pyright: ignore\n"
+    "def _byname_field[T](x: T, check: _byname_Cl[[T], object], /) -> T: ...  # pyright: ignore\n"
+)
 # checker only: _byname_rec (PRELUDE), typed
 BUILD_REC_TYPED = "def _byname_rec(d: _Mp[str, _A], /) -> _A: ...  # pyright: ignore\n"
 OMIT_REC = (  # `(name=, **rest) = r`: a record of r's fields but those named, in r's written order
@@ -1349,6 +1363,7 @@ def transform(
     unknown_rests: list[tuple[int, int]] = []  # checker: Result.unknown_rests
     pattern_line: int | None = None  # the line a pattern statement's bindings go on (rest_of)
     omit_used = False
+    field_used = False  # checker: a pattern bound a field (FIELD_PRELUDE)
 
     def is_rest(item: list[int]) -> bool:
         return len(item) >= 2 and toks[item[0]].string == "**"
@@ -1415,6 +1430,20 @@ def transform(
             text += "."
             marks.append(Mark(len(text), len(text) + len(f), *span(k)))
             text += f
+        return text
+
+    def field(chain: list[int], text: str, marks: list[Mark]) -> str:
+        """access, for a field a pattern binds. The checker's also says no to a method, which would bind its
+        object in out of sight (FIELD_PRELUDE); the check is shown on the field written."""
+        nonlocal field_used
+        if not checker:
+            return access(chain, text, marks)
+        field_used = True
+        text = access(chain, text + "_byname_field(", marks)
+        ts, k = len(text), chain[-1]
+        text += f", lambda _byname_m: _byname_no_method({toks[k].string}=_byname_method(_byname_m)))"
+        at = span(k)[0]
+        marks.append(Mark(ts, len(text), at, at, span(k)))
         return text
 
     def omit(node: list, chain: list[int], text: str, marks: list[Mark], line: int | None = None) -> str:
@@ -1494,8 +1523,10 @@ def transform(
                 text += val
                 marks.append(Mark(ts, len(text), *span(it[2], it[-1])))
                 text = assign(text)
-            # bare (half-typed): just the attribute access, for completion
-            text = access([*chain, it[0]], text, marks)
+            else:  # bare (half-typed): just the attribute access, for completion
+                text = access([*chain, it[0]], text, marks)
+                continue
+            text = field([*chain, it[0]], text, marks)
         return text
 
     def no_default_shorthand(its: list[list[int]], level: int | None) -> None:
@@ -1795,8 +1826,10 @@ def transform(
                         text = element(it[2], val, [*chain, it[0]], text, marks)
                     elif kind == "rest":  # read on the line of `in`, where the element goes (rest_of)
                         text = omit(node, chain, text, marks, toks[close + 1].start[0])
-                    else:
+                    elif kind == "bare":
                         text = access([*chain, it[0]], text, marks)
+                    else:
+                        text = field([*chain, it[0]], text, marks)
                 return text + ("" if single else ",)" if len(node) == 1 else ")")
 
             text = element(i, tree, [], " (", marks) + f" {'async ' if is_async else ''}for {DS} in"
@@ -1969,6 +2002,8 @@ def transform(
             )
             prelude += OMIT_REC.replace("{sig}", sig)
         prelude += omit_defs
+    if field_used and not portable:
+        prelude += FIELD_PRELUDE
     if tuples:
         prelude += "".join(tuple_def(t) for t in tuples)
     if record_used:

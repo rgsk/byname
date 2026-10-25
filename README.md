@@ -246,6 +246,12 @@ for (x=, y=) in pts: ...               # for-loop targets
 (id=, user=(name=, age=a)) = r         # nested: name = r.user.name
 ```
 
+**Not a method:** `(append=) = users` would bind `users` into `append` out of sight, the way TypeScript's
+`const { push } = arr` loses `this`. Call it on its object: `users.append(3)`. The checker says
+`can't destructure the method "append"`; it still runs, since Python binds it fine. Data is fine, a
+property, a function held in a field, a staticmethod or a module's function too: nothing is bound in.
+So is a method read off its class, `(greet=) = User`, called as `greet(u)`.
+
 **When to destructure:** destructuring is tuple unpacking by name. Use it where Python would return a
 tuple: a bundle whose parts matter and whose whole doesn't (`(x=, y=) = get_batch()`,
 `(train=, val=) = split(ids)`). When the whole is a thing with a name worth keeping, keep it and read

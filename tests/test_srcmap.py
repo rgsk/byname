@@ -41,7 +41,11 @@ def test_hidden_has_prelude_and_translation():
     lines = t.hidden.splitlines()
     assert "from typing import NamedTuple as _NT" in lines
     assert "    class _rec_name__age[T0, T1](_NT):" in lines
-    assert '_ds = make(name="R", age=1); who = _ds.name; age = _ds.age' in t.hidden
+    assert (
+        '_ds = make(name="R", age=1); '
+        "who = _byname_field(_ds.name, lambda _byname_m: _byname_no_method(name=_byname_method(_byname_m))); "
+        "age = _byname_field(_ds.age, lambda _byname_m: _byname_no_method(age=_byname_method(_byname_m)))"
+    ) in t.hidden
 
 
 # --- source -> hidden: where requests (hover, completion) land ----------------
@@ -95,26 +99,37 @@ def test_rename_edit_on_expanded_shorthand_inserts_after_equals():
     assert r["start"] == r["end"] == {"line": 0, "character": 7}
 
 
+def pattern_line(t: Translation) -> tuple[int, str]:
+    """The hidden line a one-line pattern statement went to, past the prelude."""
+    return next((k, line) for k, line in enumerate(t.hidden.splitlines()) if line.startswith("_ds = "))
+
+
 def test_diagnostic_on_destructured_attribute_shows_on_field():
     # pyright flags `nope` in `_ds.nope`; the user sees it on `nope` in their pattern
     src = "(nope=) = obj\n"
     t = Translation(src)
-    line = t.hidden.splitlines()[0]
-    assert line == "_ds = obj; nope = _ds.nope"
-    c = line.rindex("nope")
-    gen = {"start": {"line": 0, "character": c}, "end": {"line": 0, "character": c + 4}}
-    r = t.range_from_hidden(gen, display=True)
-    assert r == word(src, "nope")
+    k, line = pattern_line(t)
+    assert (
+        line
+        == "_ds = obj; nope = _byname_field(_ds.nope, lambda _byname_m: _byname_no_method(nope=_byname_method(_byname_m)))"
+    )
+    c = line.index("_ds.nope") + 4
+    gen = {"start": {"line": k, "character": c}, "end": {"line": k, "character": c + 4}}
+    assert t.range_from_hidden(gen, display=True) == word(src, "nope")
+    # a method destructured: the checker flags the argument of the generated check, shown on the field too
+    c = line.index("_byname_method(")
+    gen = {"start": {"line": k, "character": c}, "end": {"line": k, "character": line.rindex(")") - 1}}
+    assert t.range_from_hidden(gen, display=True) == word(src, "nope")
 
 
 def test_shorthand_target_rename_inserts_explicit_target():
     # renaming the local bound by `(name=)` must give `(name=new)`, not `(new=)`
     src = "(name=) = obj\n"
     t = Translation(src)
-    line = t.hidden.splitlines()[0]
-    assert line == "_ds = obj; name = _ds.name"
+    k, line = pattern_line(t)
+    assert line.startswith("_ds = obj; name = _byname_field(_ds.name, ")
     c = line.index("; name") + 2
-    gen = {"start": {"line": 0, "character": c}, "end": {"line": 0, "character": c + 4}}
+    gen = {"start": {"line": k, "character": c}, "end": {"line": k, "character": c + 4}}
     r = t.range_from_hidden(gen, display=False)
     assert r["start"] == r["end"] == at(src, ")")
 
@@ -161,7 +176,7 @@ def test_cursor_after_half_typed_item_maps_after_attribute():
     p = at(src, "ag")
     p = {"line": 0, "character": p["character"] + 2}
     h = t.position_to_hidden(p)
-    assert t.hidden.splitlines()[0][: h["character"]].endswith("_ds.ag")
+    assert t.hidden.splitlines()[h["line"]][: h["character"]].endswith("_ds.ag")
     assert t.problems[0]["message"] == "pattern item 'ag' needs '='"
 
 

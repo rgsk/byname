@@ -432,6 +432,11 @@ SITE_RE = re.compile(r"(_(?:rec|typ|opn)_\w*?)___\d+(?:_spread\w*)?\b")  # and t
 LOOSE_RE = re.compile(
     r'Argument of type "(.*?)" cannot be assigned to parameter "x" of type "[^"]*"\s+in function "_byname_loose"'
 )
+# a pattern took a method, bound to its object (transform's FIELD_PRELUDE): the keyword is the field
+METHOD_RE = re.compile(
+    r'Argument of type "_byname_Method" cannot be assigned to parameter "(\w+)" of type "None"'
+    r'\s+in function "_byname_no_method"'
+)
 SPREAD_RE = re.compile(r"_opn_\w*?___\d+_spread((?:__\w+?)*)(?![\w])")
 # a record type repeated in a union, once site numbers are gone: `(a: int) | (a: int)`
 COVARIANT_RE = re.compile(r"\b_byname_T(\d+)\b")
@@ -662,6 +667,10 @@ def explain_fields(msg: str) -> str:
         if "None" in [t.strip() for t in split_top(typ, "|")]:
             why = f"it may be None. Narrow it first; {why}"
         return msg[: m.start()] + f"can't spread {typ}: {why}" + (f" ({rule[1]})" if rule else "")
+    if m := METHOD_RE.search(msg):
+        rule = RULE_RE.search(msg.split("\n")[-1])
+        said = f'can\'t destructure the method "{m[1]}": call it on its object, obj.{m[1]}(...)'
+        return msg[: m.start()] + said + (f" ({rule[1]})" if rule else "")
     spread = spread_source(msg)
     msg = unsite(msg)
     if spread and (m := UNDECLARED_RE.search(msg)):
