@@ -348,6 +348,8 @@ def test_replace_copies_with_some_fields_changed():
 
 
 def test_asdict_gives_the_fields_in_written_order():
+    # (the editor's completion offers them in that order too: test_lsp's
+    # test_a_record_s_fields_complete_in_the_order_written)
     assert (name="rahul", age=26)._asdict() == {"name": "rahul", "age": 26}
 
 

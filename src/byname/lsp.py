@@ -435,6 +435,8 @@ METHOD_RE = re.compile(
     r'Argument of type "_byname_Method" cannot be assigned to parameter "(\w+)" of type "None"'
     r'\s+in function "_byname_no_method"'
 )
+# what follows a pattern's `)` when its value is a bare name: `= user`, `: Final = user`
+PATTERN_OF_NAME_RE = re.compile(r"[ \t]*(?::[ \t]*[\w.]+[ \t]*)?=[ \t]*([A-Za-z_]\w*)[ \t]*(?:#.*)?$", re.M)
 SPREAD_RE = re.compile(r"_opn_\w*?___\d+_spread((?:__\w+?)*)(?![\w])")
 # a record type repeated in a union, once site numbers are gone: `(a: int) | (a: int)`
 COVARIANT_RE = re.compile(r"\b_byname_T(\d+)\b")
@@ -2054,8 +2056,11 @@ class Proxy:
                 self.client.send({"jsonrpc": "2.0", "id": mid, "result": {"isIncomplete": False, "items": []}})
                 return True  # our extra trigger outside a pattern, a call and a record literal: nothing to offer
             return False
-        ws, we, _, listed = slot
+        ws, we, close, listed = slot
         src = tr.source
+        # `(...) = user` of a name bound to a literal: its fields in that literal's order, as hover shows `user`
+        rhs = PATTERN_OF_NAME_RE.match(src, close + 1)
+        own = tr.bound.get(rhs[1]) if rhs else None
         word = src[ws:cursor] or PLACEHOLDER
         # an item before the word makes `(x) = y` a pattern too; not after it, where a `**rest` must stay last
         kw = "__byname_kw=, "
@@ -2069,7 +2074,7 @@ class Proxy:
         self.send_text(key, hidden, None)
         hpos = LineIndex(hidden).position(h)
         rng = {"start": tr.src_lines.position(ws), "end": tr.src_lines.position(we)}
-        self.pending[mid] = ("slot", (key, doc, rng, set(listed)))
+        self.pending[mid] = ("slot", (key, doc, rng, set(listed), own))
         sent = {"textDocument": {"uri": self.editor_uri(key)}, "position": hpos}
         self.send_server({**msg, "params": sent})
         return True
@@ -2550,7 +2555,10 @@ class Proxy:
             out.append(it)
         return {"isIncomplete": False, "items": out}
 
-    def finish_slot(self, result, key: Path | str, doc: Doc, rng: dict, listed: set[str]) -> dict:
+    def finish_slot(
+        self, result, key: Path | str, doc: Doc, rng: dict, listed: set[str], own: tuple[str, ...] | None = None
+    ) -> dict:
+        """own: the order of the literal the pattern's value was bound to, if it was (Translation.bound)."""
         latest = self.docs.get(key, [doc])[-1]
         self.send_text(key, latest.tr.hidden, latest)  # restore the real text
         items = result.get("items", []) if isinstance(result, dict) else (result or [])
@@ -2565,6 +2573,13 @@ class Proxy:
             it["textEdit"] = {"range": rng, "newText": it.get("insertText") or label}
             it.pop("insertText", None)
             out.append(it)
+        # a record's fields in the order written, as hover shows them (the checker's class is sorted): records stand
+        # in for tuples, so an order kept everywhere reads better. Not a record, or no order known: the checker's
+        fields = frozenset(it["label"] for it in out) | listed
+        own = own if own is not None and frozenset(own) == fields else None
+        if order := own or doc.tr.orders.get(fields) or PROJECT_ORDERS.get(fields):
+            for it in out:
+                it["sortText"] = f"{order.index(it['label']):04}"
         return {"isIncomplete": False, "items": out}
 
     def ruff_at(self, path: Path) -> tuple[str, Path | None]:
@@ -2799,8 +2814,9 @@ class Proxy:
                 self.finish_definition(msg, *method_doc[1])
                 return
             if method_doc and method_doc[0] == "slot":
-                key, doc, rng, listed = method_doc[1]
-                self.client.send({**msg, "result": self.finish_slot(msg.get("result"), key, doc, rng, listed)})
+                key, doc, rng, listed, own = method_doc[1]
+                result = self.finish_slot(msg.get("result"), key, doc, rng, listed, own)
+                self.client.send({**msg, "result": result})
                 return
             if method_doc and method_doc[0] == "record_type":
                 asked, key, doc, rng, given = method_doc[1]

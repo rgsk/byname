@@ -768,6 +768,37 @@ def complete(c, uri, text, marker="|"):
     return text, (res["items"] if isinstance(res, dict) else res)
 
 
+def in_menu_order(items: list[dict]) -> list[str]:
+    """Labels as VS Code lists them with nothing typed yet: by sortText, then by label."""
+    return [i["label"] for i in sorted(items, key=lambda i: (i.get("sortText", i["label"]), i["label"]))]
+
+
+def test_a_record_s_fields_complete_in_the_order_written(lsp):
+    # records stand in for tuples, so the order they're written in is offered everywhere, as hover shows it,
+    # not the checker's (its class is sorted): a pattern and a literal list them alike
+    c, root, uri = lsp
+    pre = (
+        MAIN + "type Outcome = (success: bool, mode: str, steps: int)\no: Outcome = (success=True, mode='m', steps=1)\n"
+    )
+    _, items = complete(c, uri, pre + "(|) = o\n")
+    assert in_menu_order(items) == ["success", "mode", "steps"]
+    _, items = complete(c, uri, pre + "(mode=, |) = o\n")
+    assert in_menu_order(items) == ["success", "steps"]
+    _, items = complete(c, uri, pre + "x: Outcome = (|)\n")
+    assert in_menu_order(items) == ["success=", "mode=", "steps="]
+    # a record with no type: its literal's order
+    _, items = complete(c, uri, MAIN + "u = (zip=1, city='c', age=2)\n(|) = u\n")
+    assert in_menu_order(items) == ["zip", "city", "age"]
+    # a name bound to a literal: that literal's order, as its hover shows, though the file wrote another first
+    two = MAIN + "u1 = (zip=1, city='c')\nu2 = (city='d', zip=2)\n"
+    _, items = complete(c, uri, two + "(|) = u2\n")
+    assert in_menu_order(items) == ["city", "zip"]
+    _, items = complete(c, uri, two + "(|) = u1\n")
+    assert in_menu_order(items) == ["zip", "city"]
+    _, items = complete(c, uri, two + "(|) = [u2][0]\n")  # not a name: the file's first order
+    assert in_menu_order(items) == ["zip", "city"]
+
+
 def test_a_spread_record_completes_while_a_line_is_half_typed(lsp):
     # `print(b2.)` doesn't parse: the known names are still read from the rest of the file, so b2 keeps
     # its exact type and `b2.` offers its fields, not the editor's word list
