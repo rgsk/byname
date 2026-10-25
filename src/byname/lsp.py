@@ -435,6 +435,8 @@ METHOD_RE = re.compile(
     r'Argument of type "_byname_Method" cannot be assigned to parameter "(\w+)" of type "None"'
     r'\s+in function "_byname_no_method"'
 )
+# what a member completion is asked after: `user2.` or `user2.na`
+MEMBER_OF_NAME_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\.\w*\Z")
 # what follows a pattern's `)` when its value is a bare name: `= user`, `: Final = user`
 PATTERN_OF_NAME_RE = re.compile(r"[ \t]*(?::[ \t]*[\w.]+[ \t]*)?=[ \t]*([A-Za-z_]\w*)[ \t]*(?:#.*)?$", re.M)
 SPREAD_RE = re.compile(r"_opn_\w*?___\d+_spread((?:__\w+?)*)(?![\w])")
@@ -1272,6 +1274,7 @@ class Proxy:
         self.hover_at: dict = {}  # hover request id -> its source position, for field_hover
         self.hover_markdown = False  # the editor reads hovers as markdown (initialize)
         self.hover_orders: dict = {}  # hover request id -> display orders, on a name bound from a literal
+        self.member_orders: dict = {}  # completion request id -> the order of the literal `x.` was bound to
         self.server_requests: dict = {}  # checker request id -> configuration items
         self.checker_commands: set[str] = set()  # its executeCommandProvider's, sent on as CHECKER_COMMAND + name
         self.last_completion: Doc | None = None
@@ -1672,6 +1675,10 @@ class Proxy:
             self.pending[mid] = (method, doc)
         if method == "textDocument/completion" and self.complete_slot(msg, key, doc):
             return
+        if method == "textDocument/completion" and mid is not None:  # `user2.`: the literal user2 was bound to
+            at = doc.tr.src_lines.offset(params["position"]["line"], params["position"]["character"])
+            if m := MEMBER_OF_NAME_RE.search(doc.tr.source, 0, at):
+                self.member_orders[mid] = doc.tr.bound.get(m[1])
         if isinstance(key, str) and (
             method == "textDocument/formatting" or (method == "textDocument/codeAction" and source_kind(params))
         ):
@@ -2905,6 +2912,7 @@ class Proxy:
                     msg = {**msg, "result": None if result is DROP else result}
                     if req == "textDocument/completion":
                         self.last_completion = doc
+                        fields_first(result, doc, self.member_orders.pop(mid, None))
             self.client.send(msg)
             return
 
@@ -3097,6 +3105,24 @@ def prefix_commands(value, names: set[str]):
     if isinstance(value, list) and value and isinstance(value[0], (dict, list)):
         return [prefix_commands(v, names) for v in value]
     return value
+
+
+def fields_first(result, doc: Doc, own: tuple[str, ...] | None) -> None:
+    """`rec.`: a record's fields before its methods (`keys`, which sorts first in the checker's group), in the order
+    written, as hover shows them; the rest as the checker sorts them. Fields are its constants (Final); they're a
+    record's when they're a field set the file or the project writes (Translation.orders), or `rec`'s own literal's
+    (own: Translation.bound)."""
+    items = result.get("items") if isinstance(result, dict) else result
+    if not isinstance(items, list):
+        return
+    consts = [it for it in items if isinstance(it, dict) and it.get("kind") == CONSTANT]
+    fields = frozenset(it["label"] for it in consts)
+    own = own if own is not None and frozenset(own) == fields else None
+    if not (order := own or doc.tr.orders.get(fields) or PROJECT_ORDERS.get(fields)):
+        return
+    for it in consts:
+        group = (it.get("sortText") or "").split(".", 1)[0] or "10"
+        it["sortText"] = f"{group}.0000.{order.index(it['label']):04}"
 
 
 def remap_tokens(

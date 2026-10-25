@@ -797,6 +797,11 @@ def test_a_record_s_fields_complete_in_the_order_written(lsp):
     assert in_menu_order(items) == ["zip", "city"]
     _, items = complete(c, uri, two + "(|) = [u2][0]\n")  # not a name: the file's first order
     assert in_menu_order(items) == ["zip", "city"]
+    # a dot read: the fields first, in the same order, then `keys` and the rest as the checker sorts them
+    _, items = complete(c, uri, pre + "print(o.|)\n")
+    assert in_menu_order(items)[:5] == ["success", "mode", "steps", "keys", "_asdict"]
+    _, items = complete(c, uri, two + "print(u2.|)\n")
+    assert in_menu_order(items)[:3] == ["city", "zip", "keys"]
 
 
 def test_a_spread_record_completes_while_a_line_is_half_typed(lsp):

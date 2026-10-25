@@ -115,7 +115,7 @@ fits `(dropout: float, lr: float)` as `tuple[int, float]` fits `tuple[float, flo
 `list[float]`.
 
 The written order is only for display: hover, printing, `_asdict()` and `**rec` show the fields as you
-wrote them, and the editor's completion offers them in that order, in a pattern and in a literal, so code
+wrote them, and the editor's completion offers them in that order, in a pattern, a literal and first after `rec.`, so code
 keeps one order without having to. To a checker, records with the same fields are the same type whatever the order, so
 `rs.append((age=1, name="a"))` on a list of `(name=, age=)` records is fine.
 
