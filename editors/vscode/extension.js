@@ -32,8 +32,9 @@ async function start() {
     "byname",
     { command, args, options: { cwd } },
     {
-      // .pyn, and .py and notebooks too: byname is the workspace's Python server (turn the BasedPyright
-      // extension off here). .py files and notebooks without `%load_ext byname` pass through untranslated
+      // .pyn, and .py and notebooks too: byname is the workspace's Python server (it asks for the
+      // BasedPyright extension to be disabled, see offerToDisableBasedPyright). .py files and notebooks
+      // without `%load_ext byname` pass through untranslated
       documentSelector: [
         { scheme: "file", language: "pyn" },
         { scheme: "file", language: "python" },
@@ -53,6 +54,25 @@ async function start() {
     }
   );
   await client.start();
+  if (cwd) offerToDisableBasedPyright(); // not awaited: the server runs while the question waits
+}
+
+// The BasedPyright extension checks this workspace's .py files a second time and can't see .pyn modules, so
+// a .py importing one shows "could not be resolved". No setting turns it off: disableLanguageServices stops
+// completion, definitions and references only, its errors stay, and a project's [tool.basedpyright] decides
+// over the editor's analysis settings. Only Disable (Workspace) does, which an extension can't do for another,
+// so byname asks. Once it's disabled, getExtension no longer finds it and the question stops
+async function offerToDisableBasedPyright() {
+  if (!vscode.extensions.getExtension("detachhead.basedpyright")) return; // not installed, or disabled
+  const show = "Show BasedPyright";
+  const choice = await vscode.window.showWarningMessage(
+    "The BasedPyright extension also checks this workspace's Python files, beside byname (which runs " +
+      "basedpyright itself), and it can't see .pyn modules, so imports of them show as errors. " +
+      "Disable it for this workspace: Disable (Workspace) on its page.",
+    show,
+    "Not now"
+  );
+  if (choice === show) await vscode.commands.executeCommand("extension.open", "detachhead.basedpyright");
 }
 
 // Alt+C: write <name>.pyn.py for the active file now (the server renders it, honouring outputStripMain)

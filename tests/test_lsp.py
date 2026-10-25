@@ -463,6 +463,31 @@ def test_the_editors_mode_applies_standard_by_default():
         assert out[0]["analysis"]["typeCheckingMode"] == out[1]["typeCheckingMode"] == want
 
 
+def test_disable_language_services_reaches_bynames_checker_as_sent():
+    # basedpyright.disableLanguageServices means the same for byname's checker as for the BasedPyright
+    # extension. byname doesn't use it to turn the extension off: it only stops completion, definitions and
+    # references there, and the extension's errors stay (see offerToDisableBasedPyright in extension.js)
+    from byname.lsp import Proxy
+
+    sent = {"disableLanguageServices": True, "analysis": {"typeCheckingMode": "strict"}}
+    (based,) = Proxy.inject_config([{"section": "basedpyright"}], [sent])
+    assert based == sent
+
+
+def test_the_checker_runs_on_bynames_interpreter_unless_the_editor_names_one():
+    # the venv byname runs from, so the project's packages resolve. "python" is the BasedPyright extension's
+    # declared default for python.pythonPath, sent once it's installed: the python on PATH, without them
+    from byname.lsp import Proxy
+
+    items = [{"section": "python"}]
+    for sent in (None, {}, {"pythonPath": ""}, {"pythonPath": "python"}):
+        (python,) = Proxy.inject_config(items, [sent])
+        assert python["pythonPath"] == sys.executable
+    chosen = "/opt/other/bin/python3"
+    (python,) = Proxy.inject_config(items, [{"pythonPath": chosen}])
+    assert python["pythonPath"] == chosen
+
+
 def test_a_project_config_decides_over_the_editors_settings(tmp_path):
     # with [tool.basedpyright], the checker ignores the editor's analysis settings, as for a .py in a plain
     # Python project: a global basedpyright.analysis.typeCheckingMode "off" doesn't silence .py or .pyn
@@ -483,11 +508,32 @@ def test_a_project_config_decides_over_the_editors_settings(tmp_path):
 
 
 def test_checker_commands_are_advertised_with_ours(lsp):
-    # byname is the only Python server in the editor, so basedpyright's commands come through too
+    # byname is the only Python server in the editor, so basedpyright's commands come through too, under
+    # byname.checker.: the BasedPyright extension registers basedpyright.* itself, and VS Code refuses a name
+    # registered twice (whichever client starts second fails)
     c, root, uri = lsp
     commands = c.init["capabilities"]["executeCommandProvider"]["commands"]
     assert "byname.server.writeOutput" in commands
-    assert any(cmd.startswith("basedpyright.") for cmd in commands)
+    assert "byname.checker.basedpyright.createtypestub" in commands
+    assert not any(cmd.startswith("basedpyright.") for cmd in commands)
+    # run under the new name, it reaches the checker by its own
+    res = c.request(
+        "workspace/executeCommand", {"command": "byname.checker.basedpyright.organizeimports", "arguments": [uri]}
+    )
+    assert res == {"changes": {}}
+
+
+def test_only_the_checkers_own_commands_get_the_prefix():
+    from byname.lsp import prefix_commands
+
+    checker = {"title": "Create stub", "command": "basedpyright.createtypestub", "arguments": ["x"]}
+    editors = {"title": "", "command": "editor.action.triggerParameterHints"}
+    result = [{"title": "Create stub", "kind": "quickfix", "command": checker}, {"label": "f", "command": editors}]
+    action, item = prefix_commands(result, {"basedpyright.createtypestub"})
+    assert action["command"] == {**checker, "command": "byname.checker.basedpyright.createtypestub"}
+    assert item["command"] == editors
+    tokens = {"data": [0, 1, 2, 3, 4]}
+    assert prefix_commands(tokens, {"basedpyright.createtypestub"}) == tokens
 
 
 def test_semantic_tokens_cover_only_source_text(lsp):

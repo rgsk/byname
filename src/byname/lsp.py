@@ -49,6 +49,9 @@ from .transform import DS, FIELDSET, ORDER, REPR, SHAPES, BynameError, pattern_s
 DEFAULT_CHECKER = ["basedpyright-langserver", "--stdio"]
 DROP = object()  # a result element whose position fell inside generated-only code
 WRITE_OUTPUT = "byname.server.writeOutput"  # executeCommand: write <file>.pyn.py now (Alt+C)
+# the checker's commands reach the editor under this prefix: the BasedPyright extension registers
+# basedpyright.* too, and VS Code refuses a command name registered twice
+CHECKER_COMMAND = "byname.checker."
 PLACEHOLDER = "__byname_slot"  # stands in for an empty pattern item while completing
 EXTRA_TRIGGERS = ["(", ","]  # pop completion in pattern slots, like TS does after `{` / `,`
 FIX_ALL_KIND, ORGANIZE_KIND = "source.fixAll", "source.organizeImports"  # ruff code actions, served by us
@@ -1232,6 +1235,7 @@ class Proxy:
         self.hover_markdown = False  # the editor reads hovers as markdown (initialize)
         self.hover_orders: dict = {}  # hover request id -> display orders, on a name bound from a literal
         self.server_requests: dict = {}  # checker request id -> configuration items
+        self.checker_commands: set[str] = set()  # its executeCommandProvider's, sent on as CHECKER_COMMAND + name
         self.last_completion: Doc | None = None
         self.counter = 0  # checker-side document versions
         self.temp_versions: set[int] = set()  # versions holding a completion-only temporary text
@@ -1542,6 +1546,9 @@ class Proxy:
         if method == "workspace/executeCommand" and params.get("command") == WRITE_OUTPUT:
             self.client.send(self.run_write_output(mid, (params.get("arguments") or [None])[0]))
             return
+        if method == "workspace/executeCommand" and params.get("command", "").startswith(CHECKER_COMMAND):
+            params = {**params, "command": params["command"].removeprefix(CHECKER_COMMAND)}
+            msg = {**msg, "params": params}
 
         if method and method.startswith("notebookDocument/"):
             self.on_notebook(msg)
@@ -2704,8 +2711,11 @@ class Proxy:
             elif section in ("python", "basedpyright"):
                 cfg = dict(out[i] or {})
                 cfg["analysis"] = analysis(cfg.get("analysis"), section == "basedpyright")
-                if section == "python":
-                    cfg.setdefault("pythonPath", sys.executable)
+                # byname's own interpreter, the project's venv, unless the editor names another. "python" is no
+                # choice: it's the default the BasedPyright extension declares for python.pythonPath, sent once
+                # that extension is installed, and it finds whatever python is on PATH
+                if section == "python" and cfg.get("pythonPath") in (None, "", "python"):
+                    cfg["pythonPath"] = sys.executable
                 out[i] = cfg
         return out
 
@@ -2764,6 +2774,8 @@ class Proxy:
                 return
             if method_doc and method_doc[0] == "textDocument/rename" and not isinstance(msg.get("result"), dict):
                 self.end_rename()  # no edits (or an error): nothing to map through the site translation
+            if "result" in msg and self.checker_commands:
+                msg = {**msg, "result": prefix_commands(msg["result"], self.checker_commands)}
             if (own := self.own_actions.pop(mid, None)) and "result" in msg:
                 result = self.to_editor(msg["result"], method_doc[1]) if msg["result"] else []
                 # ours first: they keep the code readable, where the checker offers an ignore comment
@@ -2785,7 +2797,8 @@ class Proxy:
                         "codeActionKinds": [*kinds, *(k for k in (FIX_ALL_KIND, ORGANIZE_KIND) if k not in kinds)],
                     }
                     ecp = caps.setdefault("executeCommandProvider", {"commands": []})
-                    ecp["commands"] = [*ecp.get("commands", []), WRITE_OUTPUT]
+                    self.checker_commands = set(ecp.get("commands", []))
+                    ecp["commands"] = [*(CHECKER_COMMAND + c for c in sorted(self.checker_commands)), WRITE_OUTPUT]
                     if stp := caps.get("semanticTokensProvider"):
                         stp["full"] = True  # we remap whole token lists; no delta support
                         types = stp.get("legend", {}).get("tokenTypes", [])
@@ -2956,6 +2969,21 @@ def still_shown(shown: list, new: list) -> list:
             left[key(d)] -= 1
             out.append(d)
     return out
+
+
+def prefix_commands(value, names: set[str]):
+    """A checker result with each Command of the checker's own (`names`, from its executeCommandProvider) under
+    CHECKER_COMMAND; the editor's (`editor.action.*`) stay as they are. A list of numbers (semantic tokens) is
+    passed over whole."""
+    if isinstance(value, dict):
+        out = {k: prefix_commands(v, names) for k, v in value.items()}
+        command = value.get("command")  # a CodeAction's is a Command, recursed into above
+        if isinstance(command, str) and command in names and "title" in value:  # a Command
+            out["command"] = CHECKER_COMMAND + value["command"]
+        return out
+    if isinstance(value, list) and value and isinstance(value[0], (dict, list)):
+        return [prefix_commands(v, names) for v in value]
+    return value
 
 
 def remap_tokens(

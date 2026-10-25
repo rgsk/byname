@@ -404,9 +404,13 @@ editor <--LSP--> byname lsp <--LSP--> basedpyright
 `byname lsp` translates each `.pyn` to Python in memory, hands it to basedpyright, and maps every
 position back. Hidden translations live in `~/.cache/byname/`, never in your project.
 
-**byname is the workspace's Python language server:** it serves `.pyn`, `.py` and Jupyter notebooks,
-so turn the BasedPyright (or Pylance) extension off in a workspace where byname is on. `.py` files and
-notebooks without `%load_ext byname` go to basedpyright as they are. In a notebook with
+**byname is the workspace's Python language server:** it serves `.pyn`, `.py` and Jupyter notebooks.
+Disable the BasedPyright (or Pylance) extension in a workspace where byname is on: it would check the
+`.py` files a second time, and it can't see `.pyn` modules, so a `.py` importing one shows "could not be
+resolved". Extensions view, *Disable (Workspace)*: that keeps it for your plain Python projects. Where
+byname starts and BasedPyright is still enabled, byname asks, with a button to its page.
+`"basedpyright.disableLanguageServices": true` isn't enough: it stops completion, definitions and
+references, and the extension's errors stay. byname's checker reads it too, as basedpyright does. `.py` files and notebooks without `%load_ext byname` go to basedpyright as they are. In a notebook with
 `%load_ext byname`, every cell is checked as `.pyn` (see [Notebooks](#notebooks)). In a plain Python
 project, use any language server you like.
 
