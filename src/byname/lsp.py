@@ -3096,8 +3096,9 @@ def remap_tokens(
     final_field: (readonly, static) modifier bits. A field read through a record type (`p.age` where
     `p: (age: int, ...)`) is a Final Protocol attribute, `readonly static`; a record's own field is just
     `static`. Dropping `readonly` from that pair colours both alike.
-    callable_types: a field name the checker colours as a function or method keeps that colour. A pattern
-    label reads an attribute (`(decode=d) = tok` is `d = tok.decode`), so it looks like `tok.decode`.
+    callable_types: a field name the checker colours as a function or method keeps that colour, as does one
+    it colours as a property (field_type), modifiers and all. A pattern label reads an attribute
+    (`(decode=d) = tok` is `d = tok.decode`), so it looks like `tok.decode`, and `(domain=d) = u` like `u.domain`.
     A bare `x=` (call, record, pattern, loop) is also the local `x`, and Ctrl+click goes there, so it takes
     the checker's colour for that local: `step=` passing a Final `step` is readonly like every other `step`,
     `(age=) = r` declares `age`. Only a renamed item's label stays a field or parameter."""
@@ -3131,8 +3132,11 @@ def remap_tokens(
         for fs, fe in doc.tr.shorthands:  # coloured as their locals, below; a loop's is real text already
             p = doc.tr.src_lines.position(fs)
             spans.discard((p["line"], p["character"], fe - fs))
-        callables = {t[:3] for t in tokens if t[3] in callable_types and t[:3] in spans}
-        tokens = [t for t in tokens if t[:3] not in callables or t[3] in callable_types]
+        # the checker's own colour wins where it gives one that reads as a field: a pattern's label is the
+        # attribute it reads (`(domain=d) = u` is `d = u.domain`, a readonly property there too)
+        kept = {*callable_types, field_type}
+        callables = {t[:3] for t in tokens if t[3] in kept and t[:3] in spans}
+        tokens = [t for t in tokens if t[:3] not in callables or t[3] in kept]
         tokens += [(*sp, field_type, 0) for sp in spans - callables]
     tokens = [t for t in tokens if t[:3] not in local_colours]
     tokens += [(*sp, *colour) for sp, colour in local_colours.items()]

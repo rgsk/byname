@@ -664,7 +664,8 @@ def test_a_shorthand_is_coloured_as_the_local_it_passes(lsp):
     assert got[(call, "step")] == [final_step], got  # the call passes the Final local
     assert got[(call, "lr")] == [("parameter", {"parameter"})], got  # it passes run's parameter
     assert got[(record, "step")] == [final_step], got
-    assert ("property", set()) in got[(renamed, "step")], got  # renamed: `step` is only the field
+    # renamed: `step` is only the field, coloured as a read of it, `rec.step` (a record's field is static)
+    assert got[(renamed, "step")] == [("property", {"classMember", "static"})], got
     assert got[(pattern, "rate")][0][0] == "variable", got  # `(rate=) = ...` declares the local `rate`
     assert got[(loop, "x")][0][0] == "variable", got
 
