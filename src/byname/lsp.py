@@ -70,8 +70,6 @@ NOTEBOOK_FORMAT, NOTEBOOK_FIX_ALL, NOTEBOOK_ORGANIZE = (
 METHOD, VARIABLE, CONSTANT = 2, 6, 21  # CompletionItemKind
 # a cell that makes the notebook's cells .pyn (IPython takes one module per %load_ext)
 LOAD_EXT_RE = re.compile(r"^[ \t]*%load_ext[ \t]+byname[ \t]*(?:#.*)?$", re.MULTILINE)
-# methods records and tuples bring along (byname's `keys`, tuple's); a class's own methods stay
-MACHINERY = {"keys", "count", "index"}
 
 
 # --- JSON-RPC framing ---------------------------------------------------------
@@ -2559,7 +2557,9 @@ class Proxy:
         out = []
         for it in items:
             label = it.get("label", "")
-            if label.startswith("_") or label in listed or (label in MACHINERY and it.get("kind") == METHOD):
+            # no method: a pattern takes data (transform's FIELD_PRELUDE). The checker rejects only one with
+            # its object bound in, but completion calls a staticmethod or a method read off its class a method too
+            if label.startswith("_") or label in listed or it.get("kind") == METHOD:
                 continue
             it = {k: v for k, v in it.items() if k not in ("textEdit", "additionalTextEdits", "data")}
             it["textEdit"] = {"range": rng, "newText": it.get("insertText") or label}

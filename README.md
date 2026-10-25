@@ -251,6 +251,8 @@ for (x=, y=) in pts: ...               # for-loop targets
 `can't destructure the method "append"`; it still runs, since Python binds it fine. Data is fine, a
 property, a function held in a field, a staticmethod or a module's function too: nothing is bound in.
 So is a method read off its class, `(greet=) = User`, called as `greet(u)`.
+Completion in a pattern offers no method at all: to it a staticmethod or a method read off its class is a
+method too, so those two are allowed but typed by hand.
 
 **When to destructure:** destructuring is tuple unpacking by name. Use it where Python would return a
 tuple: a bundle whose parts matter and whose whole doesn't (`(x=, y=) = get_batch()`,

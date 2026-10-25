@@ -1608,6 +1608,8 @@ def test_destructuring_reads_attributes_so_a_dict_does_not_destructure(tmp_path)
 def test_a_method_does_not_destructure(tmp_path):
     # `(append=) = users` would bind `users` into `append` out of sight, as TypeScript's `const { push } = arr`
     # loses `this`: a pattern takes data, so call a method on its object. The checker says so; nothing at runtime
+    # (and the editor's completion in a pattern slot offers no method: test_lsp's
+    # test_completion_on_a_class_instance_offers_its_data_not_its_methods)
     verdicts = checker(
         """\
         import os

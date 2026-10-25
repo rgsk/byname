@@ -825,12 +825,20 @@ def test_a_rest_hovers_as_the_fields_not_named_and_fields_complete_before_it(lsp
     assert [d["message"] for d in c.wait_diags(rest_uri) if d.get("severity", 1) == 1] == []
 
 
-def test_completion_on_a_class_instance_offers_methods(lsp):
-    # destructuring reads attributes, so methods and properties are slots too
+def test_completion_on_a_class_instance_offers_its_data_not_its_methods(lsp):
+    # destructuring reads attributes, so properties and functions held in fields are slots too; a method isn't,
+    # as the checker rejects one bound to its object. A staticmethod is a method to completion as well
     c, root, uri = lsp
-    cls = "class Tok:\n    def __init__(self): self.vocab_size = 65\n    def encode(self, s: str) -> list[int]: return []\n    @property\n    def n(self) -> int: return 1\n"
+    cls = (
+        "from typing import Callable\n"
+        "class Tok:\n    act: Callable[[int], int] = abs\n    def __init__(self): self.vocab_size = 65\n"
+        "    def encode(self, s: str) -> list[int]: return []\n    @property\n    def n(self) -> int: return 1\n"
+        "    @staticmethod\n    def zero() -> int: return 0\n"
+    )
     _, items = complete(c, uri, MAIN + cls + "(|) = Tok()\n")
-    assert {i["label"] for i in items} == {"encode", "n", "vocab_size"}
+    assert {i["label"] for i in items} == {"act", "n", "vocab_size"}
+    _, items = complete(c, uri, MAIN + "(|) = [1]\n")
+    assert items == []  # a list has only methods
 
 
 def test_replace_completes_and_checks_fields(lsp):
