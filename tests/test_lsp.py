@@ -1429,6 +1429,23 @@ def test_diagnostics_on_save_drops_fixed_errors_at_once(tmp_path):
     c.close()
 
 
+def test_diagnostics_on_save_holds_them_in_notebook_cells_until_the_notebook_is_saved(tmp_path):
+    # a notebook saves as a whole (notebookDocument/didSave): a cell's new error waits for it, a fixed one
+    # clears at once, as in a .pyn
+    c, root, uri = start(tmp_path, diagnosticsOnSave=True)
+    nb, cells = open_notebook(c, root, "held.ipynb", ["%load_ext byname", "x = 1\n"])
+    assert wait_errors(c, cells[1], []) == []  # the opened text counts as saved
+    edit_cell(c, nb, cells[1], 2, (1, 0), (1, 0), "print(nope)\n")
+    drain(c, 3)
+    assert errors(c.diags.get(cells[1], [])) == []  # typed, not saved: not shown
+    c.send({"method": "notebookDocument/didSave", "params": {"notebookDocument": {"uri": nb}}})
+    nope = [(1, True)]
+    assert wait_errors(c, cells[1], nope, key=lambda m: "nope" in m) == [(1, '"nope" is not defined')]
+    edit_cell(c, nb, cells[1], 3, (1, 0), (2, 0), "")  # deleted again, not saved
+    assert wait_errors(c, cells[1], []) == []
+    c.close()
+
+
 def test_pretty_record_type_protocols():
     assert pretty("p: _typ_name__age[str, int]") == "p: (name: str, age: int)"
     assert pretty("p: _opn_age[int]") == "p: (..., age: int)"

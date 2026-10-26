@@ -1297,9 +1297,10 @@ class Proxy:
         self.diags_filter = None
         self.filter_failed = False  # said once (window/showMessage); diagnostics go through unfiltered
         self.trees: dict[str, tuple[str, ast.Module | None]] = {}  # a .py's or plain cell's, by uri and text
-        self.saved: dict[Path, int | None] = {}  # editor version of the last saved text, per open .pyn
-        self.held: dict[Path, dict] = {}  # newest diagnostics not shown yet, per open .pyn
-        self.shown: dict[Path, list] = {}  # diagnostics the editor shows now, per open .pyn
+        # byname.diagnosticsOnSave, per open .pyn (by path) and byname notebook cell (by uri):
+        self.saved: dict[Path | str, int | None] = {}  # editor version of the last saved text
+        self.held: dict[Path | str, dict] = {}  # newest diagnostics not shown yet
+        self.shown: dict[Path | str, list] = {}  # diagnostics the editor shows now
         self.held_lock = threading.Lock()  # diagnostics arrive on the checker thread, saves on ours
         # a probe's answer sends the final text from the checker thread: never after a newer edit (probed)
         self.text_lock = threading.RLock()
@@ -1811,7 +1812,7 @@ class Proxy:
         self.cell_nb[td["uri"]] = nb.uri
 
     def close_cell(self, uri: str) -> None:
-        for d in (self.cell_text, self.cell_version, self.cell_nb):
+        for d in (self.cell_text, self.cell_version, self.cell_nb, self.saved, self.held, self.shown):
             d.pop(uri, None)
         if self.docs.pop(uri, None) is not None:  # its translated diagnostics have nowhere to go
             self.client.send(
@@ -1830,6 +1831,7 @@ class Proxy:
             self.notebooks[nb.uri] = nb
             for td in params.get("cellTextDocuments", []):
                 self.open_cell(nb, td)
+                self.saved[td["uri"]] = td.get("version")  # opened from disk: saved text (cells added later aren't)
             nb.byname = self.is_byname(nb)
             cells = [{**td, **self.cell_for_checker(nb, td["uri"])} for td in params.get("cellTextDocuments", [])]
             self.send_server({**msg, "params": {**params, "cellTextDocuments": cells}})
@@ -1844,6 +1846,11 @@ class Proxy:
                 self.close_cell(u)
             self.send_server(msg)
             return
+        if method == "notebookDocument/didSave":  # the whole notebook is saved: every cell's text is
+            for u in nb.cells:
+                if u in self.docs:  # a byname notebook's code cell
+                    self.release_held(u, self.cell_version.get(u))
+            return  # ours (diagnosticsOnSave); the checker didn't ask for notebook saves
         if method != "notebookDocument/didChange":
             self.send_server(msg)
             return
@@ -2883,7 +2890,8 @@ class Proxy:
                             self.final_field = (1 << mods.index("readonly"), 1 << mods.index("static"))
                     # notebooks: their cells are synced whole through notebookDocument/*, see on_notebook
                     caps["notebookDocumentSync"] = {
-                        "notebookSelector": [{"notebook": "jupyter-notebook", "cells": [{"language": "python"}]}]
+                        "notebookSelector": [{"notebook": "jupyter-notebook", "cells": [{"language": "python"}]}],
+                        "save": True,  # notebookDocument/didSave, for diagnosticsOnSave
                     }
                     cp = caps.setdefault("completionProvider", {})
                     have = cp.setdefault("triggerCharacters", [])
@@ -3005,17 +3013,16 @@ class Proxy:
         else:
             params.pop("version", None)
         msg = {**msg, "params": params}
-        if self.diags_on_save and isinstance(key, Path):  # a notebook saves as a whole: cells show them at once
-            path = key
+        if self.diags_on_save and key is not None:  # a .pyn, or a byname notebook's cell (saved with its notebook)
             with self.held_lock:
-                if doc.version != self.saved.get(path):
+                if doc.version != self.saved.get(key):
                     # unsaved text: new errors wait for the save, but fixed ones go away now
-                    self.held[path] = msg
-                    out = still_shown(self.shown.get(path, []), out)
+                    self.held[key] = msg
+                    out = still_shown(self.shown.get(key, []), out)
                     msg = {**msg, "params": {**params, "diagnostics": out}}
                 else:
-                    self.held.pop(path, None)
-                self.shown[path] = out
+                    self.held.pop(key, None)
+                self.shown[key] = out
         return msg
 
     def filtered(self, uri: str, source: str, tree, diags: list[dict], reveals: list | None = None) -> list[dict]:
@@ -3049,16 +3056,17 @@ class Proxy:
             hit = self.trees[uri] = (text, parse_around_errors(text))
         return hit[1]
 
-    def release_held(self, path: Path, version: int | None) -> None:
-        """On save: show the held diagnostics if they're for the saved text. If the checker hasn't
-        caught up yet, its diagnostics for this version go straight through when they arrive."""
+    def release_held(self, key: Path | str, version: int | None) -> None:
+        """On save (a .pyn's, or a cell's notebook's): show the held diagnostics if they're for the saved
+        text. If the checker hasn't caught up yet, its diagnostics for this version go straight through
+        when they arrive."""
         with self.held_lock:
-            self.saved[path] = version
-            held = self.held.get(path)
+            self.saved[key] = version
+            held = self.held.get(key)
             if held is None or held["params"].get("version") != version:
                 return
-            del self.held[path]
-            self.shown[path] = held["params"]["diagnostics"]
+            del self.held[key]
+            self.shown[key] = held["params"]["diagnostics"]
         self.client.send(held)
 
     # run ----------------------------------------------------------------

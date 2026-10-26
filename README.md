@@ -482,7 +482,7 @@ without byname) it stays off.
 | `byname.checker` | `[]` | checker command behind byname, e.g. `["pyright-langserver", "--stdio"]` (default: basedpyright) |
 | `byname.outputOnSave` | `false` | on save, write the translation next to the file as `<name>.pyn.py` |
 | `byname.outputStripMain` | `false` | leave the `if __name__ == "__main__":` block out of `<name>.pyn.py` |
-| `byname.diagnosticsOnSave` | `false` | new errors appear on save, not while typing; fixed ones disappear at once |
+| `byname.diagnosticsOnSave` | `false` | new errors appear on save, not while typing; fixed ones disappear at once. In a byname notebook, a cell's new errors appear when the notebook is saved |
 | `byname.pythonDiagnostics` | `true` | `false`: `.py` files and plain notebooks show no errors or warnings, only syntax errors and faded unused code (check them with `byname tool basedpyright`); `.pyn` always shows all |
 | `byname.checkerRules` | `{}` | checker rules turned on in the editor, over the project's own config, e.g. `{"reportAny": "warning"}` |
 | `byname.diagnosticsFilter` | `""` | `module:function` that decides which diagnostics show (see below) |
