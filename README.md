@@ -548,7 +548,8 @@ What runs never depends on the checker, so your code runs the same whichever one
 `byname format` runs `ruff format`. It swaps byname syntax for short plain-Python stand-ins, formats,
 then swaps them back:
 - **Width:** the stand-ins add a few characters per shorthand, so a line right at your length limit can wrap one step early.
-- **Reserved names:** files that use the names `__p` or `__P` are refused.
+- **Reserved names:** files that use the names `__p`, `__P`, `__T` or `__1` are refused.
+- **Trailing comma:** as in Ruff, a trailing comma keeps a bracket split one item per line, a one-field record type or pattern too: `(sex: str,)`.
 - **Keeping a line as written:** `# fmt: skip` works the same as in `.py` files.
 - **Grids:** if the first line inside a split bracket holds several items, later lines are packed up
   to its width instead of one item per line. Put one item on the first line to get Ruff's layout back.

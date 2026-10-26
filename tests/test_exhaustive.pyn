@@ -132,6 +132,23 @@ def test_a_trailing_comma_changes_nothing_but_the_formatting():
     assert short._fields == split._fields == ("name",)
 
 
+def test_the_trailing_comma_splits_a_one_field_type_and_pattern_too(tmp_path):
+    from byname.fmt import format_pyn
+
+    src = "type User = (name: str, details: (sex: str,))\n(x=,) = r\n"
+    assert format_pyn(src, cwd=tmp_path) == dedent("""\
+        type User = (
+            name: str,
+            details: (
+                sex: str,
+            ),
+        )
+        (
+            x=,
+        ) = r
+    """)
+
+
 def test_a_long_record_spans_lines():
     name, age = "rahul", 26
     r = (

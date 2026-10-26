@@ -5,6 +5,7 @@
     (x=, y=t) = r     -> __P[x:__p, y:t] = r       (a subscript is a valid assignment target)
     (x=, **rest) = r  -> __P[x:__p, *rest] = r    (so is a starred item in it)
     -> (x: int)       -> -> __T[x: int]            (record type)
+    (x: int,)         -> __T[x: int, __1,]         (one item: Ruff's comma isn't magic in `a[b,]`)
 
 Stand-ins are a few characters wider than the real syntax, so a line right at the length limit
 can wrap one step early.
@@ -37,6 +38,9 @@ from .tools import resolve
 from .transform import PAT, SHORT, TYP, transform
 
 
+ONE = "__1"  # a second item, so a one-item record type or pattern's trailing comma stays magic
+
+
 class FormatError(Exception):
     pass
 
@@ -46,13 +50,33 @@ class UnparsableError(FormatError):
 
 
 def encode(src: str) -> str:
-    if SHORT in src or PAT in src or TYP in src:
-        raise FormatError(f"source already uses the stand-in names {SHORT}/{PAT}/{TYP}")
+    if SHORT in src or PAT in src or TYP in src or ONE in src:
+        raise FormatError(f"source already uses the stand-in names {SHORT}/{PAT}/{TYP}/{ONE}")
     r = transform(src)
     out = src
     for start, end, text in reversed(r.standins):
         out = out[:start] + text + out[end:]
-    return out
+    return _pad_single(out)
+
+
+def _pad_single(code: str) -> str:
+    """code with ONE after each one-item `__T[x: int,]` / `__P[x:__p,]`: Ruff reads `a[b,]` as a
+    one-tuple, whose comma is required, so it would keep the record on one line."""
+    toks = list(tokenize.generate_tokens(io.StringIO(code).readline))
+    pair = _pairs(toks)
+    starts = [0]
+    for line in code.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+    inserts = []
+    for o, c in pair.items():
+        if o and toks[o - 1].string in (PAT, TYP) and toks[o].string == "[":
+            items = _items(toks, o, c, pair)
+            if items and len(items) == 1:
+                r, col = toks[items[0][1]].end
+                inserts.append(starts[r - 1] + col)
+    for at in sorted(inserts, reverse=True):
+        code = code[:at] + f" {ONE}," + code[at:]
+    return code
 
 
 def decode(code: str) -> str:
@@ -83,6 +107,8 @@ def decode(code: str) -> str:
         # x=__p / x:__p -> drop the value (colon handled with its pattern); __P( -> ( for records
         if t.string == SHORT or (t.string == PAT and toks[nxt(i)].string == "("):
             edits.append((off(t.start), off(t.end), ""))
+        elif t.string == ONE:  # `x: int,\n    __1,` -> `x: int,`
+            edits.append((off(toks[sig[pos[i] - 1]].end), off(toks[nxt(i)].end), ""))
         elif t.string in (PAT, TYP) and toks[nxt(i)].string == "[":  # pattern / record type
             o, c = nxt(i), pair[nxt(i)]
             sep = "=" if t.string == PAT else ": "

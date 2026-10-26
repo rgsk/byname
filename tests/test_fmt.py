@@ -110,6 +110,16 @@ def test_format_record_types(tmp_path):
     assert format_pyn(out, str(tmp_path / "f.pyn")) == out
 
 
+def test_one_item_record_type_and_pattern_keep_the_magic_trailing_comma(tmp_path):
+    # Ruff reads `__T[x: int,]` as a one-tuple subscript, whose comma isn't magic: a hidden second item keeps it so
+    src = "def f(x: (a: int,)) -> (b: int):\n    (c=,) = x\n"
+    out = format_pyn(src, cwd=tmp_path)
+    assert out == "def f(\n    x: (\n        a: int,\n    ),\n) -> (b: int):\n    (\n        c=,\n    ) = x\n"
+    assert format_pyn(out, cwd=tmp_path) == out
+    with pytest.raises(FormatError, match="stand-in"):
+        format_pyn("__1 = 1\n", cwd=tmp_path)
+
+
 def test_grid_packs_to_the_first_lines_width(tmp_path):
     # the first line sets the most a line may hold; ruff alone would put one item per line
     src = (
